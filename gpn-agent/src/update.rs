@@ -2365,6 +2365,14 @@ pub trait ConfirmProbe {
     fn elapsed_secs(&mut self) -> u64;
     /// Advance the clock (sleep in production, nothing under test).
     fn wait(&mut self, secs: u64);
+
+    /// Positive evidence that security software stopped the build (#209).
+    ///
+    /// Default `None`: a probe that cannot tell must never turn a dead process
+    /// into "blocked by security software".
+    fn security_block(&mut self) -> Option<String> {
+        None
+    }
 }
 
 /// Why the gate gave up. Each names the signal that failed.
@@ -2385,14 +2393,23 @@ pub enum ConfirmFailure {
         process_up: Option<bool>,
         last_rpc: String,
     },
+    /// D (#209): the build never got to run because security software stopped
+    /// it — the file was quarantined, or the loader was refused access.
+    ///
+    /// Chosen **only** on positive evidence (see [`detect_security_block`]); a
+    /// node that merely failed to start is still [`ProcessGone`]. This exists so
+    /// the operator is told "blocked by security software" instead of a generic
+    /// timeout for a cause that no retry can fix.
+    BlockedBySecuritySoftware { at_secs: u64, evidence: String },
 }
 
 impl ConfirmFailure {
-    /// Which of the two signals failed: `"process"` or `"rpc"`.
+    /// Which signal failed: `"process"`, `"rpc"` or `"security"`.
     pub fn signal(&self) -> &'static str {
         match self {
             ConfirmFailure::ProcessGone { .. } => "process",
             ConfirmFailure::RpcDown { .. } => "rpc",
+            ConfirmFailure::BlockedBySecuritySoftware { .. } => "security",
         }
     }
 
@@ -2400,6 +2417,7 @@ impl ConfirmFailure {
         match self {
             ConfirmFailure::ProcessGone { at_secs, .. } => *at_secs,
             ConfirmFailure::RpcDown { at_secs, .. } => *at_secs,
+            ConfirmFailure::BlockedBySecuritySoftware { at_secs, .. } => *at_secs,
         }
     }
 
@@ -2428,7 +2446,145 @@ impl ConfirmFailure {
                     "confirm failed: signal=rpc ({proc_txt}) after {at_secs} s — {expected} not confirmed; last rpc: {last_rpc}"
                 )
             }
+            ConfirmFailure::BlockedBySecuritySoftware { at_secs, evidence } => format!(
+                "confirm failed: signal=security (blocked by security software) after {at_secs} s — \
+                 {expected} was stopped before it could run: {evidence}; this is not a timeout and a \
+                 retry will not fix it — exclude {} and {} from antivirus/Defender scanning \
+                 (install.ps1 asks before doing this, or run fix-defender.ps1 -Consent yes)",
+                SECURITY_EXCLUSION_PATHS[0], SECURITY_EXCLUSION_PATHS[1]
+            ),
         }
+    }
+}
+
+/// The two stable paths a Windows install excludes from security scanning
+/// (#209). File-level on purpose: a directory exclusion trusts anything that
+/// lands in a writable folder.
+pub const SECURITY_EXCLUSION_PATHS: [&str; 2] = [
+    r"C:\gpn\bin\gpn-node.exe",
+    r"C:\gpn\data\update\current\gpn-node.exe",
+];
+
+/// NTSTATUS `STATUS_ACCESS_DENIED` — the loader was refused permission to map
+/// the image. The signature of an antivirus/policy block.
+pub const STATUS_ACCESS_DENIED: u32 = 0xC000_0022;
+/// NTSTATUS `STATUS_DLL_NOT_FOUND`. Ambiguous on its own (a missing VC++
+/// runtime also produces it), so it only counts as security evidence when the
+/// text also names security software.
+pub const STATUS_DLL_NOT_FOUND: u32 = 0xC000_0135;
+
+/// Does this text name security software, a quarantine, or a policy block?
+/// Deliberately specific: "access is denied" alone is not enough (a file lock
+/// says that too).
+pub fn mentions_security_software(text: &str) -> bool {
+    let low = text.to_ascii_lowercase();
+    [
+        "virus",
+        "threat",
+        "quarantin",
+        "antivirus",
+        "anti-virus",
+        "security software",
+        "windows defender",
+        "blocked by policy",
+        "operation did not complete successfully",
+        "this program is blocked",
+        "0xc0000022",
+    ]
+    .iter()
+    .any(|n| low.contains(n))
+}
+
+/// The exit code a Windows image left, out of a `last-exit.json` record. The
+/// record stores it signed (Rust `i64`) or unsigned, so both are accepted.
+fn exit_code_from_last_exit(last_exit: &str) -> Option<i64> {
+    let line = last_exit.lines().rev().find(|l| !l.trim().is_empty())?;
+    let v: serde_json::Value = serde_json::from_str(line).ok()?;
+    for key in ["exit_code", "code", "status"] {
+        if let Some(n) = v.get(key).and_then(|c| c.as_i64()) {
+            return Some(n);
+        }
+        if let Some(s) = v.get(key).and_then(|c| c.as_str()) {
+            if let Some(h) = s.trim().strip_prefix("0x") {
+                if let Ok(n) = i64::from_str_radix(h, 16) {
+                    return Some(n);
+                }
+            }
+            if let Ok(n) = s.trim().parse::<i64>() {
+                return Some(n);
+            }
+        }
+    }
+    None
+}
+
+fn exit_code_says_access_denied(code: i64) -> bool {
+    code as u32 == STATUS_ACCESS_DENIED
+}
+
+fn exit_code_says_dll_not_found(code: i64) -> bool {
+    code as u32 == STATUS_DLL_NOT_FOUND
+}
+
+/// Positive evidence that security software stopped the build from starting.
+///
+/// Evidence, in order of reliability:
+/// 1. the binary that should be there is **gone** while its directory exists —
+///    what a quarantine does (it deletes the file it blocked);
+/// 2. the exit record carries `0xC0000022` (access denied to the image);
+/// 3. `0xC0000135` **plus** a security-software phrase in the same text.
+///
+/// Everything else returns `None`. Guessing here would put "blocked by
+/// security software" on every ordinary crash, which is worse than the timeout
+/// this replaces. `exists` is injected so the rule is testable without Windows.
+pub fn detect_security_block(
+    expected_exes: &[PathBuf],
+    exists: &dyn Fn(&Path) -> bool,
+    last_exit: &str,
+) -> Option<String> {
+    let mut reasons: Vec<String> = Vec::new();
+
+    // 0. The evidence text itself names the block (Defender/PowerShell wording,
+    //    e.g. "Operation did not complete successfully because the file
+    //    contains a virus or potentially unwanted software").
+    if mentions_security_software(last_exit) {
+        let line = last_exit
+            .lines()
+            .rev()
+            .find(|l| mentions_security_software(l))
+            .unwrap_or("")
+            .trim()
+            .to_string();
+        reasons.push(format!("the exit evidence says: {line}"));
+    }
+
+    // 1. A quarantined file is deleted. Only a path whose parent directory is
+    //    present counts: "never installed" is not evidence of a block.
+    for exe in expected_exes {
+        let parent_exists = exe.parent().map(exists).unwrap_or(false);
+        if parent_exists && !exists(exe.as_path()) {
+            reasons.push(format!("{} is missing from its directory", exe.display()));
+        }
+    }
+
+    // 2/3. The exit code, from the newest `last-exit.json` record.
+    if let Some(code) = exit_code_from_last_exit(last_exit) {
+        if exit_code_says_access_denied(code) {
+            reasons.push(format!(
+                "the loader refused access to the image (exit 0x{:08X} STATUS_ACCESS_DENIED)",
+                code as u32
+            ));
+        } else if exit_code_says_dll_not_found(code) && mentions_security_software(last_exit) {
+            reasons.push(format!(
+                "the image could not load (exit 0x{:08X}) and the exit record names security software", code as u32
+            ));
+        }
+    }
+
+    if reasons.is_empty() {
+        None
+    } else {
+        Some(reasons.join("; "))
     }
 }
 
@@ -2507,6 +2663,18 @@ pub fn wait_for_confirm(
 
         // C: it was alive and now it is not. Hard failure, immediate.
         if saw_alive && alive == Some(false) {
+            // #209: before calling this an ordinary death, ask the probe for
+            // positive evidence of a security-software block. Only positive
+            // evidence is accepted; `None` keeps the plain ProcessGone path.
+            if let Some(evidence) = probe.security_block() {
+                log(&format!(
+                    "confirm: process=down rpc=no {elapsed}s — blocked by security software: {evidence}"
+                ));
+                return ConfirmOutcome::Failed(ConfirmFailure::BlockedBySecuritySoftware {
+                    at_secs: elapsed,
+                    evidence,
+                });
+            }
             log(&format!(
                 "confirm: process=down rpc=no {elapsed}s — the process exited before it confirmed"
             ));
@@ -2518,6 +2686,15 @@ pub fn wait_for_confirm(
         }
         // C, the other half: it never appeared at all.
         if !saw_alive && alive == Some(false) && elapsed >= CONFIRM_START_GRACE_SECS {
+            if let Some(evidence) = probe.security_block() {
+                log(&format!(
+                    "confirm: process=down rpc=no {elapsed}s — blocked by security software: {evidence}"
+                ));
+                return ConfirmOutcome::Failed(ConfirmFailure::BlockedBySecuritySoftware {
+                    at_secs: elapsed,
+                    evidence,
+                });
+            }
             log(&format!(
                 "confirm: process=down rpc=no {elapsed}s — no process in the expected version tree"
             ));
@@ -2560,6 +2737,20 @@ pub fn wait_for_confirm(
                 "confirm: giving up at {elapsed}s (ceiling {}s)",
                 deadlines.ceiling_secs
             ));
+            // #209: a node that never appeared, or whose liveness cannot be
+            // read, may be a blocked image. Only when the process is NOT known
+            // to be up: an RPC failure beside a running node is not a block.
+            if alive != Some(true) && !saw_alive {
+                if let Some(evidence) = probe.security_block() {
+                    log(&format!(
+                        "confirm: blocked by security software at the ceiling: {evidence}"
+                    ));
+                    return ConfirmOutcome::Failed(ConfirmFailure::BlockedBySecuritySoftware {
+                        at_secs: elapsed,
+                        evidence,
+                    });
+                }
+            }
             return ConfirmOutcome::Failed(ConfirmFailure::RpcDown {
                 at_secs: elapsed,
                 process_up: alive.or(if saw_alive { Some(true) } else { None }),
@@ -2634,6 +2825,10 @@ pub enum Remediation {
     },
     /// A missing/corrupt keystore or node-key: no heroic repair. Roll back.
     FatalConfig { cause: String },
+    /// #209: security software quarantined or refused the image. Never
+    /// actionable — a retry re-runs the same blocked file. Named so the
+    /// operator's report says what happened instead of "unrecognised exit".
+    BlockedBySecuritySoftware { cause: String },
     /// Everything else: roll back and quote the evidence.
     Unknown { detail: String },
 }
@@ -2670,6 +2865,11 @@ impl Remediation {
             ),
             Remediation::FatalConfig { cause } => format!(
                 "remediate: {cause} -> no automatic repair; report the exact file and roll back"
+            ),
+            Remediation::BlockedBySecuritySoftware { cause } => format!(
+                "remediate: blocked by security software ({cause}) -> a retry re-runs the same blocked \
+                 file; exclude {} and {} from antivirus/Defender scanning and roll back",
+                SECURITY_EXCLUSION_PATHS[0], SECURITY_EXCLUSION_PATHS[1]
             ),
             Remediation::Unknown { detail } => format!(
                 "remediate: unrecognised exit ({detail}) -> roll back and quote the last log lines"
@@ -2756,6 +2956,13 @@ pub fn classify_start_failure(ctx: &StartFailureContext<'_>) -> Remediation {
         return Remediation::OrphanedFamily {
             cause: "lock held by another process".to_string(),
         };
+    }
+
+    // #209: an antivirus/Defender block looks like an ordinary death unless the
+    // evidence says otherwise. Checked before pruning/key because the block's
+    // text can name anything (it quotes the file it removed).
+    if let Some(cause) = detect_security_block(&[], &|_| true, &text) {
+        return Remediation::BlockedBySecuritySoftware { cause };
     }
 
     if lower.contains("incompatible pruning modes") {
@@ -5383,6 +5590,8 @@ mod tests {
         rpc: Vec<Result<String, String>>,
         elapsed: u64,
         polls: usize,
+        /// #209: evidence the "security software blocked it" branch returns.
+        security: Option<String>,
     }
 
     impl ScriptedProbe {
@@ -5392,7 +5601,12 @@ mod tests {
                 rpc,
                 elapsed: 0,
                 polls: 0,
+                security: None,
             }
+        }
+        fn with_security(mut self, evidence: &str) -> Self {
+            self.security = Some(evidence.to_string());
+            self
         }
     }
 
@@ -5414,6 +5628,9 @@ mod tests {
         }
         fn wait(&mut self, secs: u64) {
             self.elapsed += secs;
+        }
+        fn security_block(&mut self) -> Option<String> {
+            self.security.clone()
         }
     }
 
@@ -5594,6 +5811,160 @@ mod tests {
             }
             other => panic!("expected a failure, got {other:?}"),
         }
+    }
+
+    // ── #209: a blocked binary names the block, never a timeout ─────────────
+
+    /// The block is chosen only when the probe has positive evidence, and the
+    /// report names security software and the two paths rather than a timeout.
+    #[test]
+    fn a_quarantined_binary_is_reported_as_blocked_by_security_software() {
+        let mut probe = ScriptedProbe::new(
+            vec![Some(true), Some(false)],
+            vec![Err("connection refused".into())],
+        )
+        .with_security("C:\\gpn\\bin\\gpn-node.exe is missing from its directory");
+        let mut log = Vec::new();
+        let out = wait_for_confirm(&mut probe, "0.3.61", confirm_deadlines(true), |l| {
+            log.push(l.to_string())
+        });
+        match out {
+            ConfirmOutcome::Failed(f @ ConfirmFailure::BlockedBySecuritySoftware { .. }) => {
+                assert_eq!(f.signal(), "security");
+                let text = f.describe("0.3.61");
+                assert!(text.contains("security software"), "{text}");
+                assert!(text.contains("not a timeout"), "{text}");
+                assert!(text.contains(r"C:\gpn\bin\gpn-node.exe"), "{text}");
+                assert!(
+                    text.contains(r"C:\gpn\data\update\current\gpn-node.exe"),
+                    "{text}"
+                );
+                // The time is the moment it died, not the 900 s ceiling.
+                assert_eq!(f.at_secs(), 2, "{text}");
+            }
+            other => panic!("expected a security failure, got {other:?}"),
+        }
+        assert!(
+            log.iter()
+                .any(|l| l.contains("blocked by security software")),
+            "{log:?}"
+        );
+    }
+
+    /// A node that never appears and whose binary is gone is a block too, not a
+    /// 900 s wait: this is the shape a quarantine leaves behind.
+    #[test]
+    fn a_node_that_never_appears_beside_a_missing_binary_is_a_security_block() {
+        let mut probe = ScriptedProbe::new(vec![Some(false)], vec![Err("refused".into())])
+            .with_security("gpn-node.exe is missing from its directory");
+        let d = ConfirmDeadlines {
+            window_secs: 4,
+            ceiling_secs: 4,
+        };
+        let out = wait_for_confirm(&mut probe, "0.3.61", d, |_| {});
+        match out {
+            ConfirmOutcome::Failed(f @ ConfirmFailure::BlockedBySecuritySoftware { .. }) => {
+                assert_eq!(f.signal(), "security");
+                assert!(f.at_secs() <= 6, "reported at {} s", f.at_secs());
+            }
+            other => panic!("expected a security failure, got {other:?}"),
+        }
+    }
+
+    /// A node that IS up but whose RPC never answers must never be reported as
+    /// blocked, even if the probe has some other file evidence.
+    #[test]
+    fn a_running_node_with_a_silent_rpc_is_not_a_security_block() {
+        let mut probe = ScriptedProbe::new(vec![Some(true)], vec![Err("refused".into())])
+            .with_security("gpn-node.exe is missing from its directory");
+        let d = ConfirmDeadlines {
+            window_secs: 2,
+            ceiling_secs: 2,
+        };
+        let out = wait_for_confirm(&mut probe, "0.3.61", d, |_| {});
+        match out {
+            ConfirmOutcome::Failed(f @ ConfirmFailure::RpcDown { .. }) => {
+                assert_eq!(f.signal(), "rpc");
+            }
+            other => panic!("expected RpcDown, got {other:?}"),
+        }
+    }
+
+    /// The same death with no evidence is still an ordinary process failure:
+    /// the branch must not guess.
+    #[test]
+    fn a_dead_process_without_evidence_stays_a_process_failure() {
+        let mut probe =
+            ScriptedProbe::new(vec![Some(true), Some(false)], vec![Err("refused".into())]);
+        let out = wait_for_confirm(&mut probe, "0.3.61", confirm_deadlines(true), |_| {});
+        match out {
+            ConfirmOutcome::Failed(f @ ConfirmFailure::ProcessGone { .. }) => {
+                assert_eq!(f.signal(), "process");
+            }
+            other => panic!("expected ProcessGone, got {other:?}"),
+        }
+    }
+
+    /// The evidence rule itself, with a fake filesystem: a deleted file beside
+    /// a real directory is a quarantine; a directory that never existed is not.
+    #[test]
+    fn security_evidence_needs_a_vanished_file_or_an_access_denied_exit() {
+        let exe = PathBuf::from(r"C:\gpn\bin\gpn-node.exe");
+        let dir = PathBuf::from(r"C:\gpn\bin");
+
+        // (a) the directory exists and the binary is gone -> quarantine shape.
+        let gone = |p: &Path| p != exe.as_path();
+        let ev = detect_security_block(&[exe.clone()], &gone, "").expect("missing exe is evidence");
+        assert!(ev.contains("gpn-node.exe is missing"), "{ev}");
+
+        // (b) nothing installed at all -> no evidence; this is a fresh box.
+        let empty = |_p: &Path| false;
+        assert_eq!(detect_security_block(&[exe.clone()], &empty, ""), None);
+
+        // (c) everything present and a silent exit -> no evidence.
+        let present = |_p: &Path| true;
+        assert_eq!(detect_security_block(&[exe.clone()], &present, ""), None);
+
+        // (d) STATUS_ACCESS_DENIED in the exit ledger, signed or unsigned.
+        let signed = r#"{"kind":"spawn-error","exit_code":-1073741790}"#;
+        let ev = detect_security_block(&[exe.clone()], &present, signed).expect("0xC0000022");
+        assert!(ev.contains("0xC0000022"), "{ev}");
+        let unsigned = r#"{"kind":"spawn-error","exit_code":3221225506}"#;
+        assert!(detect_security_block(&[exe.clone()], &present, unsigned).is_some());
+        let hexed = r#"{"kind":"spawn-error","exit_code":"0xc0000022"}"#;
+        assert!(detect_security_block(&[exe.clone()], &present, hexed).is_some());
+
+        // (e) STATUS_DLL_NOT_FOUND alone is the missing-VC++-runtime case, not
+        // a block; only a security-software phrase makes it evidence.
+        let dll = r#"{"kind":"spawn-error","exit_code":-1073741515}"#;
+        assert_eq!(detect_security_block(&[exe.clone()], &present, dll), None);
+        let dll_av = r#"{"kind":"spawn-error","exit_code":-1073741515,"detail":"Windows Defender blocked this file"}"#;
+        assert!(detect_security_block(&[exe], &present, dll_av).is_some());
+
+        // (f) the wording Defender itself uses.
+        assert!(mentions_security_software(
+            "Operation did not complete successfully because the file contains a virus or potentially unwanted software"
+        ));
+        assert!(!mentions_security_software("thread 'main' panicked"));
+    }
+
+    /// The classifier gives the block a name and its own log line, and marks it
+    /// non-actionable (a retry re-runs the same blocked file).
+    #[test]
+    fn a_blocked_image_is_classified_as_security_software_and_not_retried() {
+        let tail = vec![
+            "Windows Defender Antivirus has quarantined gpn-node.exe".to_string(),
+            "Operation did not complete successfully because the file contains a virus".to_string(),
+        ];
+        let r = classify_start_failure(&ctx("", &tail));
+        match &r {
+            Remediation::BlockedBySecuritySoftware { .. } => {}
+            other => panic!("expected BlockedBySecuritySoftware, got {other:?}"),
+        }
+        assert!(!r.is_actionable(), "a retry re-runs the same blocked file");
+        let line = r.log_line();
+        assert!(line.contains("blocked by security software"), "{line}");
+        assert!(line.contains(r"C:\gpn\bin\gpn-node.exe"), "{line}");
     }
 
     // ── #207 remediation: classify, fix, retry exactly once ──────────────────

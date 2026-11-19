@@ -108,6 +108,15 @@ Check ($m.Kind -eq 'unknown' -and -not $m.Actionable -and $m.Detail -match 'pani
 $m = Get-Remediation -Evidence (E '' @('Error: failed to bind JSON-RPC 127.0.0.1:9944: Address already in use')) -Port 9944
 Check ($m.Kind -eq 'port-foreign') 'bind error with no identifiable gpn owner -> foreign, not touched'
 
+# -- #209: a blocked image is named, not buried in "unrecognised exit" --------
+$m = Get-Remediation -Evidence (E '' @('Operation did not complete successfully because the file contains a virus or potentially unwanted software')) -Port 9944
+Check ($m.Kind -eq 'security' -and -not $m.Actionable) 'quarantine wording -> security, never retried'
+Check ($m.Line -match 'blocked by security software' -and $m.Line -match 'gpn-node\.exe') 'security line names the cause and the paths'
+$m = Get-Remediation -Evidence (E '{"kind":"spawn-error","exit_code":-1073741790}' @()) -Port 9944
+Check ($m.Kind -eq 'security') 'STATUS_ACCESS_DENIED in last-exit -> security'
+$m = Get-Remediation -Evidence (E '{"kind":"spawn-error","exit_code":-1073741515}' @()) -Port 9944
+Check ($m.Kind -ne 'security') 'a bare 0xC0000135 (missing VC++ runtime) is NOT called a block'
+
 # -- the port owner that IS the build under test must not be stopped ---------
 $child = Start-Process -FilePath 'sleep' -ArgumentList '20' -PassThru
 Start-Sleep -Milliseconds 300
@@ -162,6 +171,34 @@ Check ($script:stopped -eq 1) ('second failure: exactly one remediation (stopped
 Check ($r.Reason -match 'remediated once' -and $r.Reason -match 'retry then failed') 'second failure: says what was tried'
 $logs = Get-Content $LogPath -Raw
 Check (([regex]::Matches($logs, 'remediate: lock held by another process')).Count -le 1) 'second failure: it does not loop'
+
+# -- #209: the confirm report says "blocked by security software", ----------
+# -- not a generic timeout, and it does not spend the remediation -----------
+Reset-Log
+$script:phase = 0
+$script:stopped = 0
+function global:Test-NodeAlive { param([string]$Version) return $false }
+function global:Invoke-RestMethod { throw 'connection refused' }
+function global:Get-StartEvidence { return @{ LastExit = ''; Tail = @() } }
+# A version tree that exists with no binary in it is the shape a quarantine
+# leaves behind; this run must report it as a security block.
+$verDir = Join-Path (Join-Path (Join-Path $tmpRoot 'gpn') 'data\update\versions') '0.3.99'
+New-Item -ItemType Directory -Force -Path $verDir | Out-Null
+$savedCeil = $ConfirmCeilingSecs
+$savedFirst = $ConfirmFirstStartSecs
+$ConfirmCeilingSecs = 1
+$ConfirmFirstStartSecs = 1
+$r = Confirm-Update -Expect '0.3.99' -FirstStart $true
+$ConfirmCeilingSecs = $savedCeil
+$ConfirmFirstStartSecs = $savedFirst
+Check (-not $r.Ok) 'security: the update is reported as not confirmed'
+Check ($r.Signal -eq 'security') ('security: signal is security, not rpc/process (got ' + $r.Signal + ')')
+Check ($r.Reason -match 'blocked by security software') 'security: the reason says blocked by security software'
+Check ($r.Reason -match 'not a timeout') 'security: it says this is not a timeout'
+Check ($r.Reason -match 'gpn-node\.exe') 'security: the reason names the binaries to exclude'
+Check ($script:stopped -eq 0) 'security: no remediation is attempted'
+$logs = Get-Content $LogPath -Raw
+Check ($logs -match 'blocked by security software') 'security: the log carries the same finding'
 
 Remove-Item -Recurse -Force $tmpRoot -ErrorAction SilentlyContinue
 Write-Host ("FAILURES: " + $script:fail)

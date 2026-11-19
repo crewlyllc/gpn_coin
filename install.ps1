@@ -96,6 +96,9 @@ $NoOllamaInstall = $false
 $RunHighest = $false
 $Verify     = $false
 $UpdateTaskOnly = $false
+# #209: --defender-exclusion / --no-defender-exclusion (and GPN_DEFENDER_EXCLUSION).
+# Empty means "ask" -- and a non-interactive run answers "no".
+$DefenderConsentFlag = ''
 # Fast sync: bootstrap from the weekly signed snapshot, as install.sh does.
 # OFF only via --no-fast-sync / GPN_FAST_SYNC=0.
 $FastSync = $true
@@ -117,6 +120,8 @@ for ($i = 0; $i -lt $args.Count; $i++) {
     '^-{1,2}no-?fast-?sync$'               { $FastSync = $false }
     '^-{1,2}fast-?sync$'                   { $FastSync = $true }
     '^-{1,2}update-?task-?only$'           { $UpdateTaskOnly = $true }
+    '^-{1,2}defender-?exclusions?$'        { $DefenderConsentFlag = 'yes' }
+    '^-{1,2}no-?defender-?exclusions?$'    { $DefenderConsentFlag = 'no' }
     '^-{1,2}install-?dir[=:](.+)$'         { $InstallDir = $Matches[1] }
     '^-{1,2}install-?dir$' {
       if ($i + 1 -lt $args.Count) { $i++; $InstallDir = [string]$args[$i] }
@@ -1246,6 +1251,44 @@ function Get-StartEvidence {
   return @{ LastExit = $lastExit; Tail = $tail }
 }
 
+# #209: positive evidence that security software stopped the build. Same rules
+# as the Rust gate (gpn-agent/src/update.rs `detect_security_block`): a named
+# block in the evidence, a binary that is gone beside a directory that exists,
+# or STATUS_ACCESS_DENIED. Returns '' when there is no evidence -- never a guess.
+function Get-SecurityBlockEvidence {
+  param($Evidence, [string]$Version)
+  $text = ([string]$Evidence.LastExit) + "`n" + (@($Evidence.Tail) -join "`n")
+  $low = $text.ToLowerInvariant()
+  $why = @()
+
+  foreach ($needle in @('virus', 'threat', 'quarantin', 'antivirus', 'anti-virus',
+                        'security software', 'windows defender', 'blocked by policy',
+                        'operation did not complete successfully', '0xc0000022')) {
+    if ($low.Contains($needle)) {
+      $hit = @($text -split "`n" | Where-Object { $_.ToLowerInvariant().Contains($needle) } | Select-Object -Last 1)
+      $why += ('the exit evidence says: ' + ([string]$hit[0]).Trim())
+      break
+    }
+  }
+
+  # Only the version tree and the `current` junction: bin\ may legitimately
+  # lack gpn-node.exe, and "missing" there is not evidence of anything.
+  $trees = if ($Version) { @((Get-ExpectedTrees $Version) | Select-Object -First 2) } else { @() }
+  foreach ($tree in $trees) {
+    $exe = Join-Path $tree 'gpn-node.exe'
+    if ((Test-Path -LiteralPath $tree) -and -not (Test-Path -LiteralPath $exe)) {
+      $why += ($exe + ' is missing from its directory')
+    }
+  }
+
+  if ($low -match '0xc0000022|-1073741790|3221225506') {
+    $why += 'the loader refused access to the image (STATUS_ACCESS_DENIED / 0xC0000022)'
+  }
+
+  if ($why.Count -eq 0) { return '' }
+  return ($why -join '; ')
+}
+
 # Classify a failed start. Returns @{ Kind; Actionable; Line; Stored }.
 function Get-Remediation {
   param($Evidence, [int]$Port)
@@ -1256,6 +1299,17 @@ function Get-Remediation {
     return @{ Kind = 'lock'; Actionable = $true;
       Line = 'remediate: lock held by another process -> stop the orphaned gpn family children-first, then retry' }
   }
+  # #209: name the block before anything else that shares its wording. A block
+  # is never actionable: a retry re-runs the same blocked file.
+  $sec = Get-SecurityBlockEvidence -Evidence $Evidence -Version $script:ConfirmExpectVersion
+  if ($sec) {
+    return @{ Kind = 'security'; Actionable = $false; Evidence = $sec;
+      Line = ('remediate: blocked by security software (' + $sec + ') -> a retry re-runs the same blocked file; ' +
+              'exclude ' + (Join-Path $InstallDir 'bin\gpn-node.exe') + ' and ' +
+              (Join-Path $InstallDir 'data\update\current\gpn-node.exe') +
+              ' from antivirus/Defender scanning (fix-defender.ps1 -Consent yes), then roll back') }
+  }
+
   if ($low -match 'incompatible pruning modes') {
     $stored = 'unknown'
     if ($text -match 'stored:\s*([^;\]]+)') { $stored = $Matches[1].Trim() }
@@ -1329,6 +1383,7 @@ function Confirm-Update {
     }
   }
 
+  $script:ConfirmExpectVersion = $Expect
   $res = Confirm-Running -Expect $Expect -WindowSecs $window -CeilingSecs $ConfirmCeilingSecs
   if ($res) { return $res }
   $first = 'signal=' + $script:ConfirmSignal + ' after ' + $script:ConfirmElapsed + 's - ' + $script:ConfirmReason
@@ -1337,6 +1392,17 @@ function Confirm-Update {
   $evidence = Get-StartEvidence
   $rem = Get-Remediation -Evidence $evidence -Port $port
   Write-Log $rem.Line
+  if ($rem.Kind -eq 'security') {
+    # The operator's one line: name the cause and the two paths, say "not a
+    # timeout", and do not retry. Signal is 'security' so the report is not
+    # filed as another RPC/program bug.
+    foreach ($l in @($evidence.Tail | Select-Object -Last 3)) { Write-Log ('  | ' + $l) }
+    return @{ Ok = $false; Signal = 'security'; ElapsedSecs = $elapsedFirst;
+      ProcessUp = $script:ConfirmProcessUp;
+      Reason = ('blocked by security software after ' + $elapsedFirst + 's, not a timeout: ' + $rem.Evidence +
+                '; exclude ' + (Join-Path $InstallDir 'bin\gpn-node.exe') + ' and ' +
+                (Join-Path $InstallDir 'data\update\current\gpn-node.exe') + ' (fix-defender.ps1 -Consent yes)') }
+  }
   if (-not $rem.Actionable) {
     foreach ($l in @($evidence.Tail | Select-Object -Last 3)) { Write-Log ('  | ' + $l) }
     return @{ Ok = $false; Signal = $script:ConfirmSignal; ElapsedSecs = $elapsedFirst;
@@ -2419,6 +2485,242 @@ if ($made.Count -gt 0) {
 exit 0
 '@
 
+$DefenderHelperTemplate = @'
+# fix-defender.ps1 -- generated by install.ps1; do not hand-edit.
+#
+# #209: a newly downloaded, unsigned gpn-node.exe can be quarantined or blocked
+# at launch by Windows Defender. The symptom is exactly "the update stopped the
+# node and it did not come back", with nothing in node.log to explain it.
+#
+# This adds NARROW, REVERSIBLE exclusions and only with the operator's consent:
+#   * file-level paths for the two stable binaries (bin\ and the current
+#     junction). A whole-directory exclusion is deliberately avoided: it would
+#     trust anything that lands in a writable folder.
+#   * process-name exclusions, which is what stops Defender blocking a launch
+#     from a version tree (data\update\versions\<v>\) the path list cannot name
+#     in advance.
+#
+# Idempotent. Prints "defender: <result>" exactly once and appends the same line
+# to defender.log, including the exact command that undoes it. Never fails an
+# install: no Defender, or a declined consent, is a logged no-op.
+param([string]$Consent = 'no', [switch]$Elevated)
+
+$ErrorActionPreference = 'Continue'
+$InstallDir = '__INSTALL_DIR__'
+$LogPath    = Join-Path $InstallDir 'defender.log'
+$ExePaths = @(
+  (Join-Path $InstallDir 'bin\gpn-node.exe'),
+  (Join-Path $InstallDir 'bin\gpn_node.exe'),
+  (Join-Path $InstallDir 'data\update\current\gpn-node.exe'),
+  (Join-Path $InstallDir 'data\update\current\gpn_node.exe')
+)
+$ExeNames = @('gpn-node.exe', 'gpn_node.exe')
+$Undo = "Remove-MpPreference -ExclusionPath '" + ($ExePaths -join "','") + "'; " +
+        "Remove-MpPreference -ExclusionProcess '" + ($ExeNames -join "','") + "'"
+
+function DfLine {
+  param([string]$Message)
+  $line = '[' + (Get-Date).ToString('yyyy-MM-dd HH:mm:ss') + '] ' + $Message
+  try { Add-Content -Path $LogPath -Value $line -ErrorAction Stop } catch { }
+  Write-Host ('defender: ' + $Message)
+}
+
+# Overridable seam for the offline test (scripts/tests/test-defender-exclusions.ps1):
+# the real check needs an elevated Windows session, the test needs to say "yes".
+if (-not (Get-Command Test-DfAdmin -ErrorAction SilentlyContinue)) {
+  function Test-DfAdmin {
+    try {
+      $id = [Security.Principal.WindowsIdentity]::GetCurrent()
+      return (New-Object Security.Principal.WindowsPrincipal($id)).IsInRole(
+        [Security.Principal.WindowsBuiltInRole]::Administrator)
+    } catch { return $false }
+  }
+}
+
+function Read-DfPrefs {
+  $p = $null
+  try { $p = Get-MpPreference -ErrorAction Stop } catch { return $null }
+  $paths = @()
+  $procs = @()
+  try { $paths = @($p.ExclusionPath | Where-Object { $_ }) } catch { }
+  try { $procs = @($p.ExclusionProcess | Where-Object { $_ }) } catch { }
+  return [pscustomobject]@{ Paths = $paths; Procs = $procs }
+}
+
+# The AV that will actually block a launch is not always Defender: a machine
+# with a third-party product (box 1 has Bitdefender) runs Defender in passive
+# mode, so Defender exclusions alone would not have saved the update. Name it.
+function Get-DfOtherAv {
+  try {
+    $av = @(Get-CimInstance -Namespace root/SecurityCenter2 -ClassName AntiVirusProduct `
+              -ErrorAction Stop |
+            Where-Object { $_.displayName -and $_.displayName -notmatch 'Windows Defender' } |
+            Select-Object -ExpandProperty displayName | Select-Object -Unique)
+    if ($av.Count -gt 0) { return ($av -join ', ') }
+  } catch { }
+  return ''
+}
+
+function Show-DfMissing {
+  param($Prefs)
+  $wp = @($ExePaths | Where-Object { $Prefs.Paths -notcontains $_ })
+  $wn = @($ExeNames | Where-Object { $Prefs.Procs -notcontains $_ })
+  return [pscustomobject]@{ Paths = $wp; Procs = $wn }
+}
+
+if ($env:OS -ne 'Windows_NT') { DfLine 'not Windows - no exclusions to manage'; exit 0 }
+
+if ($Consent -ne 'yes') {
+  DfLine ('exclusions NOT added (no consent) -- a new unsigned gpn-node.exe may be blocked at launch; ' +
+          'to add them later run this file with -Consent yes; undo would be: ' + $Undo)
+  exit 0
+}
+
+if (-not (Get-Command Get-MpPreference -ErrorAction SilentlyContinue)) {
+  DfLine 'Windows Defender is not present -- no exclusions added (nothing to exclude from)'
+  exit 0
+}
+
+$prefs = Read-DfPrefs
+if ($null -eq $prefs) {
+  DfLine 'Windows Defender did not answer Get-MpPreference -- no exclusions added'
+  exit 0
+}
+
+# Defender can be installed but OFF: a third-party antivirus (box 1 has
+# Bitdefender) puts it in passive mode, or policy stops the WinDefend service.
+# Adding an exclusion then fails with 0x800106ba and no exclusion exists, so
+# say what is actually true instead of reporting a raw HRESULT.
+$defMode = ''
+$defSvc = ''
+try { $defMode = [string](Get-MpComputerStatus).AMRunningMode } catch { }
+try { $defSvc = [string](Get-Service WinDefend -ErrorAction Stop).Status } catch { }
+$defActive = ($defSvc -eq 'Running') -and ($defMode -notmatch 'Passive|SxS')
+
+$otherAv = Get-DfOtherAv
+$avNote = ''
+if ($otherAv) {
+  $avNote = '; NOTE: another antivirus is registered on this machine (' + $otherAv +
+            ') -- its exclusions are separate and may still quarantine gpn-node.exe'
+}
+
+if (-not $defActive) {
+  $who = if ($otherAv) { $otherAv } else { 'another antivirus (none registered, but Defender is stopped)' }
+  DfLine ('Windows Defender is not active here (mode "' + $defMode + '", WinDefend service "' + $defSvc +
+          '") -- no exclusions added and none can be; the scanner that can block a launch is ' + $who +
+          '. If Defender is later enabled, re-run this file with -Consent yes.')
+  exit 0
+}
+
+$missing = Show-DfMissing $prefs
+if ($missing.Paths.Count -eq 0 -and $missing.Procs.Count -eq 0) {
+  DfLine ('already present: ' + $ExePaths.Count + ' path exclusion(s) and ' + $ExeNames.Count +
+          ' process exclusion(s); undo: ' + $Undo + $avNote)
+  exit 0
+}
+
+if (-not (Test-DfAdmin)) {
+  # Same one-shot elevation as the firewall helper: a silent no-op here would
+  # leave exactly the bug this row exists to fix.
+  $canAsk = (-not $Elevated) -and [Environment]::UserInteractive -and
+            ($env:GPN_NO_ELEVATE -ne '1') -and (-not $env:CI)
+  if ($canAsk) {
+    try {
+      Start-Process -FilePath 'powershell' -Verb RunAs -Wait -ArgumentList @(
+        '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', ('"' + $PSCommandPath + '"'),
+        '-Consent', 'yes', '-Elevated') | Out-Null
+    } catch {
+      DfLine ('elevation declined - exclusions NOT added: ' + $_.Exception.Message)
+    }
+    $prefs = Read-DfPrefs
+    if ($null -ne $prefs) {
+      $missing = Show-DfMissing $prefs
+      if ($missing.Paths.Count -eq 0 -and $missing.Procs.Count -eq 0) { exit 0 }
+    }
+  }
+  DfLine ('MISSING - needs an elevated run: powershell -ExecutionPolicy Bypass -File "' +
+          $PSCommandPath + '" -Consent yes')
+  exit 2
+}
+
+$madePaths = @($missing.Paths)
+$madeProcs = @($missing.Procs)
+if ($madePaths.Count -gt 0) {
+  try { Add-MpPreference -ExclusionPath $madePaths -ErrorAction Stop }
+  catch { DfLine ('could not add path exclusions: ' + $_.Exception.Message); exit 2 }
+}
+if ($madeProcs.Count -gt 0) {
+  try { Add-MpPreference -ExclusionProcess $madeProcs -ErrorAction Stop }
+  catch { DfLine ('could not add process exclusions: ' + $_.Exception.Message); exit 2 }
+}
+
+# Re-read: "Add-MpPreference returned" is not "the exclusion is in place".
+$after = Read-DfPrefs
+$left = if ($null -eq $after) { $missing } else { Show-DfMissing $after }
+$rtp = ''
+try {
+  $st = Get-MpComputerStatus -ErrorAction Stop
+  if ($st.RealTimeProtectionEnabled) { $rtp = '; real-time protection on (these exclusions matter)' }
+  else { $rtp = '; real-time protection off' }
+} catch { }
+
+if ($left.Paths.Count -gt 0 -or $left.Procs.Count -gt 0) {
+  DfLine ('exclusions still MISSING after the attempt: ' + (($left.Paths + $left.Procs) -join ', ') + $rtp)
+  exit 2
+}
+DfLine ('added and verified ' + $madePaths.Count + ' path exclusion(s) and ' + $madeProcs.Count +
+        ' process exclusion(s): ' + (($madePaths + $madeProcs) -join ', ') + $rtp + '; undo: ' + $Undo + $avNote)
+exit 0
+'@
+
+# #209 consent. Never silent: an explicit flag, or an interactive question. A
+# non-interactive run (release build, CI, unattended deploy) defaults to NO.
+$DefenderConsent = 'ask'
+if ($env:GPN_DEFENDER_EXCLUSION -eq '1') { $DefenderConsent = 'yes' }
+elseif ($env:GPN_DEFENDER_EXCLUSION -eq '0') { $DefenderConsent = 'no' }
+if ($DefenderConsentFlag) { $DefenderConsent = $DefenderConsentFlag }
+
+function Get-DefenderConsent {
+  if ($script:DefenderConsent -ne 'ask') { return $script:DefenderConsent }
+  $canAsk = [Environment]::UserInteractive -and (-not $env:CI) -and (-not $WhatIf)
+  if (-not $canAsk) { return 'no' }
+  Write-Host ''
+  Write-Host 'Windows Defender can quarantine a newly downloaded, unsigned gpn-node.exe.' -ForegroundColor Yellow
+  Write-Host 'That looks exactly like "the update stopped the node and it did not come back".' -ForegroundColor Yellow
+  Write-Host ('This would exclude, file-level only: ' + (Join-Path $InstallDir 'bin\gpn-node.exe') +
+              ' and ' + (Join-Path $InstallDir 'data\update\current\gpn-node.exe') +
+              ' (plus their process names). It is reversible.')
+  $ans = Read-Host 'Add these Windows Defender exclusions? [y/N]'
+  if ($ans -match '^(y|yes)$') { return 'yes' }
+  return 'no'
+}
+
+function Write-DefenderHelper {
+  $path = Join-Path $InstallDir 'fix-defender.ps1'
+  $text = $DefenderHelperTemplate.Replace('__INSTALL_DIR__', $InstallDir)
+  Invoke-Step "write $path" { Set-Content -Path $path -Value $text -Encoding ascii }
+  return $path
+}
+
+function Repair-Defender {
+  # Written, then run, so the installer and a later `-UpdateTaskOnly` deploy run
+  # the same bytes. Never fails the install (no Defender, declined consent, or a
+  # non-elevated session are all logged outcomes, not errors).
+  $consent = Get-DefenderConsent
+  if ($WhatIf) {
+    Write-Host "[whatif] write fix-defender.ps1 and run it with -Consent $consent" -ForegroundColor Cyan
+    return
+  }
+  $path = Write-DefenderHelper
+  if (-not (Test-Path $path)) { Warn 'defender helper not written -- exclusions were not checked'; return }
+  $lines = @(& powershell -NoProfile -ExecutionPolicy Bypass -File $path -Consent $consent 2>&1 |
+             ForEach-Object { [string]$_ })
+  foreach ($l in $lines) { if ($l.Trim()) { Say $l.Trim() } }
+  if ($consent -ne 'yes') {
+    Say "defender exclusions skipped (no consent) -- re-run $path -Consent yes to add them"
+  }
+}
+
 function Write-FirewallHelper {
   $path = Join-Path $InstallDir 'fix-firewall.ps1'
   $text = $FirewallHelperTemplate.Replace('__INSTALL_DIR__', $InstallDir)
@@ -2576,6 +2878,10 @@ if ($UpdateTaskOnly) {
   # deploy path (not only a fresh install) repairs the "installed but unpeerable"
   # state. Best-effort: this mode must not fail a release build over a rule.
   Repair-Firewall
+  # #209: heal a box installed before the exclusion existed. Consent is read the
+  # same way (flag/env/prompt); a deploy run is non-interactive, so it is a
+  # logged no-op unless GPN_DEFENDER_EXCLUSION=1 was set deliberately.
+  Repair-Defender
   $ok = Register-UpdateTask
   if (-not $ok) {
     # Task Scheduler refuses a standard account ("Access is denied", seen on
@@ -2671,6 +2977,11 @@ Repair-VersionPointer
 # 1b. firewall (#208): open the two inbound holes the node needs, before it is
 #     started, so Windows never has reason to show "has blocked some features".
 Repair-Firewall
+
+# 1c. Defender exclusions (#209): with consent, so a new unsigned gpn-node.exe
+#     is not quarantined at launch -- "the update stopped the node and it did
+#     not come back". File-level and reversible; see the helper's header.
+Repair-Defender
 
 # 2. snapshot-first bootstrap, before the node is ever started against an empty
 #    chain dir. Every failure is a logged fallback to peer sync (see

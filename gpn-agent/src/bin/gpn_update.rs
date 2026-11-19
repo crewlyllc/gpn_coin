@@ -1375,16 +1375,34 @@ struct ProcessRpcProbe {
     trees: Vec<std::path::PathBuf>,
     sys: sysinfo::System,
     t0: std::time::Instant,
+    /// #209: the binaries the update installed, and the exit ledger the last
+    /// attempt wrote. Used only to produce *positive* evidence of a block.
+    node_exes: Vec<std::path::PathBuf>,
+    exit_log: Option<std::path::PathBuf>,
 }
 
 impl ProcessRpcProbe {
     fn new(rpc_url: &str, trees: Vec<std::path::PathBuf>) -> Self {
+        // Evidence paths: the version tree and the `current` junction — what an
+        // update writes. `bin\` is not included: a deploy may legitimately
+        // leave it without the Rust node while `current` is the live tree.
+        let mut node_exes = Vec::new();
+        for tree in trees.iter().take(2) {
+            node_exes.push(tree.join(update::rust_node_bin_name()));
+        }
         ProcessRpcProbe {
             rpc_url: rpc_url.to_string(),
             trees,
             sys: sysinfo::System::new(),
             t0: std::time::Instant::now(),
+            node_exes,
+            exit_log: None,
         }
+    }
+
+    fn with_exit_log(mut self, path: Option<std::path::PathBuf>) -> Self {
+        self.exit_log = path;
+        self
     }
 }
 
@@ -1438,6 +1456,33 @@ impl update::ConfirmProbe for ProcessRpcProbe {
 
     fn wait(&mut self, secs: u64) {
         std::thread::sleep(Duration::from_secs(secs));
+    }
+
+    /// #209: quarantine is a Windows behaviour, so this never reports evidence
+    /// on Linux. On Windows it looks only at the two install trees: a binary
+    /// that is gone beside a directory that exists, or an exit ledger that
+    /// records STATUS_ACCESS_DENIED / a named security block.
+    fn security_block(&mut self) -> Option<String> {
+        // Quarantine is a Windows behaviour, so a release build only looks for
+        // this evidence there. Debug builds accept GPN_SECURITY_EVIDENCE=1 so
+        // the whole probe -> gate -> message path can be exercised end to end
+        // on Linux; the hook is compiled out of release binaries.
+        let windows_like = cfg!(windows)
+            || (cfg!(debug_assertions)
+                && std::env::var("GPN_SECURITY_EVIDENCE").as_deref() == Ok("1"));
+        if !windows_like {
+            return None;
+        }
+        let last_exit = self
+            .exit_log
+            .as_ref()
+            .and_then(|p| std::fs::read_to_string(p).ok())
+            .unwrap_or_default();
+        update::detect_security_block(
+            &self.node_exes,
+            &|p: &std::path::Path| p.exists(),
+            &last_exit,
+        )
     }
 }
 
@@ -1642,12 +1687,16 @@ fn node_log_path(o: &Options) -> std::path::PathBuf {
 
 /// Read the evidence a failed start left behind: the newest `last-exit.json`
 /// line and the tail of the node log.
-fn start_evidence(o: &Options) -> (String, Vec<String>) {
-    let exit_log = std::env::var("GPN_EXIT_LOG")
+fn exit_log_path() -> std::path::PathBuf {
+    std::env::var("GPN_EXIT_LOG")
         .ok()
         .filter(|p| !p.trim().is_empty())
         .map(std::path::PathBuf::from)
-        .unwrap_or_else(gpn_agent::exit_report::default_path);
+        .unwrap_or_else(gpn_agent::exit_report::default_path)
+}
+
+fn start_evidence(o: &Options) -> (String, Vec<String>) {
+    let exit_log = exit_log_path();
     let last_exit = std::fs::read_to_string(exit_log).unwrap_or_default();
     let log = std::fs::read_to_string(node_log_path(o)).unwrap_or_default();
     (last_exit, update::log_tail(&log, 40))
@@ -1790,8 +1839,9 @@ fn confirm_update(
     let mut make_probe = {
         let url = o.rpc_url.clone();
         let trees = trees.clone();
+        let exit_log = Some(exit_log_path());
         move || -> Box<dyn update::ConfirmProbe> {
-            Box::new(ProcessRpcProbe::new(&url, trees.clone()))
+            Box::new(ProcessRpcProbe::new(&url, trees.clone()).with_exit_log(exit_log.clone()))
         }
     };
     let mut classify = || -> update::Remediation {
