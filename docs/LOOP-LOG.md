@@ -3,6 +3,24 @@
 Newest first. Written by the release loop; read by the assistant, who relays anything
 that needs Jeremy. `[TRIAGE]` = a decision waiting on the assistant.
 
+## 11:14 PT — 0.3.63 §1: cadence gate written, run live, FAILS (as it must); row 218 reproduced
+
+- **CI**: no run for HEAD `c1651ee` (docs-only, paths-ignore) — expected. This run's push `42f1089`
+  touches `scripts/`, so a run will start; not waited on.
+- **Triage consumed**: assistant's 217 A′ decision (`c1651ee`) is now reflected in the checklist and
+  the list row — 217 is **not** blocked any more, it is simply not met. 0.3.63 = wording + gate +
+  checklist batch, no runtime change.
+- **Box ticked**: `0.3.63.md` §1 box 2 + box 3(n/a). New `scripts/check-block-cadence.py` encodes
+  the restated acceptance (no gap > 10× mean AND none > 45 s, chain time from each block's
+  `timestamp.set` extrinsic). Live at 11:12 PT, head #335216, exit 1: mean 15.38 s, **median
+  9.08 s**, 4 gaps >45 s (50.8 / 153.0 / 66.0 / 88.7). 153.04 s = 9.95× mean — the ratio clause
+  alone would have passed a 2.5-minute chain stop, which is exactly why the absolute clause exists.
+- **Row 218 reproduced** inside that sample: #335159→#335160, `Prepared … 335159 (114 ms)` at
+  10:55:38, **no `GPU sealed block` for 155 s**, all 3 peers level at #335158, seal at 10:58:13 then
+  instant import; `error|panic|fatal` grep = 0 hits. Two occurrences, both silent sealer stops.
+- **Next (next run)**: §2 box 1 — the test must pass, i.e. fix the sealer silence (row 218) so the
+  gate goes green. No decision needed; no [TRIAGE].
+
 ## 10:53 PT — 0.3.63 §1: named the cadence target, measured the 153 s stop, split it out as row 218 [TRIAGE]
 
 - **CI**: no run exists for HEAD `aede251` — it is a docs-only commit and `ci.yml` paths-ignore covers
