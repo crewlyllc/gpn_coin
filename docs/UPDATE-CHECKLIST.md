@@ -255,6 +255,13 @@ Two different jobs use Windows, and they must not be confused (owner question, 2
 - [ ] **GitHub carries the same version** — the `linux-latest` and `windows-latest` releases on `jeremyzguo/gpn_coin` hold the new assets, the mirror repo `crewlyllc/gpn_coin` holds the renamed copies the manifest points at, and `network.json`'s `latest_version` matches.
 - [ ] **Both surfaces agree with each other and with the binaries** — site version == GitHub release version == `gpn-node --version` of the built artifact. A mismatch here is how "0.3.52 is live" and "the fleet runs 0.3.50" both end up true.
 
+- [ ] **Every capability added in this bundle is discoverable from gpncoin.ai.** For each item that
+      adds or changes a capability (chat, image, video, audio, fine-tuning, ML), the page that
+      documents it exists, its example request actually works, and the capability is named in the
+      site's own text — not only in the API. A shipped feature nobody can find is not shipped.
+      (Added 2026-11-20: audio generation shipped in 0.3.61 and `grep -ri 'audio|speech|tts|voice'
+      website/` returned zero matches two releases later.)
+
 ## 8. Verify as a stranger would
 
 - [ ] Anonymous download of **both** assets from `gpncoin.ai` succeeds.
