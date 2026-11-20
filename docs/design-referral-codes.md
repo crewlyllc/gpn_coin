@@ -43,16 +43,35 @@ code   = "GPN" + base32(digest[0..8]) with I/O/0/1 removed  →  11 characters
 ## 3. Where the operator sees it (the part that was missing)
 
 1. **Dashboard** (`:8099`): a "Your referral code" card — the code, the shareable link
-   `https://gpncoin.ai/download?ref=<code>`, and a **Copy** button. Shown only when a wallet is
+   `https://gpncoin.ai/join?ref=<code>`, and a **Copy** button. Shown only when a wallet is
    configured; if not, it says so and links to `gpn_node --setup`.
 2. **Startup summary** printed by `gpn_node`: one line, `referral code GPN-7K2X-9QMD-4T (share:
-   https://gpncoin.ai/download?ref=GPN7K2X9QMD4T)`.
+   https://gpncoin.ai/join?ref=GPN7K2X9QMD4T)`.
 3. **`gpn_node --referral`** (non-starting subcommand): prints the code and link only — so an
    operator can retrieve it without running a node.
 4. **Info page** on gpncoin.ai (`ai.html` / a new `referrals.html`): what a code is, how it is
    derived from your wallet, how to share it, and the fact that it records *attribution only* —
    no rewards are live until mainnet.
 5. **`GET /api/referral`** on the dashboard's API: `{code, link, address}` for tooling.
+
+## 3b. The link must not promise a download (owner, 2026-11-20)
+
+`/download?ref=…` reads as *"clicking this downloads software"* — the opposite of what a referral
+link should suggest to someone deciding whether to trust you.
+
+- **Canonical share link: `https://gpncoin.ai/join?ref=<code>`**
+- **Short alias: `https://gpncoin.ai/r/<code>`** — for spoken or printed URLs; 301 to `/join`.
+- `/join` is a **landing page**, not a download page: what GPN is in three sentences, what the
+  referrer's code means, the four install commands *with the code already baked in*, and the
+  buttons that lead to `/download` only if the visitor chooses.
+- The code is shown on `/join` as text (`your code: GPN-7K2X-9QMD-4T`) so a screenshot of the page
+  still carries the attribution if the visitor types the commands by hand later.
+- `/download?ref=…` keeps working (it already bakes the flag into the commands) but is no longer the
+  link anyone is asked to share.
+
+Acceptance additions: `/join?ref=CODE` renders the landing page with the code baked into all four
+commands; `/r/CODE` redirects to it preserving the code; `/join?ref=` with a malformed code shows
+the landing page with a clear "this code is not valid" note rather than silently ignoring it.
 
 ## 4. What the AP does with a presented code
 
