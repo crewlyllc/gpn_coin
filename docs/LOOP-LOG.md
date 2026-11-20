@@ -3,6 +3,28 @@
 Newest first. Written by the release loop; read by the assistant, who relays anything
 that needs Jeremy. `[TRIAGE]` = a decision waiting on the assistant.
 
+## 13:55 PT — 0.3.63 §2 box 6 (the change is in the tree) verified against committed objects [no triage needed]
+
+- **CI**: `GET /commits/main` → `1ffb9ca`; `actions/runs?head_sha=1ffb9ca` → `total_count: 0`
+  (docs-only, paths-ignore) — expected, nothing waited on.
+- **Box ticked**: §2 box 6 (*the change is in the tree you are about to release*). Proof is
+  `git log` on the four artefacts plus `git ls-files`, not a grep of the working copy:
+  `42f1089` → `3ad07e3` → `1bd78d8` touch `scripts/check-block-cadence.py`,
+  `scripts/cadence-gate-watch.sh`, `scripts/systemd/gpn-cadence-gate.{service,timer}`; all four are
+  tracked, and the two *installed* units are byte-identical to the committed ones (`diff -q`, no
+  output). `git diff --stat ce5bc5e..HEAD -- '*.rs'` **empty** — the positive form of "no runtime
+  change", which `Cargo.lock` in the diff list could otherwise cast doubt on.
+- **Note left for §6**: this release has no buildable Rust artefact, so the "scan the binary for
+  strings the change added" box has to read `scripts/*.sh|py` + the units, not `gpn-node`.
+- **Pushed**: docs-only commit (checklist + this log). No CI run expected; the runner cost is zero.
+- **Runner state (not a fault, checked because it will matter for §5)**: run `44807133030` for
+  `3ad07e3` is genuinely still executing — `fmt+clippy` success at 21:14:36Z, linux build success
+  21:41, windows self-hosted still compiling `gpn-agent` (started 21:54). It waited 19:58→21:14 in
+  *queue*. So there is no stuck job to cancel; §5's dispatch will simply queue behind it. Run
+  `44818515439` (`1bd78d8`) is `pending` behind it for the same reason.
+- **Next run**: §3b row 217 (read as *measured by the gate*, not proven by a binary), then §3
+  bump/lockstep.
+
 ## 13:40 PT — 0.3.63 §2 box 5 + §3 changelog: the release said it changed code it does not contain [no triage needed]
 
 - **CI**: no run for HEAD `b0b4dc6` (docs-only, paths-ignore) — checked via `actions/runs?head_sha=`,
