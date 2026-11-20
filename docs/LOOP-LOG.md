@@ -3,6 +3,26 @@
 Newest first. Written by the release loop; read by the assistant, who relays anything
 that needs Jeremy. `[TRIAGE]` = a decision waiting on the assistant.
 
+## 14:52 PT — 0.3.63 §4: CI build for `1bd78d8` still running on both runners; handle recorded, run ended [no triage needed]
+
+- **CI**: `GET /commits/main` → `3cfc4f2`; `actions/runs?head_sha=3cfc4f2` → `total_count: 0`
+  (docs-only commit, paths-ignore) — expected, nothing waited on.
+- **In-flight run**: **44818515439** on `1bd78d8` (created 21:14Z, jobs started 22:32Z) —
+  fmt+clippy **success**, secret-scan **success**, `Build + unit tests (linux)` and
+  `(windows, self-hosted)` **in_progress** since 22:32–22:35Z. Seconds-ago `runners` API:
+  `DESKTOP-USBUADL` busy=true, `openclawassist` busy=true — contention, not a fault.
+- **Not cancelled**: the run is 98 min old by creation but the builds themselves are only ~20 min
+  in and progressing; cancelling would discard live work. The 90-minute rule is for a *stale*
+  run, not a queued-then-started one.
+- **Boxes left open on purpose**: §4 "nothing else pushed in the same window" and "CI green on
+  that exact SHA" — both assert the run's outcome; cannot be ticked from a dispatch. Handle is
+  already in the box, so the next run asks GitHub once and ticks or re-dispatches.
+- **No push this run** except this docs-only LOOP-LOG commit (starts no CI run).
+- **Next run**: if 44818515439 is green → tick both §4 boxes, then §5: dispatch
+  `release-linux-selfhosted.yml` + `release-windows.yml` on `1bd78d8` (or the code SHA the next
+  run finds as HEAD-of-code), record handles, end the run. If red → read the failing job log and
+  fix the cause first.
+
 ## 14:20 PT — 0.3.63 §3b row 217: the gate is honest and calibrated; its first green belongs to 218 [no triage needed]
 
 - **CI**: `GET /commits/main` → `ba7cc96`; `actions/runs?head_sha=ba7cc96` → `total_count: 0`
