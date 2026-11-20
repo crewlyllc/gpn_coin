@@ -132,3 +132,37 @@ The registry may already contain arbitrary-string codes from testnet installs. R
 6. gpncoin.ai explains the scheme and shows a real example code from a live node.
 7. Row 202-style end-to-end: an install with `--ref <someone else's code>` lands an entry in
    `referral-registry.json` whose `derived_from` equals that wallet's address.
+
+## 7b. Why this exists: correct airdrop accounting at mainnet (owner, 2026-11-20)
+
+The referral record is **the input to the mainnet airdrop**, not a marketing feature. The genesis
+plan gives a slice of the treasury to testnet participants and a share to whoever referred them;
+once the network is live, that history cannot be reconstructed. So the record has to be:
+
+- **complete** — every node that ever presented a code is recorded, even if it went offline later
+  (the entry is written on first sighting and never removed);
+- **unique** — keyed by ss58 address, so the same operator reinstalling five times counts once;
+- **derivable** — a code recomputes from the referrer's wallet (row 223), so a payout list can be
+  checked without trusting our database;
+- **reproducible** — the export is a plain JSON file with a schema version and a sha256, produced by
+  a documented command, so the allocation can be recomputed and audited years later;
+- **bounded** — self-referral is rejected, and a code that does not match the presenting address is
+  recorded as `invalid_for_address` and never credited (that entry is evidence, not a payout).
+
+Export shape (admin-only, on the AP host):
+
+```
+gpn-referrals --export airdrop-input.json
+{ "schema": "gpn-airdrop-input-v1", "generated": "...", "registry_sha256": "...",
+  "participants": [ {"address": "5…", "first_seen": 1700000000, "last_seen": …,
+                     "referred_by": "GPN-7K2X-9QMD-4T", "referred_by_address": "5…",
+                     "derivation_verified": true} ],
+  "referrers": [ {"address": "5…", "code": "…", "referred": 7, "verified_referrals": 7} ] }
+```
+
+`derivation_verified` is the important field: it means the code recomputed from
+`referred_by_address`, so the airdrop maths can distinguish *proven* attribution from a legacy
+typed string that cannot be checked.
+
+**Amounts are still undecided** and no promise is made here; this section defines the *record*, so
+that when the decision is made the data is complete, deduplicated and auditable.
