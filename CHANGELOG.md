@@ -12,24 +12,37 @@ the GPN-specific meaning of each level documented in `docs/updates.md`.
 
 Bumped from 0.3.62 (`scripts/bump-version.py patch`).
 
-The bundle for this version is #217 — the residual of #52, whose ±33 % retarget
-clamp landed in 0.3.62 and moved the mean inter-block gap onto target (16.0 s
-over 100 live blocks against a 15 s target). Each entry is what the change does
-for a user of a released node, and each is checked against the built artifacts
-before the manifest is signed.
+**This version contains no runtime change.** It ships the measurement and the
+acceptance wording for #217, and the caller that keeps measuring. No `.rs` file
+differs from 0.3.62: the retarget tuning that #217 asks for is *not* in these
+binaries and rides the next code release together with #218 (the sealer
+heartbeat), because in the live sample the two are not separable — 2026-11-20
+11:12 PT, blocks 335117→335216, mean 15.38 s but **median 9.08 s** with four
+gaps over 45 s (50.8, 153.0, 66.0, 88.7 s): stops plus bursts, not an
+exponential tail.
+
+### Added
+- **A block-cadence gate you can run yourself (#217).** `scripts/check-block-cadence.py`
+  reads 100 live blocks from the node's RPC, takes each block's own chain time,
+  and fails when a gap exceeds 10× the window mean or when a gap over 3× the mean
+  has no explanation in this node's log. Installed on this box as the user timer
+  `gpn-cadence-gate.timer` (every 30 min), which writes its verdict to
+  `~/.gpn/cadence-gate.state`. It currently **fails** on the live testnet — that
+  is the honest reading of #217/#218, not a regression introduced here.
 
 ### Changed
-- **Block cadence in a small miner field: the retarget is judged by the shape of
-  arrivals, not only by its step size (#217).** The 0.3.62 sample (blocks
-  334734→334833) still had 6 of 99 gaps over 45 s (45.2, 45.9, 50.4, 56.8, 61.3,
-  152.2 s) and 17 under 3 s. With 3–6 independent miners the gap distribution is
-  the arrival process: at a 16.0 s mean, an exponential predicts 5.95 gaps >45 s
-  and 16.9 gaps <3 s per 99 — the measured 6 and 17 are the process, not the
-  retarget. No difficulty rule can satisfy "no gap >45 s *and* <5 % under 3 s"
-  simultaneously (a mean >58.5 s is needed for the second, which puts 46 % of
-  gaps over 45 s), so this version tunes the retarget to the field it runs in
-  (window/step sized for 3–6 miners) and states the cadence target in terms of
-  the mean and its tolerance, which is what an operator can actually observe.
+- **The cadence target is stated in observables (#217).** "No gap over 45 s and
+  fewer than 5 % under 3 s" was unsatisfiable at any difficulty: with 3–6 miners
+  the gaps are an arrival process, and at a 16.0 s mean an exponential predicts
+  5.95 gaps over 45 s and 16.9 under 3 s per 99 blocks — the 0.3.62 sample (6 and
+  17) *was* the process. The target is now "no gap above 10× the window mean, and
+  every gap above 3× must have a cause in the node's output", which an operator
+  can check against their own log.
+
+### Note
+- Difficulty, sealing and every consensus rule are byte-identical to 0.3.62.
+  If you are upgrading for cadence, wait for the release that carries #217's
+  retarget change; there is nothing here to measure that 0.3.62 does not already do.
 
 ## [0.3.62] - 2026-11-19
 
