@@ -1,14 +1,14 @@
-# verify-209-defender.ps1 — the Windows-Defender proof for GPN-LIST row 209.
+# verify-209-defender.ps1 - the Windows-Defender proof for GPN-LIST row 209.
 #
 # WHY THIS FILE EXISTS
 #   209's code (Defender exclusions + "blocked by security software" classification) is
 #   implemented and tested, but its DONE WHEN needs a machine where Windows Defender is the
 #   ACTIVE scanner with real-time protection ON. Box 1 runs Bitdefender (Defender passive,
 #   WinDefend cannot be started, Add-MpPreference fails 0x800106ba), so the proof could not be
-#   observed there. Box 3 is the machine that can prove it — this script is what to run the
+#   observed there. Box 3 is the machine that can prove it - this script is what to run the
 #   moment box 3 is back on the tailnet.
 #
-# RUN IT (from the Linux box, over the userspace SOCKS proxy — NOT via a runner dispatch):
+# RUN IT (from the Linux box, over the userspace SOCKS proxy - NOT via a runner dispatch):
 #   scripts/box3.sh "powershell -ExecutionPolicy Bypass -File C:\gpn\verify-209-defender.ps1 -Consent yes"
 #
 # Pass criteria are printed as PASS/FAIL lines and a final SUMMARY; paste the whole output into
@@ -132,6 +132,6 @@ if (Test-Path $staged) {
 
 Write-Host ""
 Write-Host "SUMMARY: $pass pass, $fail fail"
-if ($fail -eq 0) { Write-Host "209 PROVEN on this host — paste this output into the checklist and tick the box." }
-else             { Write-Host "209 NOT proven — $fail check(s) failed; do not tick." }
+if ($fail -eq 0) { Write-Host "209 PROVEN on this host - paste this output into the checklist and tick the box." }
+else             { Write-Host "209 NOT proven - $fail check(s) failed; do not tick." }
 exit $(if ($fail -eq 0) { 0 } else { 1 })
