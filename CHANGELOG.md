@@ -15,7 +15,7 @@ Bumped from 0.3.61 (`scripts/bump-version.py patch`).
 The bundle for this version is #52, #191, #196/#205, #213, #214, #215 and #216.
 Each entry below is what the change does for a user of a released node; every one
 of them is checked against the built artifacts before the manifest is signed
-(§6 of `docs/releases/0.3.62.md`), so nothing here is published unverified.
+(§6 of `docs/releases/archive/0.3.62.md`), so nothing here is published unverified.
 
 ### Added
 - **The access point refuses a job no provider can serve (#191).** When the pinned
@@ -29,10 +29,16 @@ of them is checked against the built artifacts before the manifest is signed
   provider can be unable to afford accepting.
 
 ### Changed
-- **Block cadence is stable (#52).** The difficulty retarget is damped and clamped:
-  a short window of fast blocks can no longer tighten difficulty into a 40–60 s
-  gap, so a client's create-inclusion wait stops running past its timeout because
-  of cadence oscillation.
+- **The difficulty retarget no longer ratchets (#52, mechanism only).** The
+  retarget is now log-symmetric and clamped to ±33 % per 45-block window, so a
+  short window of fast blocks can no longer collapse the target −50 % in one step
+  and then claw back only +37 % per window. Measured on the live testnet
+  (blocks 334734→334833, 2026-11-20): the target moved one full clamp step
+  (+34.4 %) and then held, mean inter-block gap 16.0 s against a 15 s target.
+  The user-visible complaint is **not** fully fixed: 6 of 99 gaps in that sample
+  were still over 45 s (max 152 s) and 17 were under 3 s, because the step is
+  still coarse for a 3–6 miner field. That residual is tracked as #217 in
+  `GPN-LIST.md`.
 
 ### Fixed
 - **A second install on the same box no longer takes over the first install's
@@ -44,10 +50,17 @@ of them is checked against the built artifacts before the manifest is signed
   gone, so the release lane's `-D warnings` gate passes.
 
 ### Release engineering
-- **A release cannot be published unattested (#215/#216).** `actions/attest-build-provenance`
-  now runs before the publish step, a failed or missing attestation blocks the
-  release, and §6/§7 of the checklist require `gh attestation verify` against the
-  digest published in `releases.json`.
+- **A release cannot be published unattested (#215/#216).** The artifact is signed
+  before the publish step and a missing or unverifiable signature blocks the
+  release: a fail-closed `Provenance gate` step throws unless a signature bundle
+  exists for the exact sha256 being uploaded and verifies against the workflow
+  identity. For this user-owned private repository GitHub will not persist a
+  native attestation, so the mechanism is keyless cosign
+  (`cosign verify-blob --bundle` against `…/release-windows.yml@…` and the Actions
+  OIDC issuer, bundle published as `gpn-windows.zip.bundle`); the GitHub-native
+  `attest-build-provenance` + `gh attestation verify` path is what the same step
+  does when the repository becomes public. §6/§7 of the checklist require the
+  verifier to be run by hand against the digest published in `releases.json`.
 
 ## [0.3.61] - 2026-11-19
 
@@ -56,7 +69,7 @@ Bumped from 0.3.60 (`scripts/bump-version.py patch`).
 The bundle for this version is #202, #208, #209, #210, #211, #212 and #194. Each
 entry below is what the change does for a user of a released node; every one of
 them is checked against the built artifacts before the manifest is signed
-(§6 of `docs/releases/0.3.61.md`), so nothing here is published unverified.
+(§6 of `docs/releases/archive/0.3.61.md`), so nothing here is published unverified.
 
 ### Added
 - **Audio generation from a voice reference: text in, speech out (#202).** A new
