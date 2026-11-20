@@ -651,7 +651,42 @@ jobs:
       # Build provenance (owner request 2026-11-19): the released zip is bound to this run
       # and commit by a signed attestation, so a stranger can verify the binary came from the
       # sha the manifest names — not merely that the sha matches what we published.
+      #
+      # Attestations are a public-repo-only capability: on a user-owned PRIVATE repo the
+      # attestation service answers "Failed to persist attestation: Feature not available for
+      # user-owned private repositories" (run 44659679426, step 18, 2026-11-20) and that one
+      # API answer failed the whole release lane AFTER the zip had been built, deployed and
+      # published. Probe visibility instead of asserting the capability: attest when the repo
+      # is public, warn loudly and skip when it is not. If the repo is ever made public this
+      # loads back in with no edit.
+      - name: Check attestation availability (repo visibility)
+        id: attest_gate
+        shell: powershell
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $h = @{ Authorization = "Bearer $env:GH_TOKEN"; 'User-Agent' = 'gpn-ci'; 'Accept' = 'application/vnd.github+json' }
+          $r = Invoke-RestMethod -Headers $h "https://api.github.com/repos/$env:GITHUB_REPOSITORY"
+          Write-Host "repo visibility: $($r.visibility) (private=$($r.private))"
+          if ($r.visibility -eq 'public') {
+            "ok=1" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+          } else {
+            Write-Host "::warning::build-provenance attestation SKIPPED - GitHub only attests public repositories and $env:GITHUB_REPOSITORY is $($r.visibility). The release zip is published but carries no attestation."
+            "ok=0" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+          }
+
       - name: Attest build provenance (windows zip)
+        if: steps.attest_gate.outputs.ok == '1'
         uses: actions/attest-build-provenance@v2
         with:
           subject-path: '${{ runner.temp }}\gpn-windows.zip'
+
+      - name: Attestation outcome (visible in the run summary)
+        shell: powershell
+        run: |
+          if ('${{ steps.attest_gate.outputs.ok }}' -eq '1') {
+            Write-Host 'build provenance: attested (public repo)'
+          } else {
+            Write-Host 'build provenance: NOT attested — repository is private; see the warning on the gate step.'
+          }
