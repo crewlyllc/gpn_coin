@@ -157,8 +157,17 @@ release_lock_step() {
   [ -f "$RELEASE_LOCK" ] && printf '{"pid":%d,"started_unix":%d,"step":"%s"}\n' \
     "$$" "$(date +%s)" "$1" > "$RELEASE_LOCK" 2>/dev/null || true
   inflight="${GPN_RELEASE_LOCK:-$HOME/.gpn/release-in-flight}"
-  [ -f "$inflight" ] && printf '%s\nholder: release-cut pid %s\nsince:  %s\nstep:   %s\n' \
-    "${VER:-release}" "$$" "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" "$1" > "$inflight" 2>/dev/null || true
+  if [ -f "$inflight" ]; then
+    # Keep the version line the lock was TAKEN with. This runs at the top of
+    # every step, including `detect` before the version is inferred, so writing
+    # "${VER:-release}" unconditionally replaced "0.3.61" with "release" and the
+    # `release-lock.sh release 0.3.61` at the end then refused ("held by release,
+    # not 0.3.61") -- leaving the repo locked after a GOOD release (2026-11-20).
+    local held=""
+    held="$(head -n1 "$inflight" 2>/dev/null || true)"
+    printf '%s\nholder: release-cut pid %s\nsince:  %s\nstep:   %s\n' \
+      "${VER:-$held}" "$$" "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" "$1" > "$inflight" 2>/dev/null || true
+  fi
   return 0
 }
 
@@ -322,25 +331,129 @@ print(d.get("sha") or "")')" || full=""
     say "commit ${sha} resolves to ${full}"
   fi
   local verdict
-  verdict="$(curl -sS -H "Authorization: Bearer $tok" -H 'Accept: application/vnd.github+json' \
-      "$GPN_GH_API/repos/$SRC_REPO/actions/runs?head_sha=$full&per_page=100" | "$PY" -c '
+  verdict="$(ci_verdict_for "$full" "$tok")"
+  case "$verdict" in
+    completed:success) say "CI green for ${sha:0:7}" ;;
+    missing) verify_docs_only_gap "$full" "$sha" "$tok" ;;
+    *)
+      echo "ABORT: CI for ${sha:0:7} is '$verdict' -- refusing to sign an unverified build" >&2
+      exit 1 ;;
+  esac
+}
+
+# Verdict for one full sha: completed:success | missing | <status>:<conclusion>
+ci_verdict_for() { # full_sha token
+  curl -sS -H "Authorization: Bearer $2" -H 'Accept: application/vnd.github+json' \
+      "$GPN_GH_API/repos/$SRC_REPO/actions/runs?head_sha=$1&per_page=100" | "$PY" -c '
 import json,sys
 d=json.load(sys.stdin)
 ci=[r for r in d.get("workflow_runs",[]) if r.get("name")=="CI"]
 if not ci:
     print("missing"); raise SystemExit
 ci.sort(key=lambda r: r["created_at"])
-print(ci[-1]["status"] + ":" + str(ci[-1].get("conclusion")))')"
-  case "$verdict" in
-    completed:success) say "CI green for ${sha:0:7}" ;;
-    missing)
-      echo "ABORT: no CI run for commit ${sha:0:7} (${full:0:12}) -- refusing to" >&2
-      echo "       sign an unverified build" >&2
-      exit 1 ;;
-    *)
-      echo "ABORT: CI for ${sha:0:7} is '$verdict' -- refusing to sign an unverified build" >&2
-      exit 1 ;;
-  esac
+print(ci[-1]["status"] + ":" + str(ci[-1].get("conclusion")))'
+}
+
+# A docs-only commit never starts a CI run (ci.yml `paths-ignore`), so a bundle
+# built from one carries a sha the runs API knows nothing about -- which used to
+# look exactly like an unverified build and refused the cut (2026-11-20: the
+# 0.3.61 bundles were stamped d2ee08a, three docs-only commits after the last
+# green run 409e4d3, and release-cut aborted at 3/6).
+#
+# The gate's purpose is "never sign a build CI did not verify", so the gap is
+# accepted ONLY when it is provable: the bundle sha must be in this checkout,
+# its nearest ancestor with a CI run must be GREEN, and every path touched
+# between the two must match a `paths-ignore` glob read out of ci.yml itself
+# (never a hardcoded copy, so a change to the workflow cannot silently widen
+# this). Any code, build file, chainspec, installer, network.json or workflow
+# change in the gap still refuses.
+verify_docs_only_gap() { # full_sha stamp_sha token
+  local full="$1" sha="$2" tok="$3" anc verdict checked=0
+  if ! git -C "$REPO" cat-file -e "${full}^{commit}" 2>/dev/null; then
+    echo "ABORT: no CI run for commit ${sha:0:7} (${full:0:12}) and that commit is not" >&2
+    echo "       in this checkout, so the gap cannot be shown docs-only -- refusing to" >&2
+    echo "       sign an unverified build" >&2
+    exit 1
+  fi
+  while read -r anc; do
+    [ "$anc" = "$full" ] && continue
+    checked=$((checked + 1))
+    [ "$checked" -gt 25 ] && break
+    verdict="$(ci_verdict_for "$anc" "$tok")"
+    case "$verdict" in
+      missing) continue ;;
+      completed:success)
+        if ci_ignored_paths_outside "$anc" "$full"; then
+          say "no CI run for ${sha:0:7}: back to ${anc:0:7} every commit touches only"
+          say "  paths ci.yml ignores (docs), so those bytes are what CI built -- accepting"
+          say "  the green run for ${anc:0:7} as this bundle's verification"
+          return 0
+        fi
+        echo "ABORT: no CI run for ${sha:0:7}, and the gap back to the last verified" >&2
+        echo "       commit ${anc:0:7} touches files ci.yml BUILDS -- refusing to sign" >&2
+        echo "       an unverified build" >&2
+        exit 1 ;;
+      *)
+        echo "ABORT: no CI run for ${sha:0:7}; its nearest verified ancestor ${anc:0:7}" >&2
+        echo "       is '$verdict' -- refusing to sign an unverified build" >&2
+        exit 1 ;;
+    esac
+  done < <(git -C "$REPO" rev-list --first-parent --max-count=26 "$full")
+  echo "ABORT: no CI run for commit ${sha:0:7} (${full:0:12}) within 25 commits --" >&2
+  echo "       refusing to sign an unverified build" >&2
+  exit 1
+}
+
+# 0 = every path changed between two commits matches a ci.yml paths-ignore glob
+# 1 = something CI builds changed (or the globs cannot be read: then we refuse)
+ci_ignored_paths_outside() { # base head
+  local ci="$REPO/.github/workflows/ci.yml"
+  [ -f "$ci" ] || return 1
+  "$PY" - "$ci" "$1" "$2" "$REPO" <<'PY'
+import fnmatch, re, subprocess, sys
+ci_path, base, head, repo = sys.argv[1:5]
+lines = open(ci_path).read().splitlines()
+start = None
+for i, l in enumerate(lines):
+    if re.match(r'^\s{2}push:\s*$', l):
+        start = i
+        break
+if start is None:
+    sys.exit(1)
+pats, in_pi = [], False
+for l in lines[start + 1:]:
+    if re.match(r'^\s{2}\S', l):        # next key under `on:` -> push block ended
+        break
+    if re.match(r'^\s*paths-ignore:\s*$', l):
+        in_pi = True
+        continue
+    if not in_pi:
+        continue
+    m = re.match(r"^\s*-\s*['\"]?([^'\"]*?)['\"]?\s*$", l)
+    if m:
+        pats.append(m.group(1))
+    elif l.strip() and not l.strip().startswith('#'):
+        break
+if not pats:
+    sys.exit(1)
+diff = subprocess.run(["git", "-C", repo, "diff", "--name-only", f"{base}..{head}"],
+                      capture_output=True, text=True)
+if diff.returncode != 0:
+    sys.exit(1)
+def ignored(p):
+    for pat in pats:
+        if fnmatch.fnmatchcase(p, pat):
+            return True
+        if pat.startswith('**/') and fnmatch.fnmatchcase(p, pat[3:]):
+            return True
+    return False
+touched = [f for f in diff.stdout.splitlines() if f.strip()]
+bad = [f for f in touched if not ignored(f)]
+if bad:
+    print("       not docs-only: " + ", ".join(bad[:5]), file=sys.stderr)
+    sys.exit(1)
+sys.exit(0)
+PY
 }
 
 published_version() {

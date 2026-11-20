@@ -28,11 +28,11 @@ bad()  { printf '   \033[31mFAIL\033[0m %s\n' "$*"; FAIL=$((FAIL+1)); FAILED+=("
 check() { if eval "$1"; then ok "$2"; else bad "$2"; fi; }
 
 # ─────────────────────────────────────────────────────────── fixtures ──────
-make_bundle() { # file version
-  "$PY" - "$1" "$2" <<'PY'
+make_bundle() { # file version [sha]
+  "$PY" - "$1" "$2" "${3:-abcdef1}" <<'PY'
 import sys, tarfile, zipfile, io, os
-path, ver = sys.argv[1], sys.argv[2]
-stamp = f"gpn-build-v1 version={ver} sha=abcdef1 spec=41\n".encode()
+path, ver, sha = sys.argv[1], sys.argv[2], sys.argv[3]
+stamp = f"gpn-build-v1 version={ver} sha={sha} spec=41\n".encode()
 # A bundle that passes the item-#193 content gate: the marker strings the
 # fork-choice work compiles in, plus the `gpn-node/<version>` User-Agent stamp.
 markers = (b"fork-choice gpn-forked deep-fork primary-authoritative gpncs/2 "
@@ -97,6 +97,8 @@ setup() { # published_version built_version [--no-published]
   T="$(mktemp -d "${TMPDIR:-/tmp}/release-cut-test.XXXXXX")"
   R="$T/repo"
   mkdir -p "$T/state" "$R/website" "$R/scripts"
+  mkdir -p "$R/.github/workflows"
+  cp "$REPO_ROOT/.github/workflows/ci.yml" "$R/.github/workflows/ci.yml"
   cp "$REPO_ROOT/scripts/release-cut.sh" "$REPO_ROOT/scripts/gen-release-manifest.py" \
      "$REPO_ROOT/scripts/commit-paths.sh" "$REPO_ROOT/scripts/verify-release-artifact.py" \
      "$R/scripts/"
@@ -361,9 +363,58 @@ t10_wrong_tree_aborts() {
   teardown
 }
 
+t11_docs_only_gap() {
+  CURRENT="t11 docs-only gap accepted"
+  setup 0.3.4 0.3.5
+  # The bundle is stamped with a REAL commit whose only commits since the last
+  # green run are docs -- the 0.3.61 shape (d2ee08a after 409e4d3).
+  mkdir -p "$R/docs"
+  echo "note" > "$R/docs/releases-note.md"
+  git -C "$R" add -A && git -C "$R" commit -qm "docs: checklist note"
+  echo "more" >> "$R/docs/releases-note.md"
+  git -C "$R" add -A && git -C "$R" commit -qm "docs: checklist note 2"
+  local head_full head_short anc_full
+  head_full="$(git -C "$R" rev-parse HEAD)"
+  head_short="$(git -C "$R" rev-parse --short=7 HEAD)"
+  anc_full="$(git -C "$R" rev-parse HEAD~2)"
+  make_bundle "$T/src-linux.tar.gz" 0.3.5 "$head_short"
+  make_bundle "$T/src-windows.zip" 0.3.5 "$head_short"
+  set_state "d['commits'] = {'$head_short': '$head_full'}; d['ci'] = {'$head_full': False, '$anc_full': True}"
+  cut --dry-run
+  check '[ "$RC" = 0 ]' "exit 0 -- a docs-only gap does not block signing"
+  check 'grep -q "no CI run for $head_short" <<< "$OUT"' "says the bundle sha has no run"
+  check 'grep -q "every commit touches only" <<< "$OUT"' "names the gap as docs-only"
+  check 'grep -q "accepting" <<< "$OUT"' "states it accepts the ancestor run"
+  check 'grep -q "dry run complete" <<< "$OUT"' "reached signing"
+  teardown
+}
+
+t12_gap_with_code() {
+  CURRENT="t12 gap containing code is refused"
+  setup 0.3.4 0.3.5
+  mkdir -p "$R/docs" "$R/gpn-agent/src"
+  echo note > "$R/docs/x.md"; git -C "$R" add -A; git -C "$R" commit -qm "docs: note"
+  # one code file in the gap must still refuse: the binaries are then unverified
+  echo 'fn main() {}' > "$R/gpn-agent/src/main.rs"
+  git -C "$R" add -A; git -C "$R" commit -qm "feat: code change"
+  local head_full head_short anc_full
+  head_full="$(git -C "$R" rev-parse HEAD)"; head_short="$(git -C "$R" rev-parse --short=7 HEAD)"
+  anc_full="$(git -C "$R" rev-parse HEAD~2)"
+  make_bundle "$T/src-linux.tar.gz" 0.3.5 "$head_short"
+  make_bundle "$T/src-windows.zip" 0.3.5 "$head_short"
+  set_state "d['commits'] = {'$head_short': '$head_full'}; d['ci'] = {'$head_full': False, '$anc_full': True}"
+  cut --dry-run
+  check '[ "$RC" != 0 ]' "refuses a gap that contains code"
+  check 'grep -q "touches files ci.yml BUILDS" <<< "$OUT"' "says the gap is not docs-only"
+  check 'grep -q "gpn-agent/src/main.rs" <<< "$OUT"' "names the offending path"
+  check '[ -z "$(actions)" ]' "no API writes"
+  check '! grep -q "dry run complete" <<< "$OUT"' "never reached signing"
+  teardown
+}
+
 ALL=(t1_nothing_to_do t2_detection_and_dry_run t3_digest_mismatch t4_mirror_failure
      t5_dirty_manifest t6_full_publish t7_version_assertion t8_skip_mirror
-     t9_ci_gate t10_wrong_tree_aborts)
+     t9_ci_gate t10_wrong_tree_aborts t11_docs_only_gap t12_gap_with_code)
 
 want=("$@")
 printf '\nrelease-cut.sh — %d scenario(s)\n' "${#ALL[@]}"
