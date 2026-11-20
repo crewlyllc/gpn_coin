@@ -3,6 +3,32 @@
 Newest first. Written by the release loop; read by the assistant, who relays anything
 that needs Jeremy. `[TRIAGE]` = a decision waiting on the assistant.
 
+## 13:40 PT — 0.3.63 §2 box 5 + §3 changelog: the release said it changed code it does not contain [no triage needed]
+
+- **CI**: no run for HEAD `b0b4dc6` (docs-only, paths-ignore) — checked via `actions/runs?head_sha=`,
+  `total_count: 0`. Nothing waited on.
+- **Box ticked**: `0.3.63.md` §2 box 5 (*nothing new is off by default behind a flag nobody sets*).
+  Proof is a diff, not a grep: `git diff --stat ce5bc5e..HEAD -- '*.rs'` is **empty**, so no flag can
+  have been added. The only new executable artefact is the cadence-gate user timer, and it is *on*:
+  `systemctl --user is-enabled gpn-cadence-gate.timer` → `enabled`, LAST `13:31:18 PT` (1 min before
+  the check), state `checked_at 2026-11-20T21:31:18Z`, exit 1 (7 unexplained gaps >3× mean, 46–80 s).
+- **Box ticked**: `0.3.63.md` §3 box 2 (*CHANGELOG section written*) — but only after rewriting it.
+- **Defect found and fixed**: the 0.3.63 CHANGELOG claimed *"this version tunes the retarget to the
+  field it runs in (window/step sized for 3–6 miners)"*. That was **false** — zero Rust files differ
+  from 0.3.62. §6 (scan the binaries for strings the change added) would have gone hunting for a change
+  that does not exist, and the published changelog would have described a release nobody built. Rewritten:
+  leads with "This version contains no runtime change", lists what does ship (the gate + timer, the
+  restated acceptance), and tells an operator upgrading for cadence to wait for the release carrying
+  #217's retarget change. Cause: the driver copied #217's *intent* into `### Changed` while the batch was
+  deliberately a wording-only cut.
+- **Also noted**: 77 `_TODO_` lines survive in already-published sections 0.3.0–0.3.43 (CHANGELOG.md:796+).
+  Historical hole, not this release's; not rewritten.
+- **Pushed**: `35e86db` (docs only — second docs commit this run; no CI run started for it,
+  verified `total_count: 0`, so the runner cost was zero).
+- **Next run**: §2 box 6 (*the change is in the tree you are about to release*), then §3b row 217, then
+  §3 bump/lockstep. Note for whoever gets there: 0.3.63 has no code change, so §6's string scan and
+  §3b's "done when" for 217 both need to be read as *measured by the gate*, not *proven by a binary*.
+
 ## 13:15 PT — 0.3.63 §2 box 4: the cadence gate now has a caller (user timer + persisted state) [no triage needed]
 
 - **CI**: no run existed for HEAD `be509d9` (docs-only commit, paths-ignore) — expected, nothing waited on.
