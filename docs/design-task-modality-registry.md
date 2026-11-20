@@ -153,3 +153,8 @@ gets easier once the words exist.
    and does not route to an LLM.
 6. `/v1/chat/completions` still works unchanged (adapter regression).
 7. `docs/releases/*` records the word list at release time, so a client can rely on it.
+8. **gpncoin.ai documents it** (owner request 2026-11-20): `website/ai.html` gains a "One endpoint,
+   every task" section — the word table, the `POST /v1/jobs` shape, one runnable curl per word that
+   is live on the network, and the fallback sentence ("no task and no model means `chat`"). The
+   page must show the words the network currently *serves*, generated from the provider matrix
+   rather than hand-copied, so the site cannot drift from the network again (see rows 219/220).
