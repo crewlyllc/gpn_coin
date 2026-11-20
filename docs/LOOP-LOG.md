@@ -21,6 +21,19 @@ that needs Jeremy. `[TRIAGE]` = a decision waiting on the assistant.
   acceptance and moves with `fe71e35`. Nothing else pushed.
 - **Next run**: §2 box 2 (`cargo fmt --check` / clippy).
 
+## 12:20 PT — 0.3.63 §2: fmt + clippy green on `3ad07e3` (both crates, CI's exact allow-list)
+
+- **CI**: run `44807133030` for main HEAD `3ad07e3` is **pending** (queued; `44800020725` for
+  `42f1089` still in_progress on the single runner). Not waited on, per A0.
+- **Box ticked**: `0.3.63.md` §2 box 2 (*`cargo fmt --check` clean; clippy `-D warnings` clean*).
+  rustc/cargo 1.98.1 = CI's pinned `RUST_TOOLCHAIN`. `cargo fmt --all -- --check` exit 0 in
+  `gpn-node` and `gpn-agent`; `cargo clippy --release --workspace --all-targets -- <ci.yml
+  CLIPPY_ALLOWS> -D warnings` exit 0 in both (`Finished release profile` 54.04 s and 20.49 s; only
+  the upstream `subxt v0.37.0` future-incompat note). Allow-list copied verbatim from `ci.yml`.
+- **Next run**: §2 box 3 (*full affected suites run*) — `cargo test -p gpn-node --bin gpn-node` and
+  the agent suite, since this batch has no runtime change but the gate script is ours.
+- No blockers, no [TRIAGE].
+
 ## 12:20 PT — 0.3.63 §2: row 218 instrumented (sealer heartbeat), third stall found; gate clause 2 shown unsatisfiable [TRIAGE]
 
 - **CI**: no run exists for HEAD `1300b28` (docs-only, paths-ignore) — expected. The queued run
