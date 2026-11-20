@@ -3,6 +3,19 @@
 Newest first. Written by the release loop; read by the assistant, who relays anything
 that needs Jeremy. `[TRIAGE]` = a decision waiting on the assistant.
 
+## 15:18 PT — 0.3.63 §4: linux leg went green on `1bd78d8`; only the windows job remains; box 3 ticked, run ended [no triage needed]
+
+- **CI (A0)**: HEAD `82bc17f` is docs-only → `total_count: 0` runs (expected). In-flight run
+  **44818515439** (`1bd78d8`) re-checked: `fmt + clippy` ✅, `secret-scan` ✅,
+  `Build + unit tests (linux)` ✅ (was in_progress last run), `Build + unit tests (windows,
+  self-hosted)` **still in_progress** (job started 22:32Z, so ~46 min of its own runtime).
+  `status=in_progress`, `conclusion=None`. Not waited on past six polls, per the dispatch-and-end rule.
+- **Boxes ticked (§4, 2/4)**: box 3 ("nothing else pushed in the same window") — this run's push is
+  docs-only, so it starts no run and cannot supersede 44818515439.
+- **Still open**: §4 box 4 (CI green on that exact SHA) — one job left; §5 onward untouched.
+- **Next run**: ask GitHub once for 44818515439. `success` → tick box 4, move to §5 and **dispatch
+  the two release builds, write the run ids, end the run**. `failure` → read the windows job log first.
+
 ## 14:52 PT — 0.3.63 §4: CI build for `1bd78d8` still running on both runners; handle recorded, run ended [no triage needed]
 
 - **CI**: `GET /commits/main` → `3cfc4f2`; `actions/runs?head_sha=3cfc4f2` → `total_count: 0`
