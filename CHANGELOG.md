@@ -8,6 +8,47 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 versions are [Semantic Versioning](https://semver.org/spec/v2.0.0.html), with
 the GPN-specific meaning of each level documented in `docs/updates.md`.
 
+## [0.3.62] - 2026-11-19
+
+Bumped from 0.3.61 (`scripts/bump-version.py patch`).
+
+The bundle for this version is #52, #191, #196/#205, #213, #214, #215 and #216.
+Each entry below is what the change does for a user of a released node; every one
+of them is checked against the built artifacts before the manifest is signed
+(§6 of `docs/releases/0.3.62.md`), so nothing here is published unverified.
+
+### Added
+- **The access point refuses a job no provider can serve (#191).** When the pinned
+  `model` is not advertised by any candidate, the lease is refused immediately with
+  the reason, instead of routing the job to a box that cannot run it and making the
+  caller spend a lease, an escrow and a full round trip to learn that.
+- **Accepting work is fee-free (#196/#205).** `accept_job` returns
+  `DispatchResultWithPostInfo` with `Pays::No.into()` — the requester pays, the
+  provider does not — so an account with a zero balance can accept a lease and earn.
+  The access point's `unfunded` routing gate is removed with it, since no registered
+  provider can be unable to afford accepting.
+
+### Changed
+- **Block cadence is stable (#52).** The difficulty retarget is damped and clamped:
+  a short window of fast blocks can no longer tighten difficulty into a 40–60 s
+  gap, so a client's create-inclusion wait stops running past its timeout because
+  of cadence oscillation.
+
+### Fixed
+- **A second install on the same box no longer takes over the first install's
+  firewall rule (#214).** An inbound rule whose program lies outside the current
+  install directory is left untouched and logged (exit 3), while a leftover naming
+  a deleted install is still adopted.
+- **Clippy is clean on the update tests (#213).** The seven "unnecessary use of
+  clone to create a slice from a reference" lints in `gpn-agent/src/update.rs` are
+  gone, so the release lane's `-D warnings` gate passes.
+
+### Release engineering
+- **A release cannot be published unattested (#215/#216).** `actions/attest-build-provenance`
+  now runs before the publish step, a failed or missing attestation blocks the
+  release, and §6/§7 of the checklist require `gh attestation verify` against the
+  digest published in `releases.json`.
+
 ## [0.3.61] - 2026-11-19
 
 Bumped from 0.3.60 (`scripts/bump-version.py patch`).

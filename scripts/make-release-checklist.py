@@ -68,7 +68,11 @@ def main():
         r"<!-- make-release-checklist\.py replaces this comment.*?-->", re.S)
     block = "\n".join(section).strip("\n")
     if marker_re.search(body):
-        body = marker_re.sub(block, body, count=1)
+        # A lambda, not the raw string: item titles contain backslashes and
+        # backslash-sequences (`C:\gpn`, `\d`), which re.sub would interpret as
+        # group references in the replacement and abort with
+        # "missing < at position …". (Broke the 0.3.62 generation, 2026-11-19.)
+        body = marker_re.sub(lambda _m: block, body, count=1)
     elif "## 3b. Items in this release" in body:
         body = body.replace("## 3b. Items in this release", "## 3b. Items in this release\n\n" + block, 1)
     elif "## 4. Push (once)" in body:
