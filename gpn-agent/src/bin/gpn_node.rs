@@ -3402,6 +3402,21 @@ fn status_doc(cfg: &Config, shared: &Shared) -> serde_json::Value {
     } else {
         serde_json::Value::Null
     };
+    // Item #212: the same persisted day ledger, keyed on this node's base path.
+    let (earnings, earnings_note) =
+        match gpn_agent::nodestatus::account_snapshot(cfg.rpc_port, &cfg.account) {
+            Some((balance, nonce)) => gpn_agent::earnings::sample(
+                &cfg.base_path,
+                gpn_agent::earnings::now_ms(),
+                balance,
+                nonce,
+            ),
+            None => (
+                None,
+                "no figure: the node did not answer a balance read".to_string(),
+            ),
+        };
+    let earnings_value = earnings.map_or(serde_json::Value::Null, |b| json!(b));
 
     json!({
         "node": if node_up { "up" } else { "down" },
@@ -3423,10 +3438,12 @@ fn status_doc(cfg: &Config, shared: &Shared) -> serde_json::Value {
         "chain": cfg.chain,
         "rpc_port": cfg.rpc_port,
         "account": cfg.account,
-        // Not tracked off-chain (would need per-block reward accounting).
-        // Reported as null so the dashboard shows "—" instead of a guess.
-        "earnings_today": serde_json::Value::Null,
-        "earnings_note": "not tracked locally — see the explorer",
+        // Item #212: a chain-observed figure with its source and window, or a
+        // dash plus the reason. Never a fabricated number.
+        "earnings_today": earnings_value,
+        "earnings_source": "chain",
+        "earnings_window": gpn_agent::earnings::WINDOW_LABEL,
+        "earnings_note": earnings_note,
         // Item #211 (b): the total an operator actually asks for. Same read as
         // the fleet dashboard uses, so both panels say the same number.
         "total_balance": gpn_agent::nodestatus::total_balance_gpn(cfg.rpc_port, &cfg.account)
@@ -4715,6 +4732,18 @@ async fn main() {
                 break;
             }
             asciiprintln!("{}", status_line(&status_cfg, &status_shared));
+            // Item #212: fold a chain sample into today's ledger even when
+            // nobody has the dashboard open, so the day has no gaps.
+            if let Some((balance, nonce)) =
+                gpn_agent::nodestatus::account_snapshot(status_cfg.rpc_port, &status_cfg.account)
+            {
+                let _ = gpn_agent::earnings::sample(
+                    &status_cfg.base_path,
+                    gpn_agent::earnings::now_ms(),
+                    balance,
+                    nonce,
+                );
+            }
         }
     });
 

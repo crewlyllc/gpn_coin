@@ -86,9 +86,15 @@ pub fn gpu_summary() -> (String, String) {
 /// seconds is not a stream of websocket handshakes. `None` = could not read
 /// (node starting, RPC down) and the page renders `—`; it never guesses.
 pub fn total_balance_gpn(rpc_port: u16, account: &str) -> Option<f64> {
+    account_snapshot(rpc_port, account).map(|(balance, _nonce)| balance)
+}
+
+/// One cached `System::Account` read shared by the balance card and the
+/// earnings ledger (item #211/#212) — two panels, one RPC call.
+pub fn account_snapshot(rpc_port: u16, account: &str) -> Option<(f64, u64)> {
     use std::sync::Mutex;
     use std::time::Instant;
-    static CACHE: Mutex<Option<(Instant, String, Option<f64>)>> = Mutex::new(None);
+    static CACHE: Mutex<Option<(Instant, String, Option<(f64, u64)>)>> = Mutex::new(None);
 
     if account.trim().is_empty() {
         return None;
@@ -98,22 +104,58 @@ pub fn total_balance_gpn(rpc_port: u16, account: &str) -> Option<f64> {
         Err(p) => p.into_inner(),
     };
     if let Some((at, who, val)) = cache.as_ref() {
-        if who == account && at.elapsed() < BALANCE_TTL {
+        let ttl = if val.is_some() {
+            BALANCE_TTL
+        } else {
+            BALANCE_RETRY
+        };
+        if who == account && at.elapsed() < ttl {
             return *val;
         }
     }
     let endpoint = format!("ws://127.0.0.1:{rpc_port}");
     let read = crate::chain::read_balance_blocking(&endpoint, account, BALANCE_TIMEOUT)
         .ok()
-        .map(|i| i.balance);
+        .map(|i| (i.balance, i.nonce));
     *cache = Some((Instant::now(), account.to_string(), read));
     read
 }
 
 /// How long a dashboard balance read is reused.
 const BALANCE_TTL: Duration = Duration::from_secs(30);
+/// How soon a failed read may be retried: subxt's first connect fetches
+/// metadata, so a cold read legitimately takes seconds, and a node that has
+/// just come up must not show a stale dash for a whole minute.
+const BALANCE_RETRY: Duration = Duration::from_secs(5);
 /// A dashboard poll must never hang on a starting node.
-const BALANCE_TIMEOUT: Duration = Duration::from_millis(1500);
+const BALANCE_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Today's earnings (item #212): chain balance growth since the day's baseline,
+/// or the reason there is no usable figure.
+///
+/// The figure is folded into a persisted day ledger ([`crate::earnings`]) on
+/// every call, so a node that is running accumulates the day even when nobody
+/// has the dashboard open. `(value, note)` — `None` means "show a dash".
+pub fn earnings_today(rpc_port: u16, account: &str) -> (Option<f64>, String) {
+    match account_snapshot(rpc_port, account) {
+        Some((balance, nonce)) => {
+            crate::earnings::sample(&earnings_base(), crate::earnings::now_ms(), balance, nonce)
+        }
+        None => (
+            None,
+            "no figure: the node did not answer a balance read".to_string(),
+        ),
+    }
+}
+
+/// Where the day ledger lives: `GPN_BASE_PATH` if set (the same override the
+/// node honours), else the OS default base path.
+fn earnings_base() -> std::path::PathBuf {
+    std::env::var("GPN_BASE_PATH")
+        .ok()
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(crate::firstrun::default_base_path)
+}
 
 /// Models the local ollama reports as present (best effort, short timeout).
 pub fn ollama_models(ollama_url: &str) -> Vec<String> {
@@ -185,6 +227,9 @@ pub fn status_doc(p: &StatusParams<'_>) -> serde_json::Value {
     } else {
         serde_json::Value::Null
     };
+    // Item #212: one cached chain read for the panel's earnings figure.
+    let (earnings, earnings_note) = earnings_today(p.rpc_port, p.account);
+    let earnings_value = earnings.map_or(serde_json::Value::Null, |b| json!(b));
 
     json!({
         "node": if p.node_up { "up" } else { "down" },
@@ -201,10 +246,13 @@ pub fn status_doc(p: &StatusParams<'_>) -> serde_json::Value {
         "chain": p.chain,
         "rpc_port": p.rpc_port,
         "account": p.account,
-        // Not tracked off-chain (would need per-block reward accounting).
-        // Reported as null so the dashboard shows "—" instead of a guess.
-        "earnings_today": serde_json::Value::Null,
-        "earnings_note": "not tracked locally — see the explorer",
+        // Item #212: a chain-observed figure with its source and window, or a
+        // dash plus the reason. `earnings_today` is null when unreadable — the
+        // page never invents a number and never shows a plausible zero.
+        "earnings_today": earnings_value,
+        "earnings_source": "chain",
+        "earnings_window": crate::earnings::WINDOW_LABEL,
+        "earnings_note": earnings_note,
         // Item #211 (b): a *total* beside the delta, read from the chain.
         "total_balance": total_balance_gpn(p.rpc_port, p.account)
             .map_or(serde_json::Value::Null, |b| serde_json::json!(b)),
@@ -222,6 +270,47 @@ mod tests {
         // Port 1 is never a Substrate RPC; both probes must degrade quietly.
         assert!(health(1).is_none());
         assert!(best_block(1).is_none());
+    }
+
+    /// Live probe, opt-in: `GPN_TEST_ACCOUNT=<ss58> cargo test --release --lib
+    /// live_status_doc -- --ignored --nocapture`. Prints the real numbers the
+    /// panel would show, twice, so the ledger's delta can be compared to the
+    /// chain balance's delta.
+    #[test]
+    #[ignore = "reads the live local node; opt in with GPN_TEST_ACCOUNT"]
+    fn live_status_doc_carries_chain_balance_and_earnings() {
+        let Ok(account) = std::env::var("GPN_TEST_ACCOUNT") else {
+            eprintln!("GPN_TEST_ACCOUNT not set — nothing to probe");
+            return;
+        };
+        let dir = std::env::temp_dir().join(format!("gpn-live-status-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::env::set_var("GPN_BASE_PATH", &dir);
+        let p = StatusParams {
+            node_up: true,
+            chain: "testnet",
+            rpc_port: 9944,
+            account: &account,
+            standby: false,
+            children: vec![],
+            ollama: "http://127.0.0.1:1",
+        };
+        let first = status_doc(&p);
+        println!(
+            "t0 total_balance={:?} earnings={:?} note={:?} window={:?}",
+            first["total_balance"],
+            first["earnings_today"],
+            first["earnings_note"],
+            first["earnings_window"]
+        );
+        std::thread::sleep(std::time::Duration::from_secs(40));
+        let second = status_doc(&p);
+        println!(
+            "t1 total_balance={:?} earnings={:?} note={:?}",
+            second["total_balance"], second["earnings_today"], second["earnings_note"]
+        );
+        assert!(first["earnings_window"].as_str().unwrap().contains("UTC"));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -242,6 +331,11 @@ mod tests {
         assert_eq!(v["best"], serde_json::Value::Null);
         // The dashboard must never invent earnings.
         assert_eq!(v["earnings_today"], serde_json::Value::Null);
+        assert!(v["earnings_note"]
+            .as_str()
+            .unwrap()
+            .starts_with("no figure:"));
+        assert_eq!(v["earnings_window"], crate::earnings::WINDOW_LABEL);
         // Item #211: the total is present and unreadable-⇒-null (port 1 has no
         // RPC), so the page shows a dash rather than a fabricated 0 GPN.
         assert_eq!(v["total_balance"], serde_json::Value::Null);

@@ -311,8 +311,10 @@
     var models = s.models || [];
     text($("models"), models.length ? models.length : "0");
     text($("modelsSub"), models.length ? models.slice(0, 3).join(", ") : "none loaded");
-    text($("earnings"), s.earnings_today === null || s.earnings_today === undefined ? "—" : s.earnings_today);
-    text($("earningsSub"), s.earnings_note || "from chain");
+    text($("earnings"), s.earnings_today === null || s.earnings_today === undefined ? "—" : (Number(s.earnings_today).toFixed(6) + " GPN"));
+    // Item #212: the figure states its source and window, or the reason there is
+    // none. Never a number without one, never a silent zero.
+    text($("earningsSub"), s.earnings_note || "source + window unknown");
     // Item #211: the total, read from the chain, next to the delta. Both are
     // rendered as "—" when unreadable — the panel never invents a number.
     var bal = s.total_balance;

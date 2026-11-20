@@ -93,6 +93,47 @@ pub struct AccountInfo {
     pub nonce: u64,
 }
 
+/// The 32 raw bytes of an SS58/0x-hex account, with the parse error kept.
+///
+/// Both forms occur in practice: `cfg.account` is usually 0x-hex (the node's
+/// `GPN_MINER_ACCOUNT` is hex), while an operator typing an address uses SS58.
+fn account_addr32(address: &str) -> Result<[u8; 32], String> {
+    let trimmed = address.trim();
+    if let Some(hex_part) = trimmed
+        .strip_prefix("0x")
+        .or_else(|| trimmed.strip_prefix("0X"))
+    {
+        let bytes = hex::decode(hex_part)
+            .map_err(|e| format!("{address} is not a valid 0x-hex account: {e}"))?;
+        if bytes.len() != 32 {
+            return Err(format!(
+                "{address} is {} bytes, not a 32-byte account id",
+                bytes.len()
+            ));
+        }
+        let mut out = [0u8; 32];
+        out.copy_from_slice(&bytes);
+        return Ok(out);
+    }
+    let addr32 = trimmed
+        .parse::<subxt::utils::AccountId32>()
+        .map_err(|e| format!("{address} is not a valid SS58/AccountId32 address: {e}"))?;
+    Ok(*addr32.as_ref())
+}
+
+/// Decode a fetched `System::Account` value, keeping the reason it did not.
+fn decode_account_info(address: &str, val: &subxt::dynamic::Value) -> Result<AccountInfo, String> {
+    let data = get_field(val, "data")
+        .ok_or_else(|| "System::Account decoded without a `data` field".to_string())?;
+    let free = get_u128_field(data, "free")
+        .ok_or_else(|| "System::Account has no decodable `free` balance".to_string())?;
+    Ok(AccountInfo {
+        address: address.to_string(),
+        balance: free as f64 / 1_000_000_000_000.0,
+        nonce: get_u32_field(val, "nonce").unwrap_or(0) as u64,
+    })
+}
+
 /// Read one account's balance from an RPC endpoint **without an async
 /// caller** (item #211: the install summary and the dashboard are both
 /// synchronous surfaces).
@@ -1038,26 +1079,11 @@ impl ChainClient {
     /// succeeded and the account has no `System::Account` entry.
     pub async fn get_account_info_result(&self, address: &str) -> Result<AccountInfo, String> {
         self.ensure_client().await?;
-        let addr32 = address
-            .parse::<subxt::utils::AccountId32>()
-            .map_err(|e| format!("{address} is not a valid SS58/AccountId32 address: {e}"))?;
-        let storage_addr = subxt::dynamic::storage(
-            "System",
-            "Account",
-            vec![Value::from_bytes(addr32.as_ref() as &[u8; 32])],
-        );
+        let addr32 = account_addr32(address)?;
+        let storage_addr =
+            subxt::dynamic::storage("System", "Account", vec![Value::from_bytes(addr32)]);
         match self.storage_at_head_result(&storage_addr).await? {
-            Some(val) => {
-                let data = get_field(&val, "data")
-                    .ok_or_else(|| "System::Account decoded without a `data` field".to_string())?;
-                let free = get_u128_field(data, "free")
-                    .ok_or_else(|| "System::Account has no decodable `free` balance".to_string())?;
-                Ok(AccountInfo {
-                    address: address.to_string(),
-                    balance: free as f64 / 1_000_000_000_000.0,
-                    nonce: get_u32_field(&val, "nonce").unwrap_or(0) as u64,
-                })
-            }
+            Some(val) => decode_account_info(address, &val),
             // A real answer, not a failure: this account has never been funded.
             None => Ok(AccountInfo {
                 address: address.to_string(),

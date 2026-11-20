@@ -17,6 +17,7 @@ pub mod compute_unit;
 pub mod config;
 pub mod dialcheck;
 pub mod disk;
+pub mod earnings;
 pub mod exit_report;
 pub mod firstrun;
 pub mod gov;

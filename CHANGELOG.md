@@ -49,12 +49,12 @@ them is checked against the built artifacts before the manifest is signed
   owner and by the whole `gpn*` process family; unattributable utilisation is
   `unknown`, never `foreign`; and when the only compute is our own the log says
   `own workload` once instead of engaging.
-- **"Earnings Today" now names its source and window, and is reconciled
-  against the chain (#212).** The panel states what the number measures
-  (settled channel settlements and block rewards for the stated window, local or
-  UTC), shows a total balance beside it instead of implying one, and renders a
-  disagreement between ledger and chain as a visible dash rather than a
-  plausible-looking number.
+- **"Earnings Today" now names its source and window, and is a chain figure
+  (#212).** The panel shows the balance growth the chain itself records since
+  00:00 UTC (block rewards plus settled job payments), says so on the card, and
+  keeps its day baseline on disk so a restart neither resets nor double-counts
+  the day. If the account spent money in the window, or the balance fell, the
+  card shows a dash with the reason instead of a number that would be wrong.
 - **Windows binaries are signed, or the installer asks to add a Defender
   exclusion (#209).** An unsigned new `gpn-node.exe` can be quarantined at first
   launch, which reads as "the update stopped the node and it did not come back".
