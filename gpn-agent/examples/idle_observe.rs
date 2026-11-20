@@ -88,12 +88,14 @@ fn main() {
             } => {
                 println!(
                     "[observe] t={:>5}s ACTION enter idle {} min — {} — {}",
-                    elapsed,
-                    minutes,
-                    reason,
-                    evidence
+                    elapsed, minutes, reason, evidence
                 );
-                let _ = gpn_agent::idle::start_at(std::path::Path::new(&idle_path), minutes, &reason, t);
+                let _ = gpn_agent::idle::start_at(
+                    std::path::Path::new(&idle_path),
+                    minutes,
+                    &reason,
+                    t,
+                );
             }
             Action::Exit { why } => {
                 println!("[observe] t={:>5}s ACTION resume — {}", elapsed, why);

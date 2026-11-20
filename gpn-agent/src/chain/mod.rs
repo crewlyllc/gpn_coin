@@ -93,6 +93,41 @@ pub struct AccountInfo {
     pub nonce: u64,
 }
 
+/// Read one account's balance from an RPC endpoint **without an async
+/// caller** (item #211: the install summary and the dashboard are both
+/// synchronous surfaces).
+///
+/// One short-timeout read, its own current-thread runtime, dropped when it
+/// returns — a dashboard poll must never wait longer than `timeout` and must
+/// never take the node down when the RPC is not up yet. `Err` means "could not
+/// read", which the callers render as a dash; that is deliberately distinct
+/// from `Ok(0.0)` ("read, account is unfunded").
+pub fn read_balance_blocking(
+    endpoint: &str,
+    address: &str,
+    timeout: std::time::Duration,
+) -> Result<AccountInfo, String> {
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(|e| format!("no runtime for a balance read: {e}"))?;
+    rt.block_on(async move {
+        let read = async {
+            let client = ChainClient::new(endpoint)
+                .await
+                .map_err(|e| format!("cannot connect to {endpoint}: {e}"))?;
+            client.get_account_info_result(address).await
+        };
+        match tokio::time::timeout(timeout, read).await {
+            Ok(r) => r,
+            Err(_) => Err(format!(
+                "balance read from {endpoint} timed out after {:?}",
+                timeout
+            )),
+        }
+    })
+}
+
 #[derive(Clone)]
 pub struct ChainClient {
     endpoint: String,

@@ -3427,6 +3427,11 @@ fn status_doc(cfg: &Config, shared: &Shared) -> serde_json::Value {
         // Reported as null so the dashboard shows "—" instead of a guess.
         "earnings_today": serde_json::Value::Null,
         "earnings_note": "not tracked locally — see the explorer",
+        // Item #211 (b): the total an operator actually asks for. Same read as
+        // the fleet dashboard uses, so both panels say the same number.
+        "total_balance": gpn_agent::nodestatus::total_balance_gpn(cfg.rpc_port, &cfg.account)
+            .map_or(serde_json::Value::Null, |b| json!(b)),
+        "balance_note": "free balance on chain, read from this node's RPC",
         "spec": env!("CARGO_PKG_VERSION"),
     })
 }
@@ -4035,6 +4040,16 @@ fn print_setup_summary(cfg: &Config) {
         Err(_) => asciiprintln!("  wallet      : {} (dev URI)", cfg.signer),
     }
     asciiprintln!("  payout      : {}", cfg.account);
+    // Item #211 (a): one RPC read, so a fresh install can see what it has
+    // without running anything else. Unreadable is a dash, never a 0.
+    let balance = if cfg.account.trim().is_empty() {
+        None
+    } else {
+        gpn_agent::chain::read_balance_blocking(&cfg.endpoint, &cfg.account, Duration::from_secs(3))
+            .ok()
+            .map(|i| i.balance)
+    };
+    asciiprintln!("  balance     : {}", balance_summary_line(balance));
     asciiprintln!(
         "  public addr : {}",
         cfg.public_addr.as_deref().unwrap_or("<auto>")
@@ -4055,6 +4070,17 @@ fn print_setup_summary(cfg: &Config) {
         }
     );
     asciiprintln!("\n  Start the node:  {}\n", exe_hint());
+}
+
+/// The `balance` row of the install summary (item #211 (a)): the number, or an
+/// explicit dash that names the one command that asks again. Never `0`.
+fn balance_summary_line(balance: Option<f64>) -> String {
+    match balance {
+        Some(b) => format!("{b:.6} GPN (free, on chain)"),
+        None => {
+            "— (no balance read; is the node running? `gpn_wallet balance` asks again)".to_string()
+        }
+    }
 }
 
 /// `./gpn_node` (Unix) / `gpn_node.exe` (Windows) for the final hint.
@@ -5137,6 +5163,18 @@ mod tests {
         );
         let _ = std::fs::remove_dir_all(&pinned);
         let _ = std::fs::remove_dir_all(&legacy);
+    }
+
+    #[test]
+    fn the_install_summary_states_the_balance_or_a_dash() {
+        // Item #211 (a): a number when the read worked, an explicit dash naming
+        // the next command when it did not — never a fabricated 0.
+        let line = balance_summary_line(Some(2386909.263740634));
+        assert_eq!(line, "2386909.263741 GPN (free, on chain)");
+        let dash = balance_summary_line(None);
+        assert!(dash.starts_with('—'), "{dash}");
+        assert!(dash.contains("gpn_wallet balance"), "{dash}");
+        assert!(!dash.contains("0.000000"), "{dash}");
     }
 
     #[test]

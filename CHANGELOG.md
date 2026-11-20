@@ -36,7 +36,10 @@ them is checked against the built artifacts before the manifest is signed
 - **An operator can read their own balance without asking anyone (#211).** The
   startup summary prints `balance: N GPN` (one RPC read, a dash if unreadable),
   the dashboard shows a total next to "Earnings Today", and `gpn_wallet balance`
-  with no endpoint argument defaults to the local node and keystore.
+  with no endpoint argument defaults to the local node and keystore. From
+  another machine, `GET /account/<ss58>` on the access point answers the same
+  question — read-only, public (a balance is chain data), and an unreadable
+  chain is a 502, never a plausible `0`.
 
 ### Changed
 - **Auto-idle no longer mistakes GPN's own mining for someone else's work

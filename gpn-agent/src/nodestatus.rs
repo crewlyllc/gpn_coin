@@ -77,6 +77,44 @@ pub fn gpu_summary() -> (String, String) {
     }
 }
 
+/// The account's **total free balance** (item #211 (b)) — the number an
+/// operator needs next to "Earnings today", which is a delta and cannot answer
+/// "how much do I have?".
+///
+/// Read over the node's own RPC (subxt, `System::Account`) with a short
+/// timeout, cached for [`BALANCE_TTL`] so a page polling every couple of
+/// seconds is not a stream of websocket handshakes. `None` = could not read
+/// (node starting, RPC down) and the page renders `—`; it never guesses.
+pub fn total_balance_gpn(rpc_port: u16, account: &str) -> Option<f64> {
+    use std::sync::Mutex;
+    use std::time::Instant;
+    static CACHE: Mutex<Option<(Instant, String, Option<f64>)>> = Mutex::new(None);
+
+    if account.trim().is_empty() {
+        return None;
+    }
+    let mut cache = match CACHE.lock() {
+        Ok(c) => c,
+        Err(p) => p.into_inner(),
+    };
+    if let Some((at, who, val)) = cache.as_ref() {
+        if who == account && at.elapsed() < BALANCE_TTL {
+            return *val;
+        }
+    }
+    let endpoint = format!("ws://127.0.0.1:{rpc_port}");
+    let read = crate::chain::read_balance_blocking(&endpoint, account, BALANCE_TIMEOUT)
+        .ok()
+        .map(|i| i.balance);
+    *cache = Some((Instant::now(), account.to_string(), read));
+    read
+}
+
+/// How long a dashboard balance read is reused.
+const BALANCE_TTL: Duration = Duration::from_secs(30);
+/// A dashboard poll must never hang on a starting node.
+const BALANCE_TIMEOUT: Duration = Duration::from_millis(1500);
+
 /// Models the local ollama reports as present (best effort, short timeout).
 pub fn ollama_models(ollama_url: &str) -> Vec<String> {
     let Ok(client) = reqwest::blocking::Client::builder()
@@ -167,6 +205,10 @@ pub fn status_doc(p: &StatusParams<'_>) -> serde_json::Value {
         // Reported as null so the dashboard shows "—" instead of a guess.
         "earnings_today": serde_json::Value::Null,
         "earnings_note": "not tracked locally — see the explorer",
+        // Item #211 (b): a *total* beside the delta, read from the chain.
+        "total_balance": total_balance_gpn(p.rpc_port, p.account)
+            .map_or(serde_json::Value::Null, |b| serde_json::json!(b)),
+        "balance_note": "free balance on chain, read from this node's RPC",
         "spec": env!("CARGO_PKG_VERSION"),
     })
 }
@@ -200,6 +242,10 @@ mod tests {
         assert_eq!(v["best"], serde_json::Value::Null);
         // The dashboard must never invent earnings.
         assert_eq!(v["earnings_today"], serde_json::Value::Null);
+        // Item #211: the total is present and unreadable-⇒-null (port 1 has no
+        // RPC), so the page shows a dash rather than a fabricated 0 GPN.
+        assert_eq!(v["total_balance"], serde_json::Value::Null);
+        assert!(v["balance_note"].as_str().unwrap().contains("chain"));
         assert!(v["models"].as_array().unwrap().is_empty());
     }
 }

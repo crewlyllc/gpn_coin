@@ -13,7 +13,8 @@
 //! Usage:
 //!   gpn_wallet keygen [--out <file>] [--words N] [--password <pw>]
 //!   gpn_wallet address  <keystore.json|mnemonic|//URI> [--password <pw>]
-//!   gpn_wallet balance  <endpoint> <ss58|0xhex|keystore.json|//URI> [--password <pw>]
+//!   gpn_wallet balance  [<endpoint>] [<ss58|0xhex|keystore.json|//URI>] [--password <pw>]
+//!     with no arguments it reads the local node and the local keystore.
 //!   gpn_wallet send     <endpoint> <keystore.json|mnemonic|//URI> <dest-ss58|0xhex> <amount_gpn> [--password <pw>]
 //!   gpn_wallet sign     <keystore.json|mnemonic|//URI> <message> [--hex] [--password <pw>]
 //!
@@ -33,6 +34,19 @@ use subxt::tx::Signer as _;
 use subxt::utils::AccountId32;
 
 const GPN_UNITS: f64 = 1_000_000_000_000.0;
+
+/// The node every install runs locally; a bare `balance` uses it.
+const DEFAULT_ENDPOINT: &str = "ws://127.0.0.1:9944";
+
+/// `~/x` → the caller's home (the node does the same for `GPN_BASE_PATH`).
+fn expand_tilde(p: &str) -> String {
+    if let Some(rest) = p.strip_prefix("~/") {
+        if let Ok(home) = std::env::var("HOME") {
+            return format!("{home}/{rest}");
+        }
+    }
+    p.to_string()
+}
 
 /// A parsed wallet source: an mnemonic (or dev/derivation URI) + optional
 /// password, optionally persisted in a JSON keystore.
@@ -222,16 +236,67 @@ fn cmd_address(args: &[String]) -> Result<(), String> {
     Ok(())
 }
 
+/// Where `balance` should read from, in the shortest form an operator can
+/// type (item #211 (c)):
+///
+///   `gpn_wallet balance`                  → local node + local keystore
+///   `gpn_wallet balance <addr|keystore>`  → local node
+///   `gpn_wallet balance <endpoint> <who>` → as given
+///
+/// A single positional that contains `://` is an endpoint (an address never
+/// does), so the old two-argument form keeps working unchanged.
+fn balance_targets(
+    pos: &[String],
+    env_endpoint: Option<String>,
+    default_keystore: &Path,
+) -> Result<(String, String), String> {
+    let local = || {
+        env_endpoint
+            .clone()
+            .unwrap_or_else(|| DEFAULT_ENDPOINT.to_string())
+    };
+    match pos.len() {
+        0 => {
+            let ks = default_keystore.display().to_string();
+            if !default_keystore.is_file() {
+                return Err(format!(
+                    "no keystore at {ks} — run `gpn_node --ensure-wallet` on the node's own \
+                     machine, or pass a keystore/address: \
+                     `gpn_wallet balance <ss58|keystore.json>`"
+                ));
+            }
+            Ok((local(), ks))
+        }
+        1 => {
+            let only = pos[0].clone();
+            if only.contains("://") {
+                Ok((only, default_keystore.display().to_string()))
+            } else {
+                Ok((local(), only))
+            }
+        }
+        _ => Ok((pos[0].clone(), pos[1].clone())),
+    }
+}
+
+/// The local keystore a bare `gpn_wallet balance` reads: `<base>/keystore.json`,
+/// with `GPN_BASE_PATH` honoured exactly as the node honours it.
+fn default_keystore_path() -> std::path::PathBuf {
+    let base = std::env::var("GPN_BASE_PATH")
+        .ok()
+        .map(|s| std::path::PathBuf::from(expand_tilde(&s)))
+        .unwrap_or_else(gpn_agent::firstrun::default_base_path);
+    gpn_agent::firstrun::default_keystore_path(&base)
+}
+
 async fn cmd_balance(args: &[String]) -> Result<(), String> {
     let (pos, password, _hex) = extract_flags(args);
-    let endpoint = pos
-        .first()
-        .cloned()
-        .or_else(|| std::env::var("ENDPOINT").ok())
-        .unwrap_or_else(|| "ws://127.0.0.1:9944".to_string());
-    let target = pos
-        .get(1)
-        .ok_or("usage: balance <endpoint> <ss58|0xhex|keystore.json|//URI>")?;
+    let (endpoint, target) = balance_targets(
+        &pos,
+        std::env::var("ENDPOINT").ok(),
+        &default_keystore_path(),
+    )?;
+    let target = target.as_str();
 
     // Resolve the queried address: a wallet source derives it; an ss58/hex is
     // taken as-is.
@@ -330,7 +395,10 @@ fn print_usage() {
     eprintln!();
     eprintln!("  gpn_wallet keygen  [--out <file>] [--password <pw>]");
     eprintln!("  gpn_wallet address <keystore.json|mnemonic|//URI> [--password <pw>]");
-    eprintln!("  gpn_wallet balance <endpoint> <ss58|0xhex|keystore.json|//URI> [--password <pw>]");
+    eprintln!("  gpn_wallet balance                    # local node + local keystore");
+    eprintln!(
+        "  gpn_wallet balance [<endpoint>] [<ss58|0xhex|keystore.json|//URI>] [--password <pw>]"
+    );
     eprintln!("  gpn_wallet send    <endpoint> <keystore.json|mnemonic|//URI> <dest> <amount_gpn> [--password <pw>]");
     eprintln!(
         "  gpn_wallet sign    <keystore.json|mnemonic|//URI> <message> [--hex] [--password <pw>]"
@@ -460,6 +528,43 @@ mod tests {
             b"pay:job=42;amount=1.6",
             &pair.public()
         ));
+    }
+
+    #[test]
+    fn a_bare_balance_defaults_to_the_local_node_and_keystore() {
+        let ks = std::path::Path::new("/nonexistent/keystore.json");
+        // Missing keystore is an actionable error, not a silent zero.
+        let err = balance_targets(&[], None, ks).unwrap_err();
+        assert!(err.contains("gpn_node --ensure-wallet"), "{err}");
+
+        let tmp = std::env::temp_dir().join(format!("gpn-wallet-ks-{}", std::process::id()));
+        std::fs::write(&tmp, "{}").unwrap();
+        let (endpoint, target) = balance_targets(&[], None, &tmp).unwrap();
+        assert_eq!(endpoint, DEFAULT_ENDPOINT);
+        assert_eq!(target, tmp.display().to_string());
+        // ENDPOINT still wins as the endpoint when one is given.
+        let (endpoint, _) = balance_targets(&[], Some("ws://10.0.0.5:9944".into()), &tmp).unwrap();
+        assert_eq!(endpoint, "ws://10.0.0.5:9944");
+        std::fs::remove_file(&tmp).ok();
+    }
+
+    #[test]
+    fn one_positional_is_an_address_unless_it_is_an_endpoint() {
+        let ks = std::path::Path::new("/nonexistent/keystore.json");
+        let addr = vec!["5E2MYAnDEhV5C9GMoZ48HG4SwZcjqYwXy93XKZm5Zu1WvYf8".to_string()];
+        let (endpoint, target) = balance_targets(&addr, None, ks).unwrap();
+        assert_eq!(endpoint, DEFAULT_ENDPOINT);
+        assert_eq!(target, addr[0]);
+
+        let ep = vec!["ws://127.0.0.2:9944".to_string()];
+        let (endpoint, _) = balance_targets(&ep, None, ks).unwrap();
+        assert_eq!(endpoint, "ws://127.0.0.2:9944");
+
+        // The old two-positional form is untouched.
+        let two = vec!["ws://127.0.0.3:9944".to_string(), addr[0].clone()];
+        let (endpoint, target) = balance_targets(&two, None, ks).unwrap();
+        assert_eq!(endpoint, "ws://127.0.0.3:9944");
+        assert_eq!(target, addr[0]);
     }
 
     #[test]

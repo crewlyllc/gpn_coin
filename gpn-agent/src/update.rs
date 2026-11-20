@@ -5914,30 +5914,41 @@ mod tests {
 
         // (a) the directory exists and the binary is gone -> quarantine shape.
         let gone = |p: &Path| p != exe.as_path();
-        let ev = detect_security_block(&[exe.clone()], &gone, "").expect("missing exe is evidence");
+        let ev = detect_security_block(std::slice::from_ref(&exe), &gone, "")
+            .expect("missing exe is evidence");
         assert!(ev.contains("gpn-node.exe is missing"), "{ev}");
 
         // (b) nothing installed at all -> no evidence; this is a fresh box.
         let empty = |_p: &Path| false;
-        assert_eq!(detect_security_block(&[exe.clone()], &empty, ""), None);
+        assert_eq!(
+            detect_security_block(std::slice::from_ref(&exe), &empty, ""),
+            None
+        );
 
         // (c) everything present and a silent exit -> no evidence.
         let present = |_p: &Path| true;
-        assert_eq!(detect_security_block(&[exe.clone()], &present, ""), None);
+        assert_eq!(
+            detect_security_block(std::slice::from_ref(&exe), &present, ""),
+            None
+        );
 
         // (d) STATUS_ACCESS_DENIED in the exit ledger, signed or unsigned.
         let signed = r#"{"kind":"spawn-error","exit_code":-1073741790}"#;
-        let ev = detect_security_block(&[exe.clone()], &present, signed).expect("0xC0000022");
+        let ev = detect_security_block(std::slice::from_ref(&exe), &present, signed)
+            .expect("0xC0000022");
         assert!(ev.contains("0xC0000022"), "{ev}");
         let unsigned = r#"{"kind":"spawn-error","exit_code":3221225506}"#;
-        assert!(detect_security_block(&[exe.clone()], &present, unsigned).is_some());
+        assert!(detect_security_block(std::slice::from_ref(&exe), &present, unsigned).is_some());
         let hexed = r#"{"kind":"spawn-error","exit_code":"0xc0000022"}"#;
-        assert!(detect_security_block(&[exe.clone()], &present, hexed).is_some());
+        assert!(detect_security_block(std::slice::from_ref(&exe), &present, hexed).is_some());
 
         // (e) STATUS_DLL_NOT_FOUND alone is the missing-VC++-runtime case, not
         // a block; only a security-software phrase makes it evidence.
         let dll = r#"{"kind":"spawn-error","exit_code":-1073741515}"#;
-        assert_eq!(detect_security_block(&[exe.clone()], &present, dll), None);
+        assert_eq!(
+            detect_security_block(std::slice::from_ref(&exe), &present, dll),
+            None
+        );
         let dll_av = r#"{"kind":"spawn-error","exit_code":-1073741515,"detail":"Windows Defender blocked this file"}"#;
         assert!(detect_security_block(&[exe], &present, dll_av).is_some());
 

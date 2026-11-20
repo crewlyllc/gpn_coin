@@ -4683,6 +4683,40 @@ impl AccountResolver {
 }
 
 /// Answer `504 {"error":"deadline"}` and let the handler thread exit.
+/// The body of `GET /account/{ss58}` (item #211 (b)): a read that worked is a
+/// number, a read that failed is an explicit error. `0.0` is never used as
+/// "could not read" — that is the #110 defect in a different place.
+fn account_balance_json(
+    addr: &str,
+    read: Result<gpn_agent::chain::AccountInfo, String>,
+) -> serde_json::Value {
+    match read {
+        Ok(i) => json!({
+            "address": i.address,
+            "free_gpn": i.balance,
+            "nonce": i.nonce,
+            "unit": "GPN",
+            "source": "chain",
+        }),
+        Err(e) => {
+            // A malformed address is the caller's mistake (400); anything else
+            // is our inability to read the chain (502). Never a 200 with no
+            // balance, which a client would have to guess about.
+            let status = if e.contains("not a valid SS58") {
+                400
+            } else {
+                502
+            };
+            json!({
+                "_status": status,
+                "error": "unreadable",
+                "address": addr,
+                "detail": e,
+            })
+        }
+    }
+}
+
 fn respond_deadline(req: tiny_http::Request, hdr: &Header, what: &str) {
     let _ = req.respond(
         Response::from_string(
@@ -5806,6 +5840,26 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         onchain,
                         canonical_port,
                     )
+                }
+                // GET /account/{ss58} — a read-only balance read (item #211 (b)).
+                // The item's requirement is "an operator on another machine can
+                // read their balance without SSH-ing in and without exposing the
+                // node's loopback dashboard": the AP is already the public
+                // surface (it serves /v1/chat/completions, /jobs, /providers
+                // through the same tunnel), so the answer belongs here. Public
+                // by design — a balance is chain data — and read-only: it
+                // touches no ledger, no store and no escrow.
+                (Method::Get, ["account", who]) => {
+                    let addr = pct_decode(who);
+                    let read = chain_or_504!(
+                        deadline,
+                        &rt,
+                        req,
+                        hdr,
+                        "account",
+                        client.get_account_info_result(&addr)
+                    );
+                    account_balance_json(&addr, read)
                 }
                 (Method::Get, ["providers"]) => {
                     let reg = registry.lock().unwrap();
@@ -8843,6 +8897,43 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Item #211 (b): `GET /account/{ss58}` answers with the chain's number, and
+    /// a failed read is an explicit error — never a plausible-looking `0`.
+    #[test]
+    fn account_route_reports_the_balance_or_says_it_could_not_read() {
+        let ok = account_balance_json(
+            "5ENqSp5Q65bxfgryZExQDRnV1rEW1qb2UBztvswLamkoUrqj",
+            Ok(gpn_agent::chain::AccountInfo {
+                address: "5ENqSp5Q65bxfgryZExQDRnV1rEW1qb2UBztvswLamkoUrqj".into(),
+                balance: 2386909.263740634,
+                nonce: 7,
+            }),
+        );
+        assert_eq!(ok["free_gpn"].as_f64().unwrap(), 2386909.263740634);
+        assert_eq!(ok["nonce"], 7);
+        assert_eq!(ok["source"], "chain");
+        assert!(ok.get("error").is_none());
+
+        let err = account_balance_json(
+            "5ENqSp5Q65bxfgryZExQDRnV1rEW1qb2UBztvswLamkoUrqj",
+            Err("rpc down".into()),
+        );
+        assert_eq!(err["error"], "unreadable");
+        assert_eq!(err["_status"], 502);
+        assert!(
+            err.get("free_gpn").is_none(),
+            "a failed read must not carry a number"
+        );
+        assert_eq!(err["detail"], "rpc down");
+
+        // A malformed address is a 400, not a 502: the caller can fix it.
+        let bad = account_balance_json(
+            "not-an-address",
+            Err("not-an-address is not a valid SS58/AccountId32 address: Base 58".into()),
+        );
+        assert_eq!(bad["_status"], 400);
+    }
 
     /// Item #53: a completed chat job reports the backend's real token counts in
     /// the OpenAI `usage` block instead of the hard-coded zeros every client saw
