@@ -1,6 +1,6 @@
 # GPN node-free wallet (`gpn_wallet`)
 
-*Verified against: chain spec 51 / release 0.3.60 — checked 2026-11-19 at block 327,403.*
+*Verified against: chain spec 52 / release 0.3.61 — checked 2026-11-20 at block 331,873.*
 
 A lightweight **sr25519** wallet so an AI user / trader can create, hold and move GPN
 **without running a full GPN node**. Standard Substrate key derivation — the address and

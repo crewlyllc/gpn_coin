@@ -1,6 +1,6 @@
 # Updates — auto-update, the minimum-version cutoff, and release signing
 
-*Verified against: chain spec 51 / release 0.3.60 — checked 2026-11-19 at block 327,403.*
+*Verified against: chain spec 52 / release 0.3.61 — checked 2026-11-20 at block 331,873.*
 
 A GPN node is a **consensus participant**, so "run an old binary" is not a
 neutral choice: an out-of-date node can seal blocks that the rest of the network
