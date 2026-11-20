@@ -112,18 +112,24 @@ An unfiled checklist is a finished release nobody can find later.
 - **A tick is a claim with evidence**: version string, log line, or commit sha next to it.
   A box ticked without evidence is not ticked.
 
-## 0d. Anything waiting on Jeremy goes to him immediately (owner rule, 2026-11-20)
+## 0d. Decisions go to the assistant first; only real ones reach Jeremy (owner rule, 2026-11-20)
 
-If work is blocked on a decision that is his — product, economics, trust, which machine to use,
-what to spend — **message him the moment it is identified.** Not at the end of the run, not in a
-summary, not "next time he asks".
+Two stages, and the order matters:
 
-- Deliver it to the channel he actually reads (the release loop announces to his Discord DM),
-  one message per decision, with: item id, the question in one sentence, the options with their
-  consequences, and a recommendation.
-- Mark the row `AWAITING-OWNER` **only for a genuine decision**. Work he has already ordered is
-  work — do it. (0.3.61: rows 215/216 were escalated to `AWAITING-OWNER` although he had already
-  told us to do exactly that work.)
+1. **The loop escalates to the assistant, not to Jeremy.** When something looks like it needs a
+   decision, write it to `docs/NEEDS-TRIAGE.md` (item id, the question in one sentence, the
+   options with consequences, your recommendation) and announce the run to the Discord DM marked
+   **`[TRIAGE]`**. The assistant reads that and decides.
+2. **Only the assistant messages Jeremy**, and only when the answer changes *what we build*:
+   product scope, economics, money, trust/security posture, which machine to use, or anything
+   irreversible. Everything else the assistant decides and records.
+
+Rules that follow from this:
+- `AWAITING-OWNER` is only for a genuine owner decision that survived triage. Work Jeremy has
+  already ordered is work — do it. (0.3.61: rows 215/216 were escalated although he had already
+  said exactly what to do.)
+- Never leave a decision in a file nobody reads: a `[TRIAGE]` item not picked up in one run must
+  be re-announced louder, not silently dropped.
 - A decision raised and not delivered is worse than no rule at all: it looks handled and is not.
 
 ## 1. Test first (before any code is written)
