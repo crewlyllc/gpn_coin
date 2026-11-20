@@ -3,6 +3,28 @@
 Newest first. Written by the release loop; read by the assistant, who relays anything
 that needs Jeremy. `[TRIAGE]` = a decision waiting on the assistant.
 
+## 14:20 PT — 0.3.63 §3b row 217: the gate is honest and calibrated; its first green belongs to 218 [no triage needed]
+
+- **CI**: `GET /commits/main` → `ba7cc96`; `actions/runs?head_sha=ba7cc96` → `total_count: 0`
+  (docs-only, paths-ignore) — expected, nothing waited on.
+- **Box ticked**: §3b row 217 — as *this batch's scope*, per the recorded decision
+  (`NEEDS-TRIAGE.md`, 11:58 PT, option A): 0.3.63 ships the restated acceptance + the gate, the
+  live green is 218's and rides the release carrying `fe71e35`. Row 217 stays IN-PROGRESS.
+- **Evidence**: `--self-test` → `PASSED (7/7)`; live `--journal-unit gpn-fleet` → window
+  335795..335894, mean **19.83 s**, median 14.06 s, max **87.21 s**; clause 1 (10× mean = 198.3 s)
+  **0 violations**; clause 2 → 4 suspect, **4 unexplained** (62.24 / 87.21 / 80.75 / 61.17 s) →
+  `RESULT: FAIL`. Caller is live: `gpn-cadence-gate.timer` → `active`, state file
+  `{"checked_at":"2026-11-20T22:01:10Z","exit":1,"violations":4,"max_gap_s":112.26}`.
+- **Finding (why FAIL is the right state)**: clause 2 needs a cause in the node's own output, and
+  the `sealer: still searching` heartbeat exists only on `fix/218-sealer-heartbeat` — not in this
+  build. So the gate cannot pass by luck, and a wording-only batch has no runtime claim to prove.
+  Went looking in the journal for one offending window (13:32:18–13:34:10 PT, the 112 s hole):
+  the node was alive and dialling (`peer-priority: dialled 1/4 …`, `chain-work` every 30 s) but
+  emitted no sealing line at all. That is 218's blind spot, not a gate defect.
+- **Next run**: §3 box 1 (`bump-version.py patch`, already done in `2a15c16`) and box 3
+  (`--check` → `lockstep: 15 manifest(s) and 14 lockfile entr(ies) agree`, verified this run),
+  then §4 push rules and §5 dispatch.
+
 ## 13:55 PT — 0.3.63 §2 box 6 (the change is in the tree) verified against committed objects [no triage needed]
 
 - **CI**: `GET /commits/main` → `1ffb9ca`; `actions/runs?head_sha=1ffb9ca` → `total_count: 0`
