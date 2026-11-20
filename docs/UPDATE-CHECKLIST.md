@@ -91,6 +91,12 @@ Rules for notes:
 2. add a row to `docs/releases/INDEX.md` — version, publish date, the item ids it carried
 3. leave a one-line pointer in the list row (`COMPLETE 0.3.60 — archive/0.3.60.md`)
 
+These are **checkboxes, not prose** (added 2026-11-20, after 0.3.61 and 0.3.62 were both
+published and neither was filed — the instruction existed only as text, so nothing counted it):
+
+- [ ] The finished checklist is in `docs/releases/archive/<version>.md`
+- [ ] `docs/releases/INDEX.md` has a row for this version, with the item ids it carried
+
 An unfiled checklist is a finished release nobody can find later.
 
 ## 0. Sequencing — the rule that binds the rest
@@ -105,6 +111,20 @@ An unfiled checklist is a finished release nobody can find later.
   say so rather than relying on discipline.
 - **A tick is a claim with evidence**: version string, log line, or commit sha next to it.
   A box ticked without evidence is not ticked.
+
+## 0d. Anything waiting on Jeremy goes to him immediately (owner rule, 2026-11-20)
+
+If work is blocked on a decision that is his — product, economics, trust, which machine to use,
+what to spend — **message him the moment it is identified.** Not at the end of the run, not in a
+summary, not "next time he asks".
+
+- Deliver it to the channel he actually reads (the release loop announces to his Discord DM),
+  one message per decision, with: item id, the question in one sentence, the options with their
+  consequences, and a recommendation.
+- Mark the row `AWAITING-OWNER` **only for a genuine decision**. Work he has already ordered is
+  work — do it. (0.3.61: rows 215/216 were escalated to `AWAITING-OWNER` although he had already
+  told us to do exactly that work.)
+- A decision raised and not delivered is worse than no rule at all: it looks handled and is not.
 
 ## 1. Test first (before any code is written)
 
