@@ -2994,6 +2994,95 @@ impl TemplateGap {
     }
 }
 
+/// How often the sealer says, out loud, that it is still searching while the
+/// *same* template stays unsolved.
+///
+/// Row 218: two network stalls of 153 s and 232 s left **no** line in the
+/// journal — no `GPU sealed block`, no park line, no template-gap line, no error.
+/// The stop could therefore not be attributed to the GPU, to the consensus
+/// worker, or to the submit path, and the incident could only be guessed at.
+/// Once the miner has held one template for this long, the silence itself is a
+/// bug: every 20 s it prints what it has searched.
+const SEAL_HEARTBEAT_MS: u128 = 20_000;
+
+/// A solved template that took longer than this is reported at WARN, because a
+/// gap like that is exactly what row 218 says must have a cause in our output.
+const SLOW_SOLVE_WARN_MS: u128 = 45_000;
+
+/// Fingerprint of a template's `pre_hash` for change detection.
+pub(crate) fn template_fp(pre_hash: &[u8]) -> u128 {
+    let mut b = [0u8; 16];
+    let n = pre_hash.len().min(16);
+    b[..n].copy_from_slice(&pre_hash[..n]);
+    u128::from_le_bytes(b)
+}
+
+/// Edge-triggered sealer heartbeat.
+///
+/// Feed it, once per miner iteration, the template currently being searched
+/// (`None` = consensus handed us no work) and how many nonce windows have been
+/// searched for it. It returns a line to log at most once per `period_ms` for
+/// an unsolved template, and one line when that template is finally solved.
+/// Nothing is returned for the normal sub-second case, so the log stays quiet.
+pub(crate) struct SealWatch {
+    template: Option<u128>,
+    since_ms: u128,
+    last_beat_ms: u128,
+    period_ms: u128,
+}
+
+impl SealWatch {
+    fn new(period_ms: u128) -> Self {
+        Self {
+            template: None,
+            since_ms: 0,
+            last_beat_ms: 0,
+            period_ms,
+        }
+    }
+
+    /// One miner iteration. `batches` counts nonce windows searched for the
+    /// current template (the caller resets it when the template changes).
+    fn update(&mut self, template: Option<u128>, now_ms: u128, batches: u64) -> Option<String> {
+        let Some(fp) = template else {
+            // No template: the `TemplateGap` tracker owns that story.
+            self.template = None;
+            return None;
+        };
+        if self.template != Some(fp) {
+            self.template = Some(fp);
+            self.since_ms = now_ms;
+            self.last_beat_ms = now_ms;
+            return None;
+        }
+        if now_ms.saturating_sub(self.last_beat_ms) < self.period_ms {
+            return None;
+        }
+        self.last_beat_ms = now_ms;
+        let secs = now_ms.saturating_sub(self.since_ms) as f64 / 1000.0;
+        Some(format!(
+            "sealer: still searching template 0x{fp:032x} after {secs:.1}s \
+             ({batches} nonce window(s) searched, GPU healthy, submit not yet attempted)"
+        ))
+    }
+
+    /// Record that a solution was found for `template`. Returns a WARN-level
+    /// line when the search took longer than `SLOW_SOLVE_WARN_MS` (row 218:
+    /// a gap that long must be attributable from our own output).
+    fn solved(&mut self, template: Option<u128>, now_ms: u128) -> Option<String> {
+        let fp = template?;
+        let looked = self.template == Some(fp);
+        let secs = now_ms.saturating_sub(self.since_ms) as f64 / 1000.0;
+        self.template = None;
+        if !looked || now_ms.saturating_sub(self.since_ms) < SLOW_SOLVE_WARN_MS {
+            return None;
+        }
+        Some(format!(
+            "sealer: slow solve — template 0x{fp:032x} took {secs:.1}s to find a nonce"
+        ))
+    }
+}
+
 /// Emit a [`GapLine`] at the level it asks for.
 fn log_gap_line(line: GapLine) {
     if line.warn {
@@ -3136,6 +3225,10 @@ fn spawn_gpu_miner(worker: MiningWorker, author: Option<[u8; 32]>, base_path: st
             let mut park = ParkLog::new();
             let started_at = std::time::Instant::now();
             let mut gap = TemplateGap::new();
+            // Row 218: never let a long search be silent.
+            let mut watch = SealWatch::new(SEAL_HEARTBEAT_MS);
+            let mut batches: u64 = 0;
+            let mut watch_fp: Option<u128> = None;
             loop {
                 // Full stop when the GPU belongs to something else: an AI job
                 // (the provider holds the yield flag) or an operator idle window
@@ -3153,9 +3246,20 @@ fn spawn_gpu_miner(worker: MiningWorker, author: Option<[u8; 32]>, base_path: st
                 }
                 // Attribute a long absence of work instead of leaving it silent.
                 let metadata = worker.metadata();
-                if let Some(line) = gap.update(metadata.is_some(), started_at.elapsed().as_millis())
-                {
+                let now_ms = started_at.elapsed().as_millis();
+                if let Some(line) = gap.update(metadata.is_some(), now_ms) {
                     log_gap_line(line);
+                }
+                // Attribute a long *search* the same way: one INFO line every
+                // SEAL_HEARTBEAT_MS while one template stays unsolved, so a
+                // 2.5-minute stop can never again be invisible (row 218).
+                let fp = metadata.as_ref().map(|m| template_fp(m.pre_hash.as_ref()));
+                if fp != watch_fp {
+                    watch_fp = fp;
+                    batches = 0;
+                }
+                if let Some(line) = watch.update(fp, now_ms, batches) {
+                    log::info!("{line}");
                 }
                 if let Some(metadata) = metadata {
                     let pre_hash = metadata.pre_hash;
@@ -3168,6 +3272,7 @@ fn spawn_gpu_miner(worker: MiningWorker, author: Option<[u8; 32]>, base_path: st
                     }
 
                     let header: [u8; 32] = pre_hash.as_ref().try_into().expect("hash is 32 bytes");
+                    let seal_fp = template_fp(pre_hash.as_ref());
                     // The pallet stores a *target* (hash < target = valid).
                     // GPU kernel compares little-endian, matching U256::to_little_endian.
                     let target_le: [u8; 32] = target.to_little_endian();
@@ -3175,6 +3280,10 @@ fn spawn_gpu_miner(worker: MiningWorker, author: Option<[u8; 32]>, base_path: st
                     match miner.mine_batch(&dag, &header, &target_le, nonce, GPU_BATCH) {
                         Ok(Some(seal)) => {
                             let sealing_nonce = seal.nonce;
+                            if let Some(line) = watch.solved(Some(seal_fp), started_at.elapsed().as_millis())
+                            {
+                                log::warn!("{line}");
+                            }
                             // Another authority may have imported a block on this same
                             // parent while we were solving. `submit()` verifies the seal
                             // against the *current* template's `pre_hash`, so a solution
@@ -3214,7 +3323,17 @@ fn spawn_gpu_miner(worker: MiningWorker, author: Option<[u8; 32]>, base_path: st
                                 continue;
                             }
                             let seal_bytes = seal_with_author(seal.to_seal_bytes(), author);
+                            // Row 218's second silence candidate: the seal exists but
+                            // `submit` waits on the node's runtime. Time it, so a
+                            // blocked submit is a log line and not a hole.
+                            let submit_started = std::time::Instant::now();
                             let ok = futures::executor::block_on(worker.submit(seal_bytes));
+                            let submit_ms = submit_started.elapsed().as_millis();
+                            if submit_ms > 2_000 {
+                                log::warn!(
+                                    "seal submit for pre_hash={pre_hash:?} (nonce={sealing_nonce}) blocked {submit_ms} ms before returning ok={ok}"
+                                );
+                            }
                             if ok {
                                 log::info!(
                                     "⛏  GPU sealed block: nonce={sealing_nonce} pre_hash={pre_hash:?}"
@@ -3238,6 +3357,7 @@ fn spawn_gpu_miner(worker: MiningWorker, author: Option<[u8; 32]>, base_path: st
                         Ok(None) => {
                             // No solution in this window — advance and retry.
                             nonce = nonce.wrapping_add(GPU_BATCH as u64);
+                            batches = batches.saturating_add(1);
                         }
                         Err(e) => {
                             log::error!("GPU mine error: {e}");
@@ -3695,5 +3815,88 @@ mod idle_mode_tests {
             back.update(true, 2_000).is_none(),
             "no warning ⇒ no recovery line"
         );
+    }
+}
+
+#[cfg(test)]
+mod seal_watch_tests {
+    use super::*;
+
+    /// Row 218: a template must never be searched in silence for longer than
+    /// the heartbeat period. This is the regression test for the 153 s and
+    /// 232 s stalls that produced *no* log line at all.
+    #[test]
+    fn heartbeat_fires_once_per_period_while_one_template_is_unsolved() {
+        let mut w = SealWatch::new(20_000);
+        let t = Some(0xabcdu128);
+        // First sighting: nothing to say yet.
+        assert!(w.update(t, 0, 0).is_none(), "no line at t=0");
+        // Below the period: still quiet (normal sub-second solves stay silent).
+        assert!(w.update(t, 19_999, 7).is_none(), "quiet before the period");
+        let line = w.update(t, 20_000, 8).expect("one heartbeat at the period");
+        assert!(line.contains("still searching"), "line: {line}");
+        assert!(line.contains("after 20.0s"), "line: {line}");
+        assert!(line.contains("8 nonce window(s)"), "line: {line}");
+        // Not one line per iteration — the next beat is a full period later.
+        assert!(w.update(t, 25_000, 9).is_none(), "no spam inside a period");
+        let line2 = w.update(t, 40_000, 11).expect("second heartbeat");
+        assert!(line2.contains("after 40.0s"), "line: {line2}");
+    }
+
+    /// A new template resets the clock: a busy chain must not emit heartbeats.
+    #[test]
+    fn template_change_resets_the_heartbeat() {
+        let mut w = SealWatch::new(20_000);
+        assert!(w.update(Some(1), 0, 0).is_none());
+        assert!(
+            w.update(Some(1), 25_000, 3).is_some(),
+            "beat for template 1"
+        );
+        assert!(
+            w.update(Some(2), 30_000, 0).is_none(),
+            "template 2 is fresh"
+        );
+        assert!(
+            w.update(Some(2), 49_000, 2).is_none(),
+            "15 s into template 2 — not a heartbeat yet"
+        );
+        assert!(
+            w.update(Some(2), 50_000, 3).is_some(),
+            "20 s into template 2"
+        );
+    }
+
+    /// No template (consensus gave us nothing) is `TemplateGap`'s story, not ours.
+    #[test]
+    fn no_template_says_nothing() {
+        let mut w = SealWatch::new(20_000);
+        for ms in [0u128, 60_000, 600_000] {
+            assert!(w.update(None, ms, 0).is_none());
+        }
+    }
+
+    /// A solve slower than the slow-solve threshold is reported at WARN — this is
+    /// the line that makes a >45 s inter-block gap attributable after the fact.
+    #[test]
+    fn slow_solve_is_reported_and_fast_solve_is_not() {
+        let mut w = SealWatch::new(20_000);
+        // Fast solve: silent.
+        w.update(Some(7), 1_000, 1);
+        assert!(w.solved(Some(7), 2_000).is_none(), "2 s solve stays quiet");
+        // Slow solve: one line naming the template and the time.
+        w.update(Some(8), 10_000, 1);
+        let line = w
+            .solved(Some(8), 60_000)
+            .expect("50 s solve must be logged");
+        assert!(line.contains("slow solve"), "line: {line}");
+        assert!(line.contains("took 50.0s"), "line: {line}");
+    }
+
+    /// The watchdog is keyed on the template record, so a solve that belongs to a
+    /// template we never watched cannot fabricate a duration.
+    #[test]
+    fn solve_for_an_unwatched_template_says_nothing() {
+        let mut w = SealWatch::new(20_000);
+        assert!(w.solved(Some(9), 100_000).is_none());
     }
 }
