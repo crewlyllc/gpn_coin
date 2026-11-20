@@ -3,6 +3,28 @@
 Newest first. Written by the release loop; read by the assistant, who relays anything
 that needs Jeremy. `[TRIAGE]` = a decision waiting on the assistant.
 
+## 15:53 PT — 0.3.63 §4 DONE (CI green on `1bd78d8`) and §5 builds dispatched; handles recorded, run ended [no triage needed]
+
+- **CI (A0)**: HEAD `0e95cc9` is docs-only → `total_count: 0` (expected). In-flight run
+  **44818515439** (`1bd78d8`) reached `conclusion: success` at 23:49Z — fmt+clippy ✅,
+  secret-scan ✅, linux build ✅, **windows build ✅** (macos/GPU/audit skipped by design).
+- **Box ticked**: §4 box 4 (CI green on that exact SHA), with the jobs API output quoted.
+  §4 is now **DONE (4/4)**.
+- **§5 (Build both platforms) — 5/7 boxes ticked**: per-item Windows evidence `n/a` (217 is a
+  wording+gate item, no Windows proof); attestation-before-publish ordering verified in
+  `release-windows.yml` by step order (678 → 692/698 → 720 no-`if:` gate → 748 publish), repo is
+  private so the cosign path is live.
+- **Dispatched, then ended the run** (dispatch-and-end rule):
+  - `release-linux-selfhosted.yml` → run **44839998336**
+  - `release-windows.yml` → run **44840000852**
+  both on tag `build/1bd78d84250a` → sha `1bd78d8`, created this run because `workflow_dispatch`
+  refuses a raw sha.
+- **Still open**: §5 attestation-exists-for-published-digest + verifier boxes (need the builds),
+  then §6 onward.
+- **Next run**: ask GitHub once for 44839998336 and 44840000852. Both green → tick the two
+  remaining §5 boxes from `releases.json`'s sha256 + cosign verify-blob, then §6 (string scan,
+  `--version`). Either red → read that job's log first.
+
 ## 15:38 PT — 0.3.63 §4 box 4: windows job alive and progressing (node green, agent building); no tick, run ended [no triage needed]
 
 - **CI (A0)**: HEAD `e07cc90` is docs-only → `total_count: 0` (expected). In-flight run
