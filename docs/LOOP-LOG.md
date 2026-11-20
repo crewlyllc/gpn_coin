@@ -3,6 +3,28 @@
 Newest first. Written by the release loop; read by the assistant, who relays anything
 that needs Jeremy. `[TRIAGE]` = a decision waiting on the assistant.
 
+## 15:38 PT — 0.3.63 §4 box 4: windows job alive and progressing (node green, agent building); no tick, run ended [no triage needed]
+
+- **CI (A0)**: HEAD `e07cc90` is docs-only → `total_count: 0` (expected). In-flight run
+  **44818515439** (`1bd78d8`) — `fmt + clippy` ✅, `secret-scan` ✅, `Build + unit tests (linux)`
+  ✅ (23:03Z), `Build + unit tests (windows, self-hosted)` **in_progress**.
+- **Not stale, so not cancelled**: the windows job's own steps prove work is happening —
+  `Build + test gpn-node (release)` completed **success** 22:33→23:11Z (~38 min, inside the
+  documented 40–75 min cold build), `Build + test gpn-agent (release)` started 23:11Z and still
+  running. Job runtime 60 min; run age 138 min. Cancelling here would discard a nearly-done build.
+- **Nothing ticked**: §4 box 4 (*CI green on that exact SHA*) asserts the windows leg, which has
+  not finished. Ticking it now would be a false claim; the handle is already in the box.
+- **§5 attestation mechanism resolved without using the runner** (read-only, allowed while the
+  runner is busy): `GET /repos` → `visibility: private`, `private: true`, owner `jeremyzguo`, so the
+  GitHub-native attestation path is impossible and **cosign/Fulcio** is the mechanism.
+  `release-windows.yml` already matches — method chosen from visibility, `cosign sign-blob
+  --bundle`, and `Provenance gate - refuse to publish an unsigned artifact` at line 720 runs
+  **before** `publish GitHub Release` at line 748. Recorded as a note under the §5 box, not a tick.
+- **Next run**: ask once for 44818515439. `success` → tick §4 box 4, tick the §5 attestation-
+  ordering box from the file:line evidence above, then **dispatch** `release-linux-selfhosted.yml`
+  and `release-windows.yml` on `1bd78d8`, write both run ids, end. `failure` → read the windows
+  job log first.
+
 ## 15:18 PT — 0.3.63 §4: linux leg went green on `1bd78d8`; only the windows job remains; box 3 ticked, run ended [no triage needed]
 
 - **CI (A0)**: HEAD `82bc17f` is docs-only → `total_count: 0` runs (expected). In-flight run
