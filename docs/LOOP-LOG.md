@@ -209,3 +209,22 @@ that needs Jeremy. `[TRIAGE]` = a decision waiting on the assistant.
   wording-only batch or it is rolled into the next real one.
 
 
+
+## 14:50 PT — 0.3.63 §3 done (lockstep + seed parity); §4 staged, CI run 44818515439 in flight
+
+- **CI (A0)**: `GET /commits/main` → `072d46e`; `actions/runs?head_sha=072d46e` → `total_count: 0`
+  (docs-only) — expected. In-flight run **44818515439** on `1bd78d8` (newest `scripts/` commit):
+  queued 21:14Z, jobs only started 22:32Z (~78 min queue behind the single-slot Windows runner);
+  fmt+clippy ✅, secret-scan ✅, linux + windows builds still running at 22:45Z. Not waited on.
+  Previous code SHA `2a15c16` = run 44794237787 **success** (fmt/clippy, linux, windows, secret-scan).
+- **Boxes ticked (§3, 3/3)**:
+  - `bump-version.py patch` — already applied in `2a15c16` (`git log -S'version = "0.3.63"' -- gpn-agent/Cargo.toml`);
+    re-running it would have made 0.3.64 and orphaned the checklist, so it was verified, not repeated.
+  - `bump-version.py --check` → `lockstep: 15 manifest(s) and 14 lockfile entr(ies) agree`, every row `ok 0.3.63`.
+  - Seed parity — `cargo test --test shipped_bootnodes --test launcher_bootnodes` = **8 passed, 0 failed**
+    (7m01s compile, tests 0.17s total).
+- **§4**: box 1 ticked (`total_count: 0` for the docs SHA, with `1bd78d8` queueing a run as the
+  control — paths-ignore is selective); box 2 satisfied by this single docs commit.
+  Boxes 3 and 4 left OPEN with the run handle above; next run asks GitHub once for 44818515439.
+- **Next run**: if 44818515439 is success → tick §4 boxes 3/4 and move to §5 (build both platforms,
+  dispatched and ended, not waited on). If failure → read the failing job's log first.
