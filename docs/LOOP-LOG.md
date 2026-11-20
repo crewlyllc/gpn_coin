@@ -3,6 +3,34 @@
 Newest first. Written by the release loop; read by the assistant, who relays anything
 that needs Jeremy. `[TRIAGE]` = a decision waiting on the assistant.
 
+## 12:20 PT — 0.3.63 §2: row 218 instrumented (sealer heartbeat), third stall found; gate clause 2 shown unsatisfiable [TRIAGE]
+
+- **CI**: no run exists for HEAD `1300b28` (docs-only, paths-ignore) — expected. The queued run
+  `44800020725` for `42f1089` was pending behind `44794237787` (in_progress) all run, single runner;
+  not waited on, per A0.
+- **Box worked**: §2 box 1 (*the test passes*). It cannot be ticked this release and the checklist
+  now says why: the gate is `scripts/check-block-cadence.py` against the **live** chain, and the
+  fix rides the next code release (assistant A′, 11:07 PT). No fake tick.
+- **Diagnosis of 218 (logs first)**: a **third** silent stall reproduced live inside these very
+  samples — `Prepared … at 335233` 11:15:18 → next import 11:17:34 = **135.7 s**, `best=#335232`
+  on all three peers throughout, `grep -Ei 'error|panic|fatal'` = 0 hits, and the node's own
+  `💤 Idle` lines kept printing every 5 s, so the *process* was healthy and only the **sealer**
+  was silent. That excludes "node hung" and leaves GPU-seal / submit / template with no witness.
+- **Fix (branch `fix/218-sealer-heartbeat`, commit `fe71e35`, not main)**: `SealWatch` — one INFO
+  heartbeat per 20 s while the same template stays unsolved (fingerprint, elapsed, nonce windows),
+  a WARN when a solve took ≥45 s, and a WARN when `worker.submit` blocks >2 s. Row 218's done-when
+  ("every gap above 3× the mean has a cause in our output") becomes checkable by construction.
+  Evidence: 5 new unit tests pass; `cargo test -p gpn-node --bin gpn-node` = **293 passed, 0 failed**;
+  `cargo fmt --check` clean; clippy with CI's documented allow-list `-D warnings` = clean.
+  Held off `main` on purpose: 0.3.63 is the wording+gate batch and a runtime change would ride it.
+- **Why the gate cannot go green as worded [TRIAGE]**: at the measured mean (15.4–16.6 s) a
+  memoryless hashing race puts **5.3 gaps >45 s per 99** (P = e^-45/16.6 = 5.4 %), so a clean
+  100-block window has probability 0.4 %. Both live samples hit the prediction exactly (4 and 6
+  violations) — they are the arrival process, not defects. Recommended clause 2 = 218's
+  attribution rule. Full arithmetic + options in `docs/NEEDS-TRIAGE.md` (last entry).
+- **Next run**: read the triage answer; if A, restate clause 2, merge `fe71e35` into the next
+  bundle; if the gate is to stay absolute, the target block time has to move to ~6 s.
+
 ## 11:14 PT — 0.3.63 §1: cadence gate written, run live, FAILS (as it must); row 218 reproduced
 
 - **CI**: no run for HEAD `c1651ee` (docs-only, paths-ignore) — expected. This run's push `42f1089`

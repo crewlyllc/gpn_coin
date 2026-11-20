@@ -17,3 +17,22 @@ Format: `- [ ] <item id> — <question> | options: A … B … | recommend: … 
       above 45 s at all" (the 153 s stop must fail it), and keep 218 as the real defect (a 232 s
       silent stop at the window's lowest difficulty). Wording-only batches are allowed: 0.3.63
       ships as a wording+checklist batch, and 218 rides the next code release.
+
+- [ ] 217/218 — the restated clause 2 ("no gap above 45 s at all") is still unsatisfiable on a
+      healthy chain, so `scripts/check-block-cadence.py` cannot go green in 0.3.63 even after 218
+      is fixed. | arithmetic: at the measured mean of 15.4–16.6 s a memoryless hashing race gives
+      P(gap > 45 s) = e^(-45/16.6) = 5.4 %, i.e. **5.3 offending gaps expected per 99**; P(a clean
+      100-block window) = 0.946^99 = **0.4 %**. Live confirmations: 11:12 PT sample 4 violations
+      (mean 15.38 s), 12:05 PT sample 6 violations (mean 16.61 s) — both exactly the predicted
+      count, and neither is a code defect. To make clause 2 pass 95 % of the time the mean gap
+      would have to be ≤ 5.9 s, i.e. a target block time of ~6 s, not 15 s. | options: A replace
+      clause 2 with row 218's own done-when — *every gap above 3× the window mean has a cause in
+      the node's output* (seal heartbeat / slow-solve WARN / blocked-submit WARN / GPU error /
+      self-heal window), keeping clause 1 as the blunt 10×-mean detector (no consensus change;
+      makes the gate about attributability, which is the actual failure mode) · B keep the
+      absolute clause and lower the target block time to ~6 s (a difficulty/target change, more
+      blocks per hour, retarget churn) · C keep the wording and accept a ~0.4 % pass rate (the
+      gate is then effectively never green and stops being a signal) | recommend: **A** — the
+      heartbeat shipped on branch `fix/218-sealer-heartbeat` (5 unit tests, clippy clean with CI's
+      allow-list) makes exactly that evidence exist, and a 50 s gap under A is still a FAIL
+      because nothing in the log explains it. | raised 2026-11-20 12:10 PT (loop run, 0.3.63 §2)
