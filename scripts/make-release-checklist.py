@@ -53,6 +53,7 @@ def main():
         short = short.replace("**", "").strip()
         short = (short[:110] + "…") if len(short) > 110 else short
         section.append(f"- [ ] **{iid} — {short}**")
+        accept = re.sub(r"^done when:\s*", "", accept)
         section.append(f"      - done when: {accept[:200]}")
         section.append("      - notes:")
     # BLOCKED rows are deliberately NOT added (owner decision 2026-11-18): a release

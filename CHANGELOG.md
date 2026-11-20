@@ -8,6 +8,29 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 versions are [Semantic Versioning](https://semver.org/spec/v2.0.0.html), with
 the GPN-specific meaning of each level documented in `docs/updates.md`.
 
+## [0.3.63] - 2026-11-20
+
+Bumped from 0.3.62 (`scripts/bump-version.py patch`).
+
+The bundle for this version is #217 — the residual of #52, whose ±33 % retarget
+clamp landed in 0.3.62 and moved the mean inter-block gap onto target (16.0 s
+over 100 live blocks against a 15 s target). Each entry is what the change does
+for a user of a released node, and each is checked against the built artifacts
+before the manifest is signed.
+
+### Changed
+- **Block cadence in a small miner field: the retarget is judged by the shape of
+  arrivals, not only by its step size (#217).** The 0.3.62 sample (blocks
+  334734→334833) still had 6 of 99 gaps over 45 s (45.2, 45.9, 50.4, 56.8, 61.3,
+  152.2 s) and 17 under 3 s. With 3–6 independent miners the gap distribution is
+  the arrival process: at a 16.0 s mean, an exponential predicts 5.95 gaps >45 s
+  and 16.9 gaps <3 s per 99 — the measured 6 and 17 are the process, not the
+  retarget. No difficulty rule can satisfy "no gap >45 s *and* <5 % under 3 s"
+  simultaneously (a mean >58.5 s is needed for the second, which puts 46 % of
+  gaps over 45 s), so this version tunes the retarget to the field it runs in
+  (window/step sized for 3–6 miners) and states the cadence target in terms of
+  the mean and its tolerance, which is what an operator can actually observe.
+
 ## [0.3.62] - 2026-11-19
 
 Bumped from 0.3.61 (`scripts/bump-version.py patch`).
