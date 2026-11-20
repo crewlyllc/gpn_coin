@@ -24,8 +24,8 @@ on:
     # Docs-only commits must not buy a full Linux build on the box that also mines
     # and serves AI (2026-11-19: five docs commits in 40 min kept the runner busy and
     # finished nothing, because every push started a build the next one superseded).
-    # Anything that can affect behaviour — code, build files, chainspec, installers,
-    # network.json, workflows — is deliberately NOT ignored here.
+    # Anything that can affect behaviour - code, build files, chainspec, installers,
+    # network.json, workflows - is deliberately NOT ignored here.
     paths-ignore:
       - 'docs/**'
       - '**/*.md'
@@ -69,7 +69,7 @@ env:
   # `cargo clippy -- -D warnings` must stay green. The crates below predate a
   # lint-clean baseline and pull in Substrate/FRAME macro expansions we do not
   # control, so a small, explicitly-listed set of lints is allowed. This is the
-  # "documented allow-list" option from the production-readiness plan — it is
+  # "documented allow-list" option from the production-readiness plan - it is
   # NOT a blanket `-A clippy::all`. Each entry is justified:
   #
   #   deprecated / unexpected_cfgs / duplicate_macro_attributes
@@ -147,7 +147,7 @@ jobs:
         run: |
           # Repeated --component: rustup 1.29 rejects a space-separated component
           # list ("invalid toolchain name: 'clippy'"). The runner already carries
-          # the pinned toolchain, so an install failure is non-fatal — the version
+          # the pinned toolchain, so an install failure is non-fatal - the version
           # assert below is what actually gates.
           rustup toolchain install "$RUST_TOOLCHAIN" --profile minimal \
             --component rustfmt --component clippy || true
@@ -174,7 +174,7 @@ jobs:
         run: nice -n 19 cargo fmt --all -- --check
         working-directory: gpn-agent
 
-      - name: Clippy — gpn-node (warnings as errors)
+      - name: Clippy - gpn-node (warnings as errors)
         working-directory: gpn-node
         env:
           CARGO_TARGET_DIR: /home/jeremyg/.ci-cache/gpn-node-target
@@ -182,7 +182,7 @@ jobs:
         # roughly half the size and lets the build-and-test job reuse it.
         run: nice -n 19 cargo clippy --release --workspace --all-targets -- ${{ env.CLIPPY_ALLOWS }} -D warnings
 
-      - name: Clippy — gpn-agent (warnings as errors)
+      - name: Clippy - gpn-agent (warnings as errors)
         working-directory: gpn-agent
         env:
           CARGO_TARGET_DIR: /home/jeremyg/.ci-cache/gpn-agent-target
@@ -245,7 +245,7 @@ jobs:
       # need the debug-only `GPN_UPDATE_PUBKEY` override, so they run in DEBUG.
       # (Under --release the binary correctly refuses the test key -> 6 failures,
       # which is what turned CI red on 2026-11-03.)
-      - name: Test gpn_update CLI (debug — throwaway signing key)
+      - name: Test gpn_update CLI (debug - throwaway signing key)
         working-directory: gpn-agent
         env:
           CARGO_TARGET_DIR: /home/jeremyg/.ci-cache/gpn-agent-target
@@ -254,7 +254,7 @@ jobs:
       # Launcher/identity gates (queue #96). Offline, cheap, and they are what
       # stops a shared dev key from being shipped again: the launcher check
       # parses the here-string that release-windows.yml publishes
-      # (run-windows/YAML only — no Windows needed), and the wallet check runs
+      # (run-windows/YAML only - no Windows needed), and the wallet check runs
       # the real binaries against a temp base dir.
       - name: Launcher identity self-check (+ negative control)
         run: bash scripts/tests/test-launcher-identity.sh
@@ -266,7 +266,7 @@ jobs:
 
       # Fast sync (weekly snapshot bootstrap): success, hash mismatch, 404,
       # --no-fast-sync / GPN_FAST_SYNC=0, and a pre-existing DB that must not be
-      # touched. Fully offline — the snapshot is exported locally and served by
+      # touched. Fully offline - the snapshot is exported locally and served by
       # a loopback HTTP server. Also text-asserts the Windows launcher guards.
       - name: Fast sync (snapshot bootstrap) guards
         env:
@@ -294,7 +294,7 @@ jobs:
       # guards the *signing* step, so two dispatchers could each read "no builds
       # running" and queue ~40 min of duplicate runner time for one tag. The
       # guard in dispatch-release.sh now refuses on a held flock, a running
-      # release-cut, or an in-flight build for the same commit — and the suite
+      # release-cut, or an in-flight build for the same commit - and the suite
       # proves it refuses *before* any workflow_dispatch call, that a finished
       # build does not block, and that --force still works. Fake API + throwaway
       # git remote: no GitHub, no runner lane, no real bundles.
@@ -302,7 +302,7 @@ jobs:
         run: bash scripts/tests/test-dispatch-guard.sh
 
       # Lane check (W172, 2026-11-14). The maintainer sweep grepped bare `503`,
-      # so millisecond timestamps (`...:46.503`) counted as faults — 438 false
+      # so millisecond timestamps (`...:46.503`) counted as faults - 438 false
       # hits and 0 real HTTP 503s in one hour. scripts/lane-check.sh matches
       # only HTTP-shaped statuses and prose faults; this plants both kinds of
       # line and asserts which way they land.
@@ -319,7 +319,7 @@ jobs:
       # W182: the daily disk-guard regression test ran by hand only. The guard
       # must prune when the disk is FULL and stay quiet when it is not (2026-11-14:
       # `df --output=pcent` reports USED, it was stored as free, so the guard
-      # declined exactly when the disk was full — a no-op guard). `df` and
+      # declined exactly when the disk was full - a no-op guard). `df` and
       # `pgrep` are stubbed on PATH: nothing real is measured or deleted.
       - name: Disk guard prunes iff full (no-op guard regression)
         run: bash scripts/tests/test-prune-ci-cache.sh
@@ -333,7 +333,7 @@ jobs:
 
       # #193: a release whose version, sha256 and signature are all right can
       # still ship the wrong tree. The gate scans the released node binary for
-      # the marker strings of the feature and refuses otherwise — synthetic
+      # the marker strings of the feature and refuses otherwise - synthetic
       # bundles here, so nothing downloads 300 MB.
       - name: Release artifact carries the code (wrong-tree gate)
         run: python3 scripts/tests/test_verify_release_artifact.py
@@ -356,7 +356,7 @@ jobs:
         run: node website/tests/chat.test.js
 
       # /nodes directory: renders from /api/network, deduped by peer id, with
-      # a clearly-labelled "cached — live data unavailable" fallback. Pure Node.
+      # a clearly-labelled "cached - live data unavailable" fallback. Pure Node.
       - name: Nodes directory (live counts + cached fallback)
         run: node --test website/tests/nodes-directory.test.js
 
@@ -364,7 +364,7 @@ jobs:
       # multiaddrs and they drifted (30334 + retired peer ids), so a reader who
       # copied a row could not join. Now generated from /seeds.json, and this
       # check fails the build if any published multiaddr disagrees with the
-      # live seed list in network.json — exact port and /p2p/ id — or if a live
+      # live seed list in network.json - exact port and /p2p/ id - or if a live
       # seed is missing from the page. Pure Node, no browser.
       - name: Access points (published multiaddrs match the live seed list)
         run: node --test website/tests/access-points.test.js
@@ -375,7 +375,7 @@ jobs:
         run: node --test worker/worker.test.mjs
 
   # ---------------------------------------------------------------------------
-  # Windows — runs on the SELF-HOSTED Windows runner on every push (2026-11-10).
+  # Windows - runs on the SELF-HOSTED Windows runner on every push (2026-11-10).
   #
   # It used to be manual-only because windows-latest is a paid GitHub-hosted
   # runner this account cannot use. That reasoning expired: DESKTOP-USBUADL is a
@@ -480,7 +480,7 @@ jobs:
         working-directory: gpn-agent
         run: nice -n 19 cargo deny --config ../deny.toml check advisories bans licenses sources
 
-  # Two-node GPU p2p testnet — integration test from
+  # Two-node GPU p2p testnet - integration test from
   # gpn-node/scripts/gpn_two_node_testnet.sh. Requires real GPU + NVIDIA OpenCL
   # ICD, so it only runs on a self-hosted runner with the `gpu` label.
   two-node-gpu-testnet:
@@ -513,7 +513,7 @@ jobs:
         run: bash scripts/gpn_two_node_testnet.sh --binary /home/jeremyg/.ci-cache/gpn-node-target/release/gpn-node
 
 
-  # Manual only — see the note above build-windows for why macOS is different.
+  # Manual only - see the note above build-windows for why macOS is different.
   build-macos:
     name: Build + unit tests (macos, manual)
     if: github.event_name == 'workflow_dispatch'

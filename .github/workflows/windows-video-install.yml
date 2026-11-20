@@ -2,7 +2,7 @@ name: Windows video-stack install
 
 # Installs the GPN VIDEO diffusion stack on the self-hosted Windows box:
 # a Python 3.12 venv (torch has no 3.14 wheels yet; box ships 3.14) + torch
-# (CUDA 12.8 / cu128 — required for the RTX 5070 Ti Blackwell sm_120; the older
+# (CUDA 12.8 / cu128 - required for the RTX 5070 Ti Blackwell sm_120; the older
 # cu121 build has no sm_120 kernels) + diffusers/transformers/etc, and fetches
 # gpn_diffuse.py into C:\gpn. Idempotent: skips work already done.
 # Starts nothing persistent and writes no wallets.

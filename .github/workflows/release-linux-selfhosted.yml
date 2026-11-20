@@ -31,7 +31,7 @@ env:
   RUST_TOOLCHAIN: "1.98.1"
   CARGO_TERM_COLOR: always
   CARGO_BUILD_JOBS: "2"
-  # Canonical genesis runtime WASM — must be byte-identical before and after the
+  # Canonical genesis runtime WASM - must be byte-identical before and after the
   # build (the runtime build script embeds it, never regenerates it).
   CANON_SHA: 76f37b23a33e8ba3ada91849e69b66836590673f14ea009ef6d914eb0d16fa97
   CT_NODE: /home/jeremyg/.ci-cache/gpn-node-target
@@ -100,7 +100,7 @@ jobs:
 
       # 2026-11-08: the debug cache has filled the root filesystem four times
       # (2026-10-19 it halted the chain). The prune timer exists now, but a
-      # release build is exactly when it grows — clean it as part of the build
+      # release build is exactly when it grows - clean it as part of the build
       # that created it, so the next build starts from a sane disk.
       - name: reclaim the debug profile after packaging
         if: always()

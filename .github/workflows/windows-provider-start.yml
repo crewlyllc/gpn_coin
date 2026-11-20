@@ -2,8 +2,8 @@ name: Windows provider start
 
 # Stands this self-hosted Windows box up AS a persistent GPN node (item 4 /
 # item 14): a Scheduled Task runs the single-node supervisor `gpn_node.exe`,
-# which brings up the whole node — the chain node/miner AND the AI provider
-# (heartbeat :8093 + the gpn_llm_provider claim/infer loop) — together. A GPN
+# which brings up the whole node - the chain node/miner AND the AI provider
+# (heartbeat :8093 + the gpn_llm_provider claim/infer loop) - together. A GPN
 # node is always both; there is no provider-only mode. Idempotent: registers/
 # updates the task and (re)starts it.
 #
@@ -11,7 +11,7 @@ name: Windows provider start
 # replaced (stop -> copy -> task restart) instead of failing the copy.
 #
 # IDENTITY (queue #96): this is an OPERATOR/FLEET workflow for one named box,
-# so `signer` and `account` are defaults for THAT box — passing them is an
+# so `signer` and `account` are defaults for THAT box - passing them is an
 # explicit override of the machine's own wallet and the node logs it as such.
 # It must never be the install path for the public bundle: the release launcher
 # (release-windows.yml -> C:\gpn\start-node.cmd) provisions a wallet per machine
@@ -63,7 +63,7 @@ jobs:
           # host's GPN_ASSIGN_TOKEN so the box rejects forged assignment pushes
           # to its public :8093. Unset secret => legacy (permissive) heartbeat.
           $env:GPN_ASSIGN_TOKEN = '__ASSIGNTOK__'
-          # A GPN node is always miner + provider — configure BOTH sides.
+          # A GPN node is always miner + provider - configure BOTH sides.
           $env:GPN_CHAIN             = $chain
           $env:GPN_ENDPOINT          = $rpc
           $env:GPN_SIGNER            = $signer
@@ -72,13 +72,13 @@ jobs:
           $env:GPN_GFLOPS            = "$gflops"
           # A provider receives work ONLY by polling the access point (#46 Phase 3
           # deleted the `/assign` push). Without GPN_AP_URL the box's provider
-          # log says "pull without GPN_AP_URL — degrading to push", nothing is
+          # log says "pull without GPN_AP_URL - degrading to push", nothing is
           # ever leased to it, and the AP's delivery gate (#55) correctly excludes
-          # it — so the box looks healthy in /status and is still unroutable.
+          # it - so the box looks healthy in /status and is still unroutable.
           $env:GPN_AP_URL            = '__APURL__'
           # The heartbeat reads GPUAttestation::Attestations for THIS account to
           # advertise the chain's attested GFLOPS (#65). GPN_SIGNER is a dev URI
-          # here, which ss58_of() rejects — older builds then passed no --address.
+          # here, which ss58_of() rejects - older builds then passed no --address.
           $env:GPN_ACCOUNT           = '__ACCOUNT__'
           $env:GPN_LISTEN            = '0.0.0.0:8093'
           function Log($m) { "$(Get-Date -Format o) $m" | Out-File -FilePath $log -Append -Encoding utf8 }
@@ -113,7 +113,7 @@ jobs:
           $tr = 'powershell -NoProfile -ExecutionPolicy Bypass -File C:\gpn\run-provider.ps1'
           # stop the previous task's supervisor (a plain powershell running
           # run-provider.ps1) then ALL gpn_* processes so exactly one provider is
-          # started below — a stray holds :8094 and wedges the real one
+          # started below - a stray holds :8094 and wedges the real one
           schtasks /End /TN GPNProvider 2>$null | Out-Null
           Get-CimInstance Win32_Process -Filter "Name='powershell.exe'" |
             Where-Object { $_.CommandLine -like '*run-provider.ps1*' } |
