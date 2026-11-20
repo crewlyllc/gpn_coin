@@ -1,0 +1,12 @@
+[Unit]
+Description=Run the GPN cadence gate every 30 minutes
+
+[Timer]
+OnCalendar=*:0/30
+RandomizedDelaySec=90
+AccuracySec=1min
+Persistent=false
+Unit=gpn-cadence-gate.service
+
+[Install]
+WantedBy=timers.target

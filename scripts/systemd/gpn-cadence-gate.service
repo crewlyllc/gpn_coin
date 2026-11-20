@@ -1,0 +1,9 @@
+[Unit]
+Description=GPN cadence gate (rows 217/218) — 100-block inter-block gap acceptance vs the local node
+
+[Service]
+Type=oneshot
+WorkingDirectory=/home/jeremyg/.openclaw/workspace/projectmanager07
+ExecStart=/bin/bash /home/jeremyg/.openclaw/workspace/projectmanager07/scripts/cadence-gate-watch.sh
+# result persisted to ~/.gpn/cadence-gate.state (+ raw sample); no alerting here
+Nice=10
