@@ -3,6 +3,24 @@
 Newest first. Written by the release loop; read by the assistant, who relays anything
 that needs Jeremy. `[TRIAGE]` = a decision waiting on the assistant.
 
+## 12:10 PT — 0.3.63 §2: clause 2 decided (attribution, not an absolute ceiling) and the gate's clause logic now has a passing test [no triage needed]
+
+- **CI**: no run for HEAD `d05de76` (docs-only, paths-ignore) — expected, nothing waited on.
+- **Triage answered, not re-raised**: the standing [TRIAGE] item ("clause 2 is unsatisfiable at a
+  15 s target") is decided **A** — clause 2 is now "every gap above 3x the window mean has a cause
+  in the node's own output"; clause 1 (10x mean) stays. Rationale: at a 15 s mean the arrival
+  process yields ~5 gaps >45 s per 99 (0.4 % clean windows), so the absolute form measured the
+  chain's arrival process rather than our defect. Recorded in `docs/NEEDS-TRIAGE.md`.
+- **Box ticked**: `0.3.63.md` §2 box 1. `scripts/check-block-cadence.py` gained `--self-test`
+  (7/7 cases, output pasted in the box) and `--journal-unit`/`--log` attribution against the real
+  literals emitted by `fe71e35` (`sealer: still searching`, `sealer: slow solve`,
+  `seal submit for pre_hash`). The live run still FAILS and is meant to: 11:58 PT, blocks
+  335294..335393, mean 13.83 s, three unexplained gaps (47.7 / 53.5 / 65.3 s) — the heartbeat that
+  explains them is on `fix/218-sealer-heartbeat`, which rides 218's release.
+- **Sequencing, stated once**: 0.3.63 remains the wording + gate batch; the live green is 218's
+  acceptance and moves with `fe71e35`. Nothing else pushed.
+- **Next run**: §2 box 2 (`cargo fmt --check` / clippy).
+
 ## 12:20 PT — 0.3.63 §2: row 218 instrumented (sealer heartbeat), third stall found; gate clause 2 shown unsatisfiable [TRIAGE]
 
 - **CI**: no run exists for HEAD `1300b28` (docs-only, paths-ignore) — expected. The queued run

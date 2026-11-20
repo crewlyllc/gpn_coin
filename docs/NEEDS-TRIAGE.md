@@ -18,9 +18,18 @@ Format: `- [ ] <item id> — <question> | options: A … B … | recommend: … 
       silent stop at the window's lowest difficulty). Wording-only batches are allowed: 0.3.63
       ships as a wording+checklist batch, and 218 rides the next code release.
 
-- [ ] 217/218 — the restated clause 2 ("no gap above 45 s at all") is still unsatisfiable on a
+- [x] 217/218 — the restated clause 2 ("no gap above 45 s at all") is still unsatisfiable on a
       healthy chain, so `scripts/check-block-cadence.py` cannot go green in 0.3.63 even after 218
-      is fixed. | arithmetic: at the measured mean of 15.4–16.6 s a memoryless hashing race gives
+      is fixed. | **decided 2026-11-20 11:58 PT by the assistant: option A.** Clause 2 is now
+      "every gap above 3x the window mean has a cause in the node's own output" (sealer heartbeat /
+      slow-solve WARN / blocked-submit WARN / GPU error / panic / restart / self-heal), clause 1
+      stays the blunt 10x-mean detector. Implemented in `scripts/check-block-cadence.py` with a
+      `--self-test` of the clause logic (7/7) and `--journal-unit` attribution; a 50 s gap with
+      nothing in the log still FAILS, a 153 s gap with `sealer: still searching ... after 140.0s`
+      passes as explained. Consequence recorded: 0.3.63 (no runtime change) ships the wording +
+      gate; the live green is row **218**'s acceptance and rides the release that carries
+      `fe71e35`.
+      — retained below is the analysis that led to it. | arithmetic: at the measured mean of 15.4–16.6 s a memoryless hashing race gives
       P(gap > 45 s) = e^(-45/16.6) = 5.4 %, i.e. **5.3 offending gaps expected per 99**; P(a clean
       100-block window) = 0.946^99 = **0.4 %**. Live confirmations: 11:12 PT sample 4 violations
       (mean 15.38 s), 12:05 PT sample 6 violations (mean 16.61 s) — both exactly the predicted
