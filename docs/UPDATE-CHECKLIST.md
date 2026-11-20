@@ -175,16 +175,34 @@ Two different jobs use Windows, and they must not be confused (owner question, 2
 - [ ] `release-windows.yml` on box 1's runner → `gpn-windows.zip` on `windows-latest`
 - [ ] **Same SHA on both runs.** macOS is not required and is not in the manifest.
 - [ ] **The attestation step runs BEFORE the publish step, and a failed attestation blocks the
-      release.** `actions/attest-build-provenance@v2` with `id-token: write` + `attestations:
-      write`, subject = the zip. GitHub never attests implicitly: no call, no attestation.
-      Ordering is the substance here — 0.3.61 shipped with the step placed *after* publish, so a
-      missing attestation could not stop anything (rows 215/216).
+      release.** GitHub never attests implicitly: no call, no attestation. Ordering is the
+      substance here — 0.3.61 shipped with the step placed *after* publish, so a missing
+      attestation could not stop anything (rows 215/216).
+      **The mechanism depends on repository visibility — check it first**
+      (`GET /repos/jeremyzguo/gpn_coin` → `visibility`). Do not write one mechanism into the
+      checklist for a repo that cannot support it; that is how 215/216 sat unachievable.
+      *public* → `actions/attest-build-provenance@v2` with `id-token: write` +
+      `attestations: write`, subject = the zip.
+      *private (user-owned)* → GitHub refuses (`Failed to persist attestation: Feature not
+      available for user-owned private repositories`), so the job signs keyless with cosign
+      (Fulcio/Rekor, Actions OIDC) and publishes `gpn-windows.zip.bundle` beside the zip.
+      Either way a **provenance gate step with no `if:`** runs immediately before publish and
+      throws when no signature exists for the exact sha256 being uploaded.
 - [ ] **The attestation exists for the digest that is actually published** — take the windows
       `sha256` from `releases.json` (never a URL fetched from the site: `gpncoin.ai/gpn-windows.zip`
-      returns ~2.6 KB of HTML and hashing that proves nothing) and query
-      `GET /repos/jeremyzguo/gpn_coin/attestations/sha256:<digest>` → `count >= 1`.
-- [ ] `gh attestation verify <downloaded zip> --repo jeremyzguo/gpn_coin` prints a verified
-      subject; paste the output. An unattested artifact means the release does not proceed.
+      returns ~2.6 KB of HTML and hashing that proves nothing).
+      *public* → `GET /repos/jeremyzguo/gpn_coin/attestations/sha256:<digest>` ⇒ `count >= 1`.
+      *private* → the release carries `gpn-windows.zip.bundle` and that bundle verifies the
+      published zip (see the next box); the `attestations/sha256:` endpoint returns 404 there,
+      so its absence is not a failure on this path.
+- [ ] **Verify the downloaded artifact with the verifier that matches the mechanism**, against
+      the digest in `releases.json`; paste the output. An unverifiable artifact means the release
+      does not proceed.
+      *public* → `gh attestation verify <zip> --repo jeremyzguo/gpn_coin` prints a verified subject.
+      *private* → `cosign verify-blob --bundle gpn-windows.zip.bundle \
+      --certificate-identity-regexp '^https://github\.com/jeremyzguo/gpn_coin/\.github/workflows/release-windows\.yml@.*$' \
+      --certificate-oidc-issuer https://token.actions.githubusercontent.com gpn-windows.zip`
+      prints `Verified OK`.
 
 ## 6. Verify the artifact BEFORE publishing
 
@@ -195,7 +213,11 @@ Two different jobs use Windows, and they must not be confused (owner question, 2
 ## 7. Cut and publish
 
 - [ ] **Refuse to cut unless §5's attestation checks passed.** If the attestation is missing, stop —
-      publishing first and verifying later is how an unattested release reaches strangers.
+      publishing first and verifying later is how an unattested release reaches strangers. Run the
+      §5 verifier **by hand against the asset `release-cut.sh` step 2 downloads** (that step
+      sha256-checks both assets against the API digest but does **not** call `cosign verify-blob`
+      or `gh attestation verify` — checked 2026-11-20, `scripts/release-cut.sh` has no attestation
+      call). "The job said it signed" is not the check; the re-downloaded bytes are.
 - [ ] `scripts/release-cut.sh --timeout 300` — mirrors both assets into `crewlyllc/gpn_coin`,
       signs `website/releases.json`, publishes, re-downloads to verify.
 - [ ] `network.json` `latest_version` equals the published version.
