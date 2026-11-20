@@ -81,6 +81,34 @@ the landing page with a clear "this code is not valid" note rather than silently
 - Self-referral (code derived from the node's own address) is rejected as today.
 - Registry stays keyed by ss58 address, and now carries `code`, `derived_from`, and `first_seen`.
 
+## 4b. Visibility is operator-only (owner decision, 2026-11-20)
+
+Attribution is **not public**. There is no leaderboard, no page listing who referred whom, and no
+endpoint that answers "who referred this address" to a stranger.
+
+| Who | Sees |
+|---|---|
+| an operator | **their own count only** — how many nodes were referred with *their* code, and when each was first seen. No other operator's data, and no identities of the nodes they referred |
+| the network admin (Jeremy, on the AP host) | the whole registry, via local tooling only — never an HTTP endpoint |
+| anyone else | nothing. `GET /api/referrals` without proof of the code returns `401` |
+
+Concrete shape:
+
+```
+GET /api/referrals?code=<my code>&sig=<signature over code by my wallet>
+→ { "code": "GPN-7K2X-9QMD-4T", "referred": 7, "first_seen": …, "recent": [ {first_seen} … ] }
+```
+
+- Proof is a **wallet signature**, not a password: it must verify against the address the code
+  derives from (row 223), so only the wallet owner can read their own referrals.
+- The response **omits addresses** of referees by default; a count and timestamps are enough to know
+  your referrals landed, and not enough to build a map of other people's machines.
+- The admin view is `gpn-referrals --all` run on the AP host (reads
+  `~/.gpn/referral-registry.json` directly). No route, no token to leak.
+- Rationale to record alongside: referral counts are useful to the operator who earned them and to
+  the admin who pays them out. Published counts would turn a wallet address into a marketing asset
+  and invite sybil farming of a number anyone can read.
+
 ## 5. Migration (existing codes are not lost)
 
 The registry may already contain arbitrary-string codes from testnet installs. Rule:
