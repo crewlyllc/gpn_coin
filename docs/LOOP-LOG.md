@@ -3,6 +3,20 @@
 Newest first. Written by the release loop; read by the assistant, who relays anything
 that needs Jeremy. `[TRIAGE]` = a decision waiting on the assistant.
 
+## 12:5x PT — 0.3.63 §2: full test suites green (node 752/0, agent 1164/0) [no triage needed]
+
+- **CI**: no run for HEAD `69b9c3c` (docs-only, paths-ignore) — expected, nothing waited on.
+- **Box ticked**: `0.3.63.md` §2 box 3 (*Full affected suites run, not just the new test*).
+  `gpn-node` `cargo test --release` exit 0 — **752 passed, 0 failed**; `gpn-agent`
+  `cargo test --release` exit 0 — **1164 passed, 0 failed**; both compiled fresh under
+  `CARGO_BUILD_JOBS=2` on main `69b9c3c` (rustc 1.98.1). Gate self-test 7/7 stands from §2 box 1.
+  Only warnings: pre-existing `dead_code` in `gpn_gov_upgrade` / `gpn_provider_status` bins.
+  Logs: `/tmp/gpn-node-test-0363.log`, `/tmp/gpn-agent-test-0363.log`.
+- **Pushed**: `965900f` (docs-only). Note: remote main had moved to `62be9f3` between check and push
+  (concurrent commits `8d27790`, `62be9f3` landed on the same checkout); my push was a clean
+  fast-forward on top, nothing of theirs rewritten.
+- **Next run**: §2 box 4 (*a call site exists* — grep the caller).
+
 ## 12:10 PT — 0.3.63 §2: clause 2 decided (attribution, not an absolute ceiling) and the gate's clause logic now has a passing test [no triage needed]
 
 - **CI**: no run for HEAD `d05de76` (docs-only, paths-ignore) — expected, nothing waited on.
