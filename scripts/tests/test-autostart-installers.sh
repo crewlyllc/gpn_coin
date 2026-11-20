@@ -159,6 +159,14 @@ assert_has "$ps1" "left it alone and"                      "explains when GPN-No
 # 2026-11-04 box 1: task owned by 'Jeremy', install as 'Jeremy Guo'. Deleting it
 # needs admin, so the installer must fall back to a Startup shortcut, not abort.
 assert_has "$ps1" "registered a Startup shortcut instead"   "foreign-owned task falls back to Startup"
+# 2026-11-20 box 1: the SAME class, one layer along. Installing into C:\gpn-ci
+# replaced the live install's inbound program firewall rule and repointed it at
+# C:\gpn-ci\bin\gpn-node.exe, so the running node matched no program rule (it
+# stayed reachable only via the 30333 port rule). A second install must leave a
+# foreign install's rule alone, exactly as Register-NodeTask does for tasks.
+assert_has "$ps1" "function Get-ForeignRuleDir"            "firewall: detects a rule that belongs to another install"
+assert_has "$ps1" "Get-ForeignRuleDir \$haveProg"          "firewall: consults the foreign-rule guard before replacing"
+assert_has "$ps1" "left the program rule alone"            "firewall: says it left a foreign rule in place"
 # 2026-11-04: the install must END with a running node even when Task Scheduler is
 # unavailable, and must not claim success it did not achieve.
 assert_has "$ps1" "no scheduled task -- starting the node directly" "starts the node when only a Startup shortcut exists"

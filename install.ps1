@@ -2397,6 +2397,34 @@ function Get-FwRule([string]$Name) {
   try { return @(Get-NetFirewallRule -DisplayName $Name -ErrorAction Stop) | Select-Object -First 1 } catch { return $null }
 }
 
+# Does an existing rule belong to a DIFFERENT install directory?
+#
+# 2026-11-20, box 1: running the shipped installer into C:\gpn-ci (the #208
+# clean-install assertion) replaced the live install's program rule and pointed
+# it at C:\gpn-ci\bin\gpn-node.exe. The running node (C:\gpn\data\update\current)
+# then matched NO program rule; it stayed reachable only because of the 30333
+# port rule. This is the same class as the 2026-11-16 task-repoint bug, which
+# was fixed for scheduled tasks (Get-ForeignTaskDir) and left open here.
+#
+# A rule is foreign when its program lies outside THIS install dir AND the file
+# it names still exists. A leftover naming a deleted install is adopted -- that
+# is what the old unconditional replace did, and it is still the right repair.
+# Returns the foreign install dir, or $null when the rule is ours/absent/free.
+function Get-ForeignRuleDir {
+  param($Rule)
+  if (-not $Rule) { return $null }
+  $p = $null
+  try {
+    $flt = Get-NetFirewallApplicationFilter -AssociatedNetFirewallRule $Rule -ErrorAction Stop |
+           Select-Object -First 1
+    $p = [string]$flt.Program
+  } catch { return $null }
+  if (-not $p -or $p -eq 'Any') { return $null }
+  if ($p -like ($InstallDir.TrimEnd('\') + '\*')) { return $null }
+  if (-not (Test-Path -LiteralPath $p)) { return $null }
+  return (Split-Path -Parent $p)
+}
+
 # What is there now, and does it still point at the right program?
 $haveProg = Get-FwRule $RuleProg
 $havePort = Get-FwRule $RulePort
@@ -2447,6 +2475,15 @@ if (-not $isAdmin) {
 }
 
 $made = New-Object System.Collections.ArrayList
+$leftAlone = New-Object System.Collections.ArrayList
+# Never take over another install's rule (see Get-ForeignRuleDir).
+if (-not $progOk) {
+  $foreignProg = Get-ForeignRuleDir $haveProg
+  if ($foreignProg) {
+    [void]$leftAlone.Add($foreignProg)
+    $progOk = $true
+  }
+}
 if (-not $progOk) {
   try {
     if ($haveProg) { Remove-NetFirewallRule -DisplayName $RuleProg -ErrorAction SilentlyContinue }
@@ -2478,6 +2515,14 @@ try {
 
 if ($made.Count -gt 0) {
   FwLine ('created ' + $made.Count + ' inbound rule(s), Private only: ' + ($made -join '; ') + $profileNote)
+  if ($leftAlone.Count -gt 0) {
+    FwLine ('left the program rule alone: it belongs to the install at ' + ($leftAlone -join '; ') + ' (this install is ' + $InstallDir + ')')
+  }
+} elseif ($leftAlone.Count -gt 0) {
+  FwLine ('left the program rule alone: it belongs to the install at ' + ($leftAlone -join '; ') +
+          ' (this install is ' + $InstallDir + '); TCP 30333 is open, so peering works, but this install' +
+          ' will not be reachable on its own program until that install is removed' + $profileNote)
+  exit 3
 } else {
   FwLine ('rules still MISSING after the attempt (are you elevated?): ' + $profileNote)
   exit 2
@@ -2740,6 +2785,7 @@ function Repair-Firewall {
   $rc = $LASTEXITCODE
   foreach ($l in $lines) { if ($l.Trim()) { Say $l.Trim() } }
   if ($rc -eq 2) { Warn 'firewall rules are missing -- the node may be unreachable from other machines (see above for the elevated command)' }
+  if ($rc -eq 3) { Warn 'the inbound program rule belongs to another GPN install on this box -- left untouched (TCP 30333 is still open)' }
 }
 
 # ----------------------------------------------------------------- install ---
