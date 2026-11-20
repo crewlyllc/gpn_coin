@@ -174,12 +174,17 @@ Two different jobs use Windows, and they must not be confused (owner question, 2
 - [ ] `release-linux-selfhosted.yml` → `gpn-linux.tar.gz` on `linux-latest`
 - [ ] `release-windows.yml` on box 1's runner → `gpn-windows.zip` on `windows-latest`
 - [ ] **Same SHA on both runs.** macOS is not required and is not in the manifest.
-- [ ] **The Windows build carries a GitHub build attestation** (owner requirement 2026-11-19):
-      `actions/attest-build-provenance@v2` runs in the release workflow with `id-token: write`
-      and `attestations: write`, subject = the released zip. Verify with
-      `gh attestation verify gpn-windows.zip --repo jeremyzguo/gpn_coin` and record the output.
-      Reason: an SSH build produces a binary but no provenance; the runner is kept **for this**,
-      not for convenience.
+- [ ] **The attestation step runs BEFORE the publish step, and a failed attestation blocks the
+      release.** `actions/attest-build-provenance@v2` with `id-token: write` + `attestations:
+      write`, subject = the zip. GitHub never attests implicitly: no call, no attestation.
+      Ordering is the substance here — 0.3.61 shipped with the step placed *after* publish, so a
+      missing attestation could not stop anything (rows 215/216).
+- [ ] **The attestation exists for the digest that is actually published** — take the windows
+      `sha256` from `releases.json` (never a URL fetched from the site: `gpncoin.ai/gpn-windows.zip`
+      returns ~2.6 KB of HTML and hashing that proves nothing) and query
+      `GET /repos/jeremyzguo/gpn_coin/attestations/sha256:<digest>` → `count >= 1`.
+- [ ] `gh attestation verify <downloaded zip> --repo jeremyzguo/gpn_coin` prints a verified
+      subject; paste the output. An unattested artifact means the release does not proceed.
 
 ## 6. Verify the artifact BEFORE publishing
 
@@ -189,6 +194,8 @@ Two different jobs use Windows, and they must not be confused (owner question, 2
 
 ## 7. Cut and publish
 
+- [ ] **Refuse to cut unless §5's attestation checks passed.** If the attestation is missing, stop —
+      publishing first and verifying later is how an unattested release reaches strangers.
 - [ ] `scripts/release-cut.sh --timeout 300` — mirrors both assets into `crewlyllc/gpn_coin`,
       signs `website/releases.json`, publishes, re-downloads to verify.
 - [ ] `network.json` `latest_version` equals the published version.
