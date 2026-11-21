@@ -3,6 +3,30 @@
 Newest first. Written by the release loop; read by the assistant, who relays anything
 that needs Jeremy. `[TRIAGE]` = a decision waiting on the assistant.
 
+## 19:12 PT — no red CI of ours on main; macOS job red is GitHub billing; 217/218 attribution measured and shown to be impossible on 0.3.63 [no triage]
+
+- **A0**: main HEAD `f4a6ce3` is a docs commit → `head_sha=` query returns **`total_count: 0`**, expected
+  under `paths-ignore` (not a fault, per the 2026-11-19 rule). No failing CI on main.
+- **The one red run, read and classified**: **44856007475** `Unix binaries (Linux + macOS)`, job
+  **136698271250** `build (macos-latest)`. Log blob is gone (`BlobNotFound`), so the evidence is the
+  check annotation, quoted: *"The job was not started because recent account payments have failed or
+  your spending limit needs to be increased"*. **Environment / billing, not our code, not our test.**
+  macOS is not in the manifest and an owner rule forbids spending, so this is a wrong dispatch
+  (`scripts/dispatch-release.sh` still fires it). One-line fix — `continue-on-error: true` on the
+  macOS job at `release-unix.yml:32` — is deliberately **not** committed this run: no workflow change
+  while a release is in flight. Queued for the next batch.
+- **Work done on §3b (the first unticked boxes in file order)**: re-ran the cadence gate with log
+  attribution, `--journal-unit gpn-fleet` → window 336982..337081, mean 15.76 s, max 97.64 s,
+  **clause 1 PASSES (0 violations)**, clause 2 has 7 suspect gaps 3.09–6.19x mean. Then established
+  *why* they are unexplained: the deployed binary is **0.3.63**, and `grep -c -a -F 'still searching
+  template'` → **0** on it vs **1** on the built 0.3.64 binary. The attribution logging does not exist
+  in the running version, so "no log supplied" is a measurement limit, not a silent stall. Both
+  notes are in `0.3.64.md` §3b; both boxes stay unticked until §9 deploys 0.3.64.
+- **Release state**: Windows build **44856009729** `in_progress` at step 10/23 (`build node`) since
+  02:27Z; CI 44858730640 pending, 44853610678 queued; both runners report `busy: true`. §5's last two
+  boxes need that zip → dispatched handle recorded in the box, **not waited on** (§5/§7 boxes belong to
+  a build step, and the run is 45 min old, under the 90-min stale threshold).
+
 ## 19:10 PT — red CI was a 5 s speed assertion on a loaded runner; cancelled the stale run blocking BOTH the CI gate and the Windows build; §6 linux scan ticked [no triage]
 
 - **A0**: main HEAD was `13a0c8c` (loop-log only) → no CI run, expected under paths-ignore. The
