@@ -231,12 +231,12 @@ fn branch_work_from_parent(
 
 /// Row 228: is this import the point where a heavier fork becomes our best?
 ///
-/// Only a *true fork* (`parent_is_our_best == false`) is a candidate — a normal
+/// Only a *true fork* (`is_fork == true`, i.e. the parent is not our best) is a candidate — a normal
 /// extension is left to the SDK, and a branch whose own work is not greater is
 /// left as a side block. This is the decision the SDK cannot make: it compares
 /// the sum of `PowAlgorithm::Difficulty`, and our difficulty is a target.
-fn force_branch_best(parent_is_our_best: bool, theirs: u128, ours: u128) -> bool {
-    !parent_is_our_best && theirs > ours
+fn force_branch_best(is_fork: bool, theirs: u128, ours: u128) -> bool {
+    is_fork && theirs > ours
 }
 
 /// Row 228, gate lifetime: when does an accepted-fork verdict stop applying?
@@ -4154,19 +4154,19 @@ mod force_branch_best_tests {
     /// decision exists for.
     #[test]
     fn a_heavier_fork_is_forced_to_best() {
-        assert!(force_branch_best(false, 10_768_460, 281_429));
+        assert!(force_branch_best(true, 10_768_460, 281_429));
     }
 
     /// A normal extension (parent is our best) is never touched.
     #[test]
     fn an_extension_is_left_to_the_sdk() {
-        assert!(!force_branch_best(true, 10_768_460, 281_429));
+        assert!(!force_branch_best(false, 10_768_460, 281_429));
     }
 
     /// A fork that is not heavier stays a side block.
     #[test]
     fn a_lighter_fork_stays_a_side_block() {
-        assert!(!force_branch_best(false, 281_429, 10_768_460));
-        assert!(!force_branch_best(false, 5, 5));
+        assert!(!force_branch_best(true, 281_429, 10_768_460));
+        assert!(!force_branch_best(true, 5, 5));
     }
 }

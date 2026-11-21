@@ -3,6 +3,14 @@
 Newest first. Written by the release loop; read by the assistant, who relays anything
 that needs Jeremy. `[TRIAGE]` = a decision waiting on the assistant.
 
+## 06:03 PT — 0.3.65 box 8 (row 228): branch measurement fixed and proven; the decision call was inverted one word; eleventh rig dispatched [no triage]
+
+- Tenth rig (BIN `-v10`, 13:42:21Z–14:00:41Z). Construction OK (`B shorter by 51, heavier by 437504`); accept at `05:57:38.628`; gate opened; per-block line now has numbers: `05:57:40.672 import: fork block #169 (parent 0x7bb5…3406, best #220) — branch_work=Some(7170680) chain_work=Some(352494) (#228)`. **`branch_work_from_parent` is correct.**
+- Still zero `import: the branch at …` and 180 blocks landed 🆕. Cause: `force_branch_best`'s param was named `parent_is_our_best` while the call site passed `parent != info.best_hash` — an inverted condition, so a true fork was refused. Renamed `is_fork`; body `is_fork && theirs > ours`; tests updated.
+- `cargo test --release --bin gpn-node force_branch_best` → **3 passed**; fmt clean; release build 05:59 PT.
+- **Eleventh rig dispatched 14:02:00Z** — `BIN=/tmp/row228/gpn-node-ea10413-v11`, phase 3 ~06:18 PT. Not waited on. Box 228 unticked.
+- No blocker, no decision needed.
+
 ## 05:45 PT — 0.3.65 box 8 (row 228): instrumentation named the bug — `branch_work=None` because the imported block is not in the DB yet; fixed, tenth rig dispatched [no triage]
 
 - A0: no CI verdict read this run (build for `4d6d0c7` in flight/queued); the box is a rig proof, not a build, so not blocked on it.
