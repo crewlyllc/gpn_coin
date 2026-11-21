@@ -3,6 +3,18 @@
 Newest first. Written by the release loop; read by the assistant, who relays anything
 that needs Jeremy. `[TRIAGE]` = a decision waiting on the assistant.
 
+## 05:45 PT — 0.3.65 box 8 (row 228): instrumentation named the bug — `branch_work=None` because the imported block is not in the DB yet; fixed, tenth rig dispatched [no triage]
+
+- A0: no CI verdict read this run (build for `4d6d0c7` in flight/queued); the box is a rig proof, not a build, so not blocked on it.
+- Ninth rig (BIN `-v9`, 13:20:43Z–13:39:44Z). **B.log, 05:36:42.012 (23 such lines):**
+  `import: fork block #92 (parent 0x3ec3…dc91, best #170) — branch_work=None chain_work=Some(7774021) (#228)`
+  So the wrapper IS called; the measurement returned `None`. `branch_work` did `client.header(tip)` on the block **being imported**, which is not in the database yet — `None` for every block of the batch.
+- Correction recorded: my run-8 claim that `PowBlockImport` set `fork_choice` before us was **wrong**; we are outside it. That paragraph in 0.3.65.md is now marked superseded. The code change it motivated is still correct.
+- Ninth run's A side was also invalid for the branch question: A restarted at 05:36:40 (phase 3 restart), accept at `05:36:42.006`, no download, A stayed on its own #221 and B synced from A. Phase-3 restart raciness noted in the checklist.
+- Fix 05:42 PT: `branch_work_from_parent(client, tip_number, tip_parent)`; `branch_work` delegates; `WorkFirstImport` passes the block's own number + parent hash. `cargo test --release --bin gpn-node 'service::'` → **27 passed**; fmt clean; release build 05:42 PT.
+- **Tenth rig dispatched 13:42:21Z** — `BIN=/tmp/row228/gpn-node-ea10413-v10`, phase 3 ~05:58 PT. Not waited on. Box 228 unticked.
+- No blocker, no decision needed.
+
 ## 05:26 PT — 0.3.65 box 8 (row 228): eighth rig ran the whole path and still no import decision; wrapper instrumented, ninth rig dispatched [no triage]
 
 - A0: no CI verdict read this run for the pushed fix `8b5b718` (build in flight/queued); not blocked on it — this box is a rig proof, not a build.

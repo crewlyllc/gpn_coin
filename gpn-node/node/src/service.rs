@@ -183,10 +183,27 @@ fn chain_work(client: &FullClient, best_height: u64) -> Option<u128> {
 /// ([`crate::fork_choice::MAX_REORG_DEPTH`] is 288).
 fn branch_work(client: &FullClient, tip: <Block as BlockT>::Hash) -> Option<u128> {
     let tip_header = client.header(tip).ok().flatten()?;
-    let tip_number = u64::from(*tip_header.number());
+    branch_work_from_parent(
+        client,
+        u64::from(*tip_header.number()),
+        *tip_header.parent_hash(),
+    )
+}
+
+/// The same walk with the tip supplied from the caller (run 9, 05:36:42: inside
+/// `WorkFirstImport::import_block` the block being imported is **not in the
+/// database yet**, so `client.header(hash)` returned `None` for every block and
+/// `branch_work` was `None` on all 23 fork imports the wrapper saw — the
+/// decision could never be made). `tip_number` is the tip's height and
+/// `tip_parent` its parent hash, exactly the pair the walk needs.
+fn branch_work_from_parent(
+    client: &FullClient,
+    tip_number: u64,
+    tip_parent: <Block as BlockT>::Hash,
+) -> Option<u128> {
     let base = tip_number.saturating_sub(WORK_WINDOW);
     let mut p = tip_number.checked_sub(1)?;
-    let mut hash_p = *tip_header.parent_hash();
+    let mut hash_p = tip_parent;
     let mut work = 0u128;
     loop {
         let target_p = difficulty_target_at(client, hash_p)?;
@@ -285,14 +302,14 @@ impl BlockImport<Block> for WorkFirstImport {
         &self,
         mut block: sc_consensus::BlockImportParams<Block>,
     ) -> Result<sc_consensus::ImportResult, Self::Error> {
-        // Run 7 (04:54:50) showed this wrapper never fired: the SDK's
-        // `PowBlockImport::import_block` (sc-consensus-pow lib.rs:378) sets
-        // `fork_choice = Some(Custom(target-sum comparison))` itself *before*
-        // calling us, so `is_none()` was false for every block of the branch
-        // and the branch landed 🆕 while best stayed #216. Decide on the fork
-        // case unconditionally instead: a true fork (parent is not our best)
-        // gets its work measured by us and is imported as best only when our
-        // accounting says heavier. Extensions and lighter forks are untouched.
+        // Run 7 (04:54:50) → run 9 (05:36:42) settled the mechanism with lines
+        // from the nodes, not from reading: this wrapper is **outside**
+        // `PowBlockImport` (the queue calls us first), so `fork_choice` is
+        // `None` here — the earlier claim that the SDK had already set it was
+        // wrong. What actually stopped the decision was `branch_work`: the
+        // block being imported is not yet in the database, so looking its
+        // header up returned `None` (B.log, run 9: 23 × `branch_work=None`,
+        // `chain_work=Some(7774021)`). Measure from the header in hand.
         {
             let info = self.client.info();
             let parent = *block.header.parent_hash();
@@ -300,7 +317,7 @@ impl BlockImport<Block> for WorkFirstImport {
                 let hash = block.post_hash.unwrap_or_else(|| block.header.hash());
                 let number = u64::from(*block.header.number());
                 let ours = chain_work(&self.client, u64::from(info.best_number));
-                let theirs = branch_work(&self.client, hash);
+                let theirs = branch_work_from_parent(&self.client, number, parent);
                 // Run 8 (05:17:15) again produced no decision line. Whether that
                 // is a wrapper that is never called or a measurement that
                 // returns `None` cannot be told from a silent guard, so say
