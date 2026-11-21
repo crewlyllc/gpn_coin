@@ -895,7 +895,17 @@ struct Provider {
     /// Job types this provider advertises it can serve (`capabilities[]` from
     /// the heartbeat). Defaults to the full set when a box omits the field, so
     /// a node designed to serve everything is routable for everything.
+    ///
+    /// Kept as the *derived* view (row 222): built from `task_matrix`, so the
+    /// flat list a legacy consumer reads can never disagree with the words the
+    /// box actually advertises.
     capabilities: Vec<String>,
+    /// The advertisement as a **task matrix** (row 222): the words this box says
+    /// it serves and the models that serve each one. An old heartbeat
+    /// (`capabilities[]` + flat `models[]`) parses into the same type — the
+    /// words are derived from the capability names — so this is the reading of
+    /// the advertisement, not a new requirement on providers.
+    task_matrix: gpn_agent::tasks::TaskMatrix,
     /// libp2p peer id published by the heartbeat (`system_localPeerId`). Only
     /// present on boxes that can talk to their node RPC.
     peer_id: Option<String>,
@@ -1117,6 +1127,11 @@ fn provider_from_caps(addr: &str, v: &Value, status_url: String, latency_ms: u64
             .unwrap_or_default()
     };
     let caps = arr_of("capabilities");
+    // Row 222: ONE reading of the advertisement. New shape (`tasks`,
+    // `task_models`, `limits`) and old shape (`capabilities` + flat `models[]`)
+    // both become a `TaskMatrix`; `capabilities` below is then *derived* from it
+    // so the flat view cannot drift from the words the box advertises.
+    let task_matrix = gpn_agent::tasks::parse_advertisement(v);
     let (peer_id, p2p_multiaddrs, p2p_port) = p2p_fields(v);
     Provider {
         status_url,
@@ -1147,6 +1162,7 @@ fn provider_from_caps(addr: &str, v: &Value, status_url: String, latency_ms: u64
             .to_string(),
         tflops: v.get("tflops").and_then(|x| x.as_f64()).unwrap_or(0.0),
         capabilities: if caps.is_empty()
+            && task_matrix.tasks.is_empty()
             && !v
                 .get("caps_declared")
                 .and_then(|x| x.as_bool())
@@ -1159,8 +1175,9 @@ fn provider_from_caps(addr: &str, v: &Value, status_url: String, latency_ms: u64
             // A declared-but-empty list is a deliberate answer: this process
             // serves none of the kinds the host advertises. Keep it empty so
             // routing fails closed instead of inventing capabilities (#100).
-            caps
+            task_matrix.capabilities.clone()
         },
+        task_matrix,
         peer_id,
         p2p_multiaddrs,
         p2p_port,
@@ -1430,6 +1447,14 @@ fn apply_push_heartbeats(
                     gpu_class: "unknown".to_string(),
                     tflops: 0.0,
                     capabilities: default_capabilities(),
+                    // A signed heartbeat carries models but no capability claim
+                    // (row 222: the PUSH transport predates the matrix), so the
+                    // matrix is read from the default capability set + the models
+                    // it did send. Same reading as a polling box, no invention.
+                    task_matrix: gpn_agent::tasks::parse_advertisement(&json!({
+                        "capabilities": default_capabilities(),
+                        "models": p.models
+                    })),
                     peer_id: Some(p.peer_id.clone()),
                     p2p_multiaddrs: p.multiaddrs.clone(),
                     p2p_port: None,
@@ -1598,6 +1623,7 @@ fn unreachable_placeholder(status_url: String) -> Provider {
         // No declaration, no assumption: an endpoint we could not reach serves
         // nothing we can prove.
         capabilities: vec![],
+        task_matrix: Default::default(),
         peer_id: None,
         p2p_multiaddrs: vec![],
         p2p_port: None,
@@ -2112,6 +2138,42 @@ fn catalogue_models(registry: &[Provider]) -> Vec<String> {
     gpn_agent::models::filter_public_models(ids)
 }
 
+/// Row 222: does this provider's own advertisement say it serves this kind of
+/// work *with this model*?
+///
+/// A box that **declared a task matrix** is held to it in full — the word must be
+/// advertised and a pinned model must be listed under that word. A **legacy** box
+/// (capabilities + flat `models[]`, no `tasks`) keeps exactly the old freedom:
+/// its capability list is already checked by `has_cap`, and the model-family
+/// question is asked at the API surface where the caller named the word.
+fn task_ok(p: &Provider, kind: JobKind, model: &str) -> bool {
+    let Some(word) = gpn_agent::tasks::word_for_kind(kind) else {
+        // No word covers this kind (ML inference) — nothing to ask the matrix.
+        return true;
+    };
+    if !p.task_matrix.tasks_declared {
+        // Legacy advertisement (capabilities + flat `models[]`): routing is
+        // UNCHANGED. The capability gate above is the whole claim it made, and
+        // internal callers (`pick`) pass a coarse JobKind. A model pinned to the
+        // wrong word is refused at the API surface (`POST /v1/jobs`), where the
+        // caller actually named the word, not by second-guessing a flat list.
+        return true;
+    }
+    let pin = if model.is_empty() || model == "auto" {
+        None
+    } else {
+        Some(model)
+    };
+    match p.task_matrix.serves(word, pin) {
+        Ok(()) => true,
+        Err(why) => {
+            // A declared matrix is authoritative: no silent second chance.
+            log::debug!("route: {} refuses {} — {}", p.status_url, word, why);
+            false
+        }
+    }
+}
+
 fn route_candidates(
     registry: &[Provider],
     kind: JobKind,
@@ -2168,6 +2230,7 @@ fn route_candidates(
         p.last_seen.is_some()
             && deliverable(p)
             && has_cap(p)
+            && task_ok(p, kind, &needs.model)
             && hw_ok(p)
             && gpu_ok(p)
             // Model gate (text/ML/fine-tune): the box must already have the
@@ -5385,35 +5448,65 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 match gpn_agent::tasks::adapt_v1_jobs(&body) {
                     Ok(a) => {
                         // A word is only servable if some live provider advertises
-                        // its capability: "no provider for task=speak" is the
-                        // honest answer, never a route to a different kind of work
-                        // (design §2.2 / acceptance 5).
-                        let advertised = {
+                        // its capability AND (row 222) if that provider's matrix
+                        // can take the pinned model for THAT word: "no provider
+                        // for task=speak" is the honest answer, never a route to a
+                        // different kind of work (design §2.2 / acceptance 5).
+                        // A pin that belongs to another word is the caller's
+                        // mistake, so it is a 400, not a 503.
+                        let (served, reasons) = {
                             let reg = registry.lock().unwrap();
-                            let mut caps: Vec<String> = reg
-                                .iter()
-                                .filter(|p| p.last_seen.is_some())
-                                .flat_map(|p| p.capabilities.clone())
-                                .collect();
-                            caps.dedup();
-                            gpn_agent::tasks::lookup(a.word)
-                                .map(|t| gpn_agent::tasks::serves(t, &caps))
-                                .unwrap_or(false)
+                            let mut reasons: Vec<String> = Vec::new();
+                            let mut served = false;
+                            let live = reg.iter().filter(|p| p.last_seen.is_some()).count();
+                            for p in reg.iter().filter(|p| p.last_seen.is_some()) {
+                                match p.task_matrix.serves(a.word, a.model.as_deref()) {
+                                    Ok(()) => {
+                                        served = true;
+                                        break;
+                                    }
+                                    Err(why) => {
+                                        if !reasons.contains(&why) && reasons.len() < 4 {
+                                            reasons.push(why);
+                                        }
+                                    }
+                                }
+                            }
+                            if !served && reasons.is_empty() {
+                                reasons.push(if live == 0 {
+                                    "no provider is live".to_string()
+                                } else {
+                                    format!("no provider advertises task={}", a.word)
+                                });
+                            }
+                            (served, reasons)
                         };
-                        if !advertised {
+                        if !served {
+                            let wrong_word = reasons.iter().find(|r| r.contains("serves task="));
+                            let (code, ty) = if wrong_word.is_some() {
+                                (400, "gpn_bad_request")
+                            } else {
+                                (503, "gpn_unavailable")
+                            };
+                            let message = match wrong_word {
+                                Some(r) => r.clone(),
+                                None => format!("no provider for task={}", a.word),
+                            };
                             let _ = req.respond(
                                 Response::from_string(
                                     json!({
                                         "error": {
-                                            "message": format!("no provider for task={}", a.word),
-                                            "type": "gpn_unavailable",
+                                            "message": message,
+                                            "type": ty,
                                             "task": a.word,
+                                            "model": a.model,
+                                            "reasons": reasons,
                                         }
                                     })
                                     .to_string(),
                                 )
                                 .with_header(hdr.clone())
-                                .with_status_code(503),
+                                .with_status_code(code),
                             );
                             return;
                         }
@@ -5946,6 +6039,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     "ram_mb": (p.ram_mb > 0).then_some(p.ram_mb),
                     "gpu_class": p.gpu_class, "tflops": p.tflops,
                     "capabilities": p.capabilities,
+                    // Row 222: the routing view is the matrix, not the flat list:
+                    // a consumer can see which models serve which word on this
+                    // box, and the AP's own gate is the same object.
+                    "tasks": p.task_matrix.tasks,
+                    "task_models": p.task_matrix.models,
+                    "task_limits": p.task_matrix.limits,
                     // An endpoint that never answered has no identity and no
                     // capability claim: `capabilities` is empty and this is
                     // false, so no consumer can read it as a provider (#147).
@@ -6151,16 +6250,30 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 // 219/220); `served` is measured, not declared.
                 (Method::Get, ["v1", "tasks"]) => {
                     let reg = registry.lock().unwrap();
+                    // Row 222: the words come from each provider's own matrix —
+                    // a box that declared `tasks` contributes exactly those, and
+                    // a legacy box contributes the words its capabilities imply.
                     let mut caps: Vec<String> = reg
                         .iter()
                         .filter(|p| p.last_seen.is_some())
-                        .flat_map(|p| p.capabilities.clone())
+                        .flat_map(|p| p.task_matrix.capabilities.clone())
                         .map(|c| c.trim().to_string())
                         .filter(|c| !c.is_empty())
                         .collect();
                     caps.sort();
                     caps.dedup();
-                    gpn_agent::tasks::tasks_json(&caps)
+                    let mut view = gpn_agent::tasks::tasks_json(&caps);
+                    // ...and the words the matrix itself names, so a declared
+                    // task that no capability string covers is not lost.
+                    let mut declared: Vec<&'static str> = reg
+                        .iter()
+                        .filter(|p| p.last_seen.is_some())
+                        .flat_map(|p| p.task_matrix.tasks.clone())
+                        .collect();
+                    declared.sort();
+                    declared.dedup();
+                    view["network_tasks"] = json!(declared);
+                    view
                 }
                 (Method::Post, ["v1", "chat", "completions"]) => {
                     let v: Value = serde_json::from_str(&body).unwrap_or(json!({}));
@@ -9610,6 +9723,10 @@ mod tests {
             gpu_class: "unknown".to_string(),
             tflops: 0.0,
             capabilities: default_capabilities(),
+            task_matrix: gpn_agent::tasks::parse_advertisement(&json!({
+                "capabilities": default_capabilities(),
+                "models": [model]
+            })),
             peer_id: None,
             p2p_multiaddrs: vec![],
             p2p_port: None,
@@ -10681,12 +10798,109 @@ mod tests {
     fn prov_caps(addr: &str, url: &str, latency_ms: u64, model: &str, caps: &[&str]) -> Provider {
         let mut p = prov(addr, url, latency_ms, model);
         p.capabilities = caps.iter().map(|c| c.to_string()).collect();
+        p.task_matrix = gpn_agent::tasks::parse_advertisement(&json!({
+            "capabilities": p.capabilities,
+            "models": p.models
+        }));
         p
     }
 
     /// A text request and an image request go through the SAME function, and it
     /// filters on capability per kind: an LLM box is not an image candidate and a
     /// diffusion box is not a text candidate.
+    #[test]
+    fn a_model_from_another_task_is_never_routed_to_a_chat_job() {
+        // Row 222's defect, from the live fleet: one box (the AP host) serves
+        // ollama chat AND diffusion/audio, so its flat `models[]` lists both. A
+        // chat job pinned to `sd-turbo` therefore matched `has_model` and was
+        // routed to an LLM executor — the wrong answer, billed.
+        let mut p = prov_caps(
+            "ap",
+            "http://ap",
+            5,
+            "sd-turbo",
+            &["LLMInference", "ImageGeneration"],
+        );
+        p.models = vec!["qwen2.5:0.5b".into(), "sd-turbo".into()];
+        p.task_matrix = gpn_agent::tasks::parse_advertisement(&json!({
+            "tasks": ["chat", "generate-image"],
+            "task_models": {"chat": ["qwen2.5:0.5b"], "generate-image": ["sd-turbo"]}
+        }));
+        let reg = vec![p];
+        // The image model pinned to chat is refused even though it is listed.
+        assert!(route_candidates(
+            &reg,
+            JobKind::Text,
+            &RouteNeeds {
+                model: "sd-turbo".into(),
+                ..Default::default()
+            }
+        )
+        .is_empty());
+        // The same box still serves chat with a text model, and image with the
+        // diffusion model — the gate narrows, it does not disable.
+        assert_eq!(
+            route_candidates(
+                &reg,
+                JobKind::Text,
+                &RouteNeeds {
+                    model: "qwen2.5:0.5b".into(),
+                    ..Default::default()
+                }
+            )
+            .len(),
+            1
+        );
+        assert_eq!(
+            route_candidates(
+                &reg,
+                JobKind::Image,
+                &RouteNeeds {
+                    model: "sd-turbo".into(),
+                    ..Default::default()
+                }
+            )
+            .len(),
+            1
+        );
+    }
+
+    #[test]
+    fn a_declared_task_matrix_is_authoritative_for_routing() {
+        // A box that says `tasks: ["generate-image"]` and lists a chat model is
+        // not a chat provider, whatever its capability string says (row 222:
+        // the words are the advertisement, and the AP holds it to them).
+        let mut p = prov_caps("box", "http://box", 5, "qwen2.5:0.5b", &["ImageGeneration"]);
+        p.models = vec!["qwen2.5:0.5b".into(), "sd-turbo".into()];
+        p.task_matrix = gpn_agent::tasks::parse_advertisement(&json!({
+            "tasks": ["generate-image"],
+            "task_models": {"generate-image": ["sd-turbo"]}
+        }));
+        p.capabilities = p.task_matrix.capabilities.clone();
+        let reg = vec![p];
+        assert!(route_candidates(
+            &reg,
+            JobKind::Text,
+            &RouteNeeds {
+                model: "qwen2.5:0.5b".into(),
+                ..Default::default()
+            }
+        )
+        .is_empty());
+        assert_eq!(
+            route_candidates(
+                &reg,
+                JobKind::Image,
+                &RouteNeeds {
+                    model: "sd-turbo".into(),
+                    ..Default::default()
+                }
+            )
+            .len(),
+            1
+        );
+    }
+
     #[test]
     fn every_job_kind_shares_one_candidate_pipeline() {
         let llm = prov_caps("llm", "http://llm", 10, "llama3.2:1b", &["LLMInference"]);

@@ -2617,6 +2617,50 @@ fn run_main() -> Result<(), Box<dyn std::error::Error>> {
         .filter(|s| !s.is_empty())
         .collect();
 
+    // Row 222: the advertisement is a matrix — word → models — not a flat
+    // capability list. It is DERIVED here from the two things the operator
+    // already states (`--models`, `--capabilities`), so a box cannot advertise a
+    // word it has no model for: each word gets exactly the models this box
+    // listed whose family serves it (jobkind::model_kind), and the words come
+    // from the capabilities. `limits` is declared per word by the operator
+    // (`--task-limits-json`, opaque to the AP which enforces them server-side).
+    let advertised_words: Vec<&'static str> = {
+        let mut w: Vec<&'static str> = Vec::new();
+        for cap in &capabilities {
+            for t in gpn_agent::tasks::tasks_for_capability(cap) {
+                if t.endpoint.is_some() && !w.contains(&t.word) {
+                    w.push(t.word);
+                }
+            }
+        }
+        w
+    };
+    // Rebuilt per request from the LIVE model list (see the handler), because
+    // the AP routes on `models_now`, not on what the box had at boot.
+    fn task_matrix_now(
+        models: &[String],
+        advertised_words: &[&'static str],
+    ) -> std::collections::BTreeMap<&'static str, Vec<String>> {
+        let mut m: std::collections::BTreeMap<&'static str, Vec<String>> =
+            std::collections::BTreeMap::new();
+        for model in models {
+            let Some(kind) = gpn_agent::jobkind::model_kind(model) else {
+                continue;
+            };
+            let Some(word) = gpn_agent::tasks::word_for_kind(kind) else {
+                continue;
+            };
+            if advertised_words.contains(&word) {
+                m.entry(word).or_default().push(model.clone());
+            }
+        }
+        m
+    }
+    let task_limits: serde_json::Value = opt(&args, "--task-limits-json")
+        .or_else(|| std::env::var("GPN_TASK_LIMITS_JSON").ok())
+        .and_then(|s| serde_json::from_str(&s).ok())
+        .unwrap_or_else(|| serde_json::json!({}));
+
     let server = Server::http(&listen).map_err(|e| format!("cannot bind {listen}: {e}"))?;
 
     // ── Push heartbeat (NAT-friendly liveness) ────────────────────────────────
@@ -2861,6 +2905,7 @@ fn run_main() -> Result<(), Box<dyn std::error::Error>> {
                 // the access point routes on `models`, so an unfittable entry is
                 // a promise the box will OOM on.
                 let models_now = vram_filter_logged(&models_now, hw_now.vram_mb);
+                let task_models_now = task_matrix_now(&models_now, &advertised_words);
                 // Item #43: report free space so a monitor can alert before
                 // ENOSPC silently halts block production. 0/null = unknown.
                 let disk = disk_space(
@@ -2883,6 +2928,13 @@ fn run_main() -> Result<(), Box<dyn std::error::Error>> {
                     "address": address, "gflops": gflops_now, "models": models_now,
                     "can_pull": can_pull, "active": active, "capacity": capacity.max(1),
                     "capabilities": capabilities,
+                    // Row 222: the same advertisement as a matrix — the words this
+                    // box serves and the models it will serve each one with. The
+                    // AP routes on this (and refuses a model pinned to another
+                    // word); `capabilities` above stays for older readers.
+                    "tasks": advertised_words,
+                    "task_models": task_models_now,
+                    "limits": task_limits,
                     "tok_per_s": tok_per_s, "owner_cost_usd_hr": owner_cost_usd_hr,
                     "mem_bw_gbps": measured_f64(mem_bw),
                     "vram_mb": measured_u64(hw_now.vram_mb),

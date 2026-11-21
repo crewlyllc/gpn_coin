@@ -21,6 +21,7 @@
 
 use crate::jobkind::{self, JobKind};
 use serde_json::{json, Value};
+use std::collections::BTreeMap;
 
 /// What a task takes in / gives out.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -517,6 +518,256 @@ pub fn adapt_v1_jobs(raw: &str) -> Result<Adaptation, TaskError> {
     })
 }
 
+// ───────────────────────── provider advertisement (row 222) ─────────────────
+
+/// A provider's advertisement as a **matrix**: which words it serves, with what
+/// models, under what limits (row 222).
+///
+/// Before this the heartbeat said `capabilities: ['LLMInference','AudioGeneration']`
+/// and a flat `models: [...]` — which answers "what kind of work" but not "with
+/// what inputs", so the router could pin an image model to a chat job on a box
+/// that lists both, and it could not tell "this box has no vision model" from
+/// "this box never loaded one".
+///
+/// Backwards compatible by construction: an old heartbeat (capabilities + flat
+/// models, no `tasks`) parses into the same matrix — the words are derived from
+/// the capability names through [`tasks_for_capability`], and the flat model
+/// list applies to every word it can serve. Nothing a 0.3.64 box says becomes
+/// unroutable because of this type.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct TaskMatrix {
+    /// Canonical words this provider serves, in vocabulary order.
+    pub tasks: Vec<&'static str>,
+    /// word → models that serve it. An empty vec means "serves the word, model
+    /// list not itemised" (a legacy flat list, or a task routed by capability).
+    pub models: BTreeMap<&'static str, Vec<String>>,
+    /// word → the limits object as advertised. Opaque here; the endpoint that
+    /// serves the word enforces them (the AP must not invent a second set).
+    pub limits: BTreeMap<&'static str, Value>,
+    /// Did the heartbeat name `tasks` explicitly? `false` = legacy shape, where
+    /// the words were derived from `capabilities`.
+    pub tasks_declared: bool,
+    /// Did the heartbeat declare a capability list at all? Mirrors the old
+    /// `caps_declared` flag: a declared-but-empty list means "serves none",
+    /// which must fail closed rather than expand to `default_capabilities()`.
+    pub caps_declared: bool,
+    /// Capability strings to publish for consumers that still read the flat
+    /// list — derived from [`Self::tasks`], never hand-maintained.
+    pub capabilities: Vec<String>,
+}
+
+impl TaskMatrix {
+    pub fn advertises(&self, word: &str) -> bool {
+        self.tasks.contains(&word)
+    }
+
+    /// The models the provider says serve `word` (empty = not itemised).
+    pub fn models_for(&self, word: &str) -> &[String] {
+        self.models.get(word).map(|v| v.as_slice()).unwrap_or(&[])
+    }
+
+    /// Does this provider serve `word`, and can it serve `model` (when pinned)?
+    ///
+    /// `Err(reason)` is the router's refusal, worded for the 503/400 body. The
+    /// three things it catches that a flat capability list could not:
+    ///
+    /// 1. **no executor** — the word exists but this build cannot run it;
+    /// 2. **the box does not advertise the word** — a vision capability is not
+    ///    evidence of ever having loaded a vision model (no more
+    ///    `caption` → any-vision-capability box);
+    /// 3. **the pinned model belongs to a different word** — `sd-turbo` is
+    ///    `generate-image` even when the same box advertises `chat`.
+    pub fn serves(&self, word: &str, model: Option<&str>) -> Result<(), String> {
+        let task = lookup(word).ok_or_else(|| format!("unknown task '{word}'"))?;
+        if task.endpoint.is_none() {
+            return Err(format!(
+                "task '{}' is in the vocabulary but not served yet: {}",
+                task.word, task.pending
+            ));
+        }
+        if self.tasks_declared {
+            if !self.advertises(task.word) {
+                return Err(format!("no provider advertises task={}", task.word));
+            }
+        } else if !self
+            .capabilities
+            .iter()
+            .any(|c| task.capabilities.iter().any(|t| t.eq_ignore_ascii_case(c)))
+        {
+            return Err(format!("no provider advertises task={}", task.word));
+        }
+        if let Some(m) = model.map(str::trim).filter(|m| !m.is_empty()) {
+            if m != "auto" {
+                // The model's own family decides which word it can serve.
+                if let Some(kind) = jobkind::model_kind(m) {
+                    if let Some(owner) = word_for_kind(kind) {
+                        if owner != task.word && kind_hard_owner(kind) {
+                            return Err(format!(
+                                "model '{}' serves task={}, not task={}",
+                                m, owner, task.word
+                            ));
+                        }
+                    }
+                }
+                let listed = self.models_for(task.word);
+                if !listed.is_empty()
+                    && !listed
+                        .iter()
+                        .any(|x| x == m || x.split(':').next() == Some(m))
+                {
+                    return Err(format!(
+                        "provider does not list model '{}' for task={}",
+                        m, task.word
+                    ));
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+/// Is a model's family an *exclusive* claim on a word? Text models may serve
+/// more than chat (`embed`, `classify`); a diffusion or TTS model serves one
+/// word and nothing else. Used so "sd-turbo on a chat job" is refused while
+/// "qwen2.5:0.5b on an embed job" is not invented here.
+fn kind_hard_owner(kind: JobKind) -> bool {
+    matches!(kind, JobKind::Image | JobKind::Video | JobKind::Audio)
+}
+
+/// Every word a capability string can serve.
+pub fn tasks_for_capability(cap: &str) -> Vec<&'static Task> {
+    VOCABULARY
+        .iter()
+        .filter(|t| t.capabilities.iter().any(|c| c.eq_ignore_ascii_case(cap)))
+        .collect()
+}
+
+fn str_arr(v: &Value, key: &str) -> Vec<String> {
+    v.get(key)
+        .and_then(|x| x.as_array())
+        .map(|a| {
+            a.iter()
+                .filter_map(|s| s.as_str())
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Parse a heartbeat into a matrix. Accepts the new shape (`tasks`,
+/// `task_models` or object `models`, `limits`) and the old one (`capabilities`
+/// + flat `models[]`), and never invents a word it cannot find in the table.
+pub fn parse_advertisement(v: &Value) -> TaskMatrix {
+    let raw_tasks = v.get("tasks").and_then(|x| x.as_array()).map(|a| {
+        a.iter()
+            .filter_map(|s| s.as_str())
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .collect::<Vec<_>>()
+    });
+    let caps_raw = v.get("capabilities").and_then(|x| x.as_array());
+    let caps = str_arr(v, "capabilities");
+    let caps_declared = caps_raw.is_some()
+        || v.get("caps_declared")
+            .and_then(|x| x.as_bool())
+            .unwrap_or(false);
+    let tasks_declared = raw_tasks.is_some();
+
+    // Words: explicit `tasks[]` when declared (normalised through the table),
+    // otherwise derived from the capability names, in vocabulary order.
+    let mut words: Vec<&'static str> = Vec::new();
+    if let Some(list) = &raw_tasks {
+        for w in list {
+            if let Some(t) = lookup(w) {
+                if !words.contains(&t.word) {
+                    words.push(t.word);
+                }
+            }
+        }
+    } else {
+        for cap in &caps {
+            for t in tasks_for_capability(cap) {
+                if !words.contains(&t.word) {
+                    words.push(t.word);
+                }
+            }
+        }
+    }
+    // Vocabulary order in both cases: `GET /v1/tasks` and the docs print it.
+    words.sort_by_key(|w| VOCABULARY.iter().position(|t| t.word == *w).unwrap_or(0));
+
+    // Per-task model lists: `task_models` (current name) or an object `models`.
+    let mut models: BTreeMap<&'static str, Vec<String>> = BTreeMap::new();
+    let map_src = v
+        .get("task_models")
+        .filter(|x| x.is_object())
+        .or_else(|| v.get("models").filter(|x| x.is_object()));
+    if let Some(obj) = map_src.and_then(|x| x.as_object()) {
+        for (k, val) in obj {
+            let Some(t) = lookup(k) else { continue };
+            let list: Vec<String> = val
+                .as_array()
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|s| s.as_str())
+                        .map(|s| s.trim().to_string())
+                        .filter(|s| !s.is_empty())
+                        .collect()
+                })
+                .unwrap_or_default();
+            models.insert(t.word, list);
+        }
+    }
+    // A flat `models[]` is the legacy spelling: it applies to every word the box
+    // advertises unless the object form already itemised that word.
+    let flat = str_arr(v, "models");
+    if !flat.is_empty() {
+        for w in &words {
+            models.entry(*w).or_insert_with(|| flat.clone());
+        }
+    }
+
+    let mut limits: BTreeMap<&'static str, Value> = BTreeMap::new();
+    if let Some(obj) = v.get("limits").and_then(|x| x.as_object()) {
+        for (k, val) in obj {
+            if let Some(t) = lookup(k) {
+                limits.insert(t.word, val.clone());
+            }
+        }
+    }
+
+    // Flat capabilities for legacy consumers. The DECLARED list is
+    // authoritative — this change may never widen what a box says it serves —
+    // and a declared word that no declared capability covers contributes its
+    // own primary capability, so the two views cannot contradict each other.
+    let mut capabilities: Vec<String> = caps.clone();
+    if tasks_declared {
+        for w in &words {
+            if let Some(t) = lookup(w) {
+                let covered = t
+                    .capabilities
+                    .iter()
+                    .any(|c| capabilities.iter().any(|x| x.eq_ignore_ascii_case(c)));
+                if !covered {
+                    if let Some(primary) = t.capabilities.first() {
+                        capabilities.push((*primary).to_string());
+                    }
+                }
+            }
+        }
+    }
+
+    TaskMatrix {
+        tasks: words,
+        models,
+        limits,
+        tasks_declared,
+        caps_declared,
+        capabilities,
+    }
+}
+
 /// Can this task be served by a network advertising `capabilities`?
 ///
 /// The access point's gate for `POST /v1/jobs`: a word whose capability no live
@@ -697,6 +948,106 @@ mod tests {
         assert!(serves(&any_of, &["SpeechToText".to_string()]));
         assert!(serves(&any_of, &["LLMInference".to_string()]));
         assert!(!serves(&any_of, &["ImageGeneration".to_string()]));
+    }
+
+    #[test]
+    fn the_new_matrix_shape_parses_into_words_models_and_limits() {
+        let v: Value = serde_json::from_str(
+            r#"{"tasks":["chat","speak","generate_image"],
+                "task_models":{"chat":["qwen2.5:0.5b"],"speak":["xtts-v2"]},
+                "limits":{"speak":{"max_seconds":60}}}"#,
+        )
+        .unwrap();
+        let m = parse_advertisement(&v);
+        assert!(m.tasks_declared);
+        assert_eq!(m.tasks, vec!["chat", "generate-image", "speak"]);
+        assert_eq!(m.models_for("chat"), &["qwen2.5:0.5b".to_string()]);
+        assert_eq!(m.limits["speak"]["max_seconds"], 60);
+        assert!(m.capabilities.iter().any(|c| c == "AudioGeneration"));
+        assert_eq!(m.serves("speak", Some("xtts-v2")), Ok(()));
+        // A declared word must never be published with a contradicting empty
+        // capability list (legacy consumers read that list).
+        let v: Value = serde_json::from_str(r#"{"tasks":["chat"]}"#).unwrap();
+        let m = parse_advertisement(&v);
+        assert_eq!(m.capabilities, vec!["LLMInference".to_string()]);
+    }
+
+    #[test]
+    fn an_old_capability_plus_flat_model_list_still_parses_the_same_way() {
+        let v: Value = serde_json::from_str(
+            r#"{"capabilities":["LLMInference","ImageGeneration"],
+                "models":["qwen2.5:0.5b","sd-turbo"]}"#,
+        )
+        .unwrap();
+        let m = parse_advertisement(&v);
+        assert!(
+            !m.tasks_declared,
+            "legacy shape must be recognised as legacy"
+        );
+        assert!(m.advertises("chat") && m.advertises("generate-image"));
+        // Derived capabilities are exactly the declared ones: no widening.
+        assert_eq!(
+            m.capabilities,
+            vec!["LLMInference".to_string(), "ImageGeneration".to_string()]
+        );
+        // The flat list applies to every advertised word, as before.
+        assert_eq!(
+            m.models_for("chat"),
+            &["qwen2.5:0.5b".to_string(), "sd-turbo".to_string()]
+        );
+        assert_eq!(m.serves("chat", Some("qwen2.5:0.5b")), Ok(()));
+        // The cross-word refusal works on a legacy advertisement too (this is the
+        // check `POST /v1/jobs` makes when the caller pins a model): `sd-turbo`
+        // appears in the flat list, but it serves generate-image.
+        let e = m.serves("chat", Some("sd-turbo")).unwrap_err();
+        assert!(e.contains("serves task=generate-image"), "{e}");
+        // A capability no word covers is still published, never dropped.
+        let v: Value = serde_json::from_str(r#"{"capabilities":["MLInference"]}"#).unwrap();
+        assert!(parse_advertisement(&v)
+            .capabilities
+            .iter()
+            .any(|c| c == "MLInference"));
+    }
+
+    #[test]
+    fn a_box_with_a_vision_capability_but_no_vision_model_cannot_take_caption() {
+        // The old shape advertised `VisionInference` and the router had nothing
+        // else to ask. The matrix asks the second question: which models?
+        let v: Value = serde_json::from_str(
+            r#"{"capabilities":["VisionInference","ImageGeneration"],"models":["sd-turbo"]}"#,
+        )
+        .unwrap();
+        let m = parse_advertisement(&v);
+        // `caption` has no executor in this build: refused for that reason.
+        let e = m.serves("caption", None).unwrap_err();
+        assert!(e.contains("not served yet"), "{e}");
+        // And with a declared task list that simply omits it: refused by name.
+        let v: Value = serde_json::from_str(r#"{"tasks":["generate-image"]}"#).unwrap();
+        let m = parse_advertisement(&v);
+        assert!(!m.advertises("caption"));
+        assert!(m
+            .serves("speak", None)
+            .unwrap_err()
+            .contains("no provider advertises"));
+    }
+
+    #[test]
+    fn a_model_from_another_word_is_refused_on_the_wrong_task() {
+        let v: Value = serde_json::from_str(
+            r#"{"tasks":["chat","generate-image"],
+                "task_models":{"chat":["qwen2.5:0.5b"],"generate-image":["sd-turbo"]}}"#,
+        )
+        .unwrap();
+        let m = parse_advertisement(&v);
+        // The bug row 222 exists to close: a diffusion model pinned to chat.
+        let e = m.serves("chat", Some("sd-turbo")).unwrap_err();
+        assert!(e.contains("serves task=generate-image"), "{e}");
+        // A text model pinned to chat is fine; an unlisted text model is not.
+        assert_eq!(m.serves("chat", Some("qwen2.5:0.5b")), Ok(()));
+        let e = m.serves("chat", Some("llama3.2:1b")).unwrap_err();
+        assert!(e.contains("does not list model"), "{e}");
+        // No pin: the word alone decides.
+        assert_eq!(m.serves("chat", None), Ok(()));
     }
 
     #[test]
