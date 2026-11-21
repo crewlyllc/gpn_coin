@@ -3,6 +3,35 @@
 Newest first. Written by the release loop; read by the assistant, who relays anything
 that needs Jeremy. `[TRIAGE]` = a decision waiting on the assistant.
 
+## 19:58 PT — 0.3.64: cosign verify OK, cut attempted and correctly refused by its CI gate [no triage]
+
+- **A0**: main HEAD `fecf30f` — `GET /actions/runs?head_sha=fecf30f` → `total_count: 0`; docs-only
+  commit, `ci.yml` paths-ignore. Expected, not a missing build. The build/publish step this run
+  works is §5–§7, so the CI rule mattered: the **release commit's** CI (`9df5341`, run
+  `44853610678`) is in flight and its Windows job is a normal cold build, so it was **not**
+  cancelled (35 min job-level, run-level `created_at` is queue time).
+- **Boxes ticked** (`docs/releases/0.3.64.md`, one docs commit):
+  - §5 "verify the downloaded artifact with the verifier that matches the mechanism" —
+    `scripts/verify-windows-bundle.sh windows-latest` → **`Verified OK`**, keyless cosign, on the
+    published bytes `sha256 4d5b9f4e…` (247,027,527 B) + bundle `2c20209c…`.
+  - §7 "refuse to cut unless §5's attestation checks passed" — that same hand run against the
+    asset `release-cut.sh` step 2 fetches.
+  - §6 windows half: `unzip -p gpn-windows.zip 'gpn-node.exe' | grep -c -a -F` → `still searching
+    template` 1, `reorg=` 1, `work ours=` 1, `gpn-forked` 2. Both platforms carry the change.
+- **Cut attempted, refused (correctly)**: `scripts/release-cut.sh --version 0.3.64` downloaded and
+  sha256-verified both assets, read `0.3.64` from the linux bundle's `gpn-build-v1` stamp, then
+  `ABORT: CI for 9df5341 is 'in_progress:None' -- refusing to sign an unverified build` (exit 1).
+  Nothing was mirrored, signed or published; gpncoin.ai still serves `0.3.63`.
+- **Next run**: poll `44853610678` once; if green, re-run `scripts/release-cut.sh --version 0.3.64`
+  (idempotent). Second handle: `44858730640` on `6f0e780` (image_channel 120 s deadlock-guard fix),
+  `pending` behind the single-slot Windows runner.
+- **Defect found, carry to next batch**: an aborted `release-cut.sh` leaves the commit lock behind —
+  `~/.gpn/release-in-flight` named the dead `holder: jeremyg@openclawassist pid 3410598` while
+  `cleanup()` only releases when the file reads `release-cut pid $$`, a string
+  `release-lock.sh take` had already overwritten. Cost one manual `release-lock.sh release 0.3.64`.
+  Fix belongs with the other queued script change (drop macOS from `dispatch-release.sh`).
+- **Blockers/triage**: none. Neither 217 nor 218 can be proven until 0.3.64 is deployed (§9/§10).
+
 ## 19:12 PT — no red CI of ours on main; macOS job red is GitHub billing; 217/218 attribution measured and shown to be impossible on 0.3.63 [no triage]
 
 - **A0**: main HEAD `f4a6ce3` is a docs commit → `head_sha=` query returns **`total_count: 0`**, expected
