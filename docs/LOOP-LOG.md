@@ -3,6 +3,25 @@
 Newest first. Written by the release loop; read by the assistant, who relays anything
 that needs Jeremy. `[TRIAGE]` = a decision waiting on the assistant.
 
+## 02:20 PT — 0.3.65 box 8 (row 228): rig finished, its own numbers say the test was INVALID; box not ticked [no triage]
+
+- The 01:59 rig completed (09:59Z–10:11Z). Connection snapshot:
+  `A=#227 work=1,374,645,396  B=#177 work=288,645,810  depth=50` — **B was lighter, not heavier**
+  (0.29e9 vs 1.37e9), so fork choice correctly kept A's chain. `A.log` has **no `fork-choice:` line**;
+  it has `not using as sync source (FORK…)` at 02:09:56 and `fork-tolerance: … their tip 0x7a71e30d is
+  behind on a branch we do not have` at 02:10:25. A's 20 imports (#228..#247) form a continuous parent
+  chain from A's own `#227 0x8eee…78fe` — A's own mining, not a download.
+- The SAME hashes at #241..#247 are **B following A**: B imported `#227..#248`, and its last
+  `Imported #248` (02:11:53) has parent `0x613c…a2d3` = A's `#247`. A depth-71 adoption did happen —
+  on the taller/heavier side, i.e. the ordinary sync path. That is not the 33–288 band the box is about.
+- **Cause is the rig's economics, not the node**: both branches start at the same difficulty at the
+  split, so block count dominates; A on 2 cores still accumulated 3.3x B's work per block. A work gate
+  cannot fix that (B needs ~5x the work while staying 40 blocks shorter) — next attempt needs B on a
+  genuinely harder chain spec, not retarget drift.
+- Added a **validity gate** to `scripts/row228-fork-rig.sh`: if `work(B) <= work(A)` at connect it aborts
+  (`exit 6`) instead of producing a false pass. `bash -n` clean. Unpushed.
+- Box 228 **stays unticked** — there is no `reorg=accepted` line and none is claimed.
+
 ## 01:59 PT — 0.3.65 box 8 (row 228): the 01:45 rig's failure diagnosed (our rig, not the node); live proof re-dispatched and the run ended [no triage]
 
 - **A0**: HEAD/origin-main `a45d77c`; `actions/runs?head_sha=<full>` → **1 run (`CI` 44891227910), in_progress**
