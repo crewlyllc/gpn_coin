@@ -3,6 +3,33 @@
 Newest first. Written by the release loop; read by the assistant, who relays anything
 that needs Jeremy. `[TRIAGE]` = a decision waiting on the assistant.
 
+## 18:33 PT — 0.3.64 builds in flight (linux building, windows queued); the one red run is the known macOS billing job, cause re-confirmed [no triage]
+
+- **A0**: main HEAD `3798b1f` (loop-log/docs only) → `runs?head_sha=3798b1f…` → `total_count: 0`,
+  expected under `ci.yml` paths-ignore. The release's own CI gate run **44853610678** (`9df5341`)
+  is still `pending` with **0 jobs** after 30 min — both self-hosted runners report `busy: true`
+  (`openclawassist` Linux/gpu, `DESKTOP-USBUADL` Windows/X64), i.e. queue contention from the two
+  release builds, not a fault. Not waited on, not cancelled.
+- **Builds**: `44856005252` linux `in_progress` — steps 1-4 `success`, step 5 `build (waits for
+  ~/.gpn/build.lock)` running since 02:27:44Z (~10 min); package/publish pending.
+  `44856009729` windows `queued` (single-slot Windows runner). Both on `9df5341`. No box ticked:
+  §5 boxes 6-7 and the §5/§6 attestation+scan boxes all need the published artifacts.
+- **Red run diagnosed — `44856007475` "Unix binaries (Linux + macOS)", job 136698271250
+  `build (macos-latest)` failed in 3 s with `steps: []`, `runner_id: 0`.** Annotation (check-run
+  API, re-read this run): *"The job was not started because recent account payments have failed or
+  your spending limit needs to be increased."* Classification: **environment/billing**, not our code
+  and not our test — GitHub-hosted macOS runners are unpaid on this account, and the owner rule
+  forbids spending. macOS is not in the release manifest. The cause on our side is the dispatch, not
+  the workflow: `scripts/dispatch-release.sh:127-131` still lists `release-unix.yml`.
+- **Fix prepared, deliberately not pushed**: while 0.3.64 is in flight a `scripts/` commit would start
+  a `ci.yml` run on the same single-slot Linux runner and queue behind the release build. The exact
+  change for the next batch (apply, do not re-diagnose): drop the `"release-unix.yml"` line from the
+  `workflows=(…)` array at `scripts/dispatch-release.sh:127-131`, keep the comment naming macOS as
+  unbuildable (billing), and grep `docs/updates.md:392`'s `gh workflow run release-unix.yml` example
+  to replace it with `release-linux-selfhosted.yml`.
+- **Blockers**: none. **Triage**: none. **Next run**: ask GitHub once for `44856005252` /
+  `44856009729`; on success tick §5 boxes 6-7 and move to §6 (attestation + binary string scan).
+
 ## 18:30 PT — 0.3.64 §1-§3 ticked with fresh local evidence; §5 both builds dispatched and the run ended [no triage]
 
 - **A0**: main HEAD `9df5341` (the 0.3.64 bundle commit) has CI run **44853610678**, `pending`,
