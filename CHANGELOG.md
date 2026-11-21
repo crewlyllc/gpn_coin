@@ -8,6 +8,68 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 versions are [Semantic Versioning](https://semver.org/spec/v2.0.0.html), with
 the GPN-specific meaning of each level documented in `docs/updates.md`.
 
+## [0.3.65] - 2026-11-20
+
+Bumped from 0.3.64 (`scripts/bump-version.py patch`).
+
+**Two long-standing gaps close in this release: a node that accepts a reorg but
+never downloads the branch, and a retarget constant set that did not match the
+shipped artifact.** Alongside them, the access point stops being four
+hand-written handlers and becomes one dispatcher over a task vocabulary, and
+referral codes stop being typed strings and become wallet-derived, operator-only
+attribution that can be exported as airdrop input.
+
+### Added
+- **Task vocabulary + `POST /v1/jobs` dispatcher (row 221).** `tasks.rs` names
+  each task with its accept/produce modalities and capability; a resolver maps a
+  request to `(task, inputs, model?)` with the documented fallback (no task and
+  no model ⇒ chat); the four OpenAI-shaped endpoints become thin adapters over
+  that one dispatcher, so `unknown task` is a 400 and `no provider for task=speak`
+  is a 503 instead of being routed to an LLM. `website/ai.html` documents the
+  word table with one runnable curl per live word, generated from the provider
+  matrix.
+- **Providers advertise a task matrix (row 222).** Registration carries
+  `{tasks, models: {task: [model…]}, limits: {task: {…}}}` instead of a flat
+  capability list; the AP refuses to route `caption` to a box advertising no
+  vision model. Old-style registrations still parse (compat).
+- **Wallet-derived referral codes (row 223).** `GPN` + base32(blake2b of
+  `gpn-referral-v1` ‖ account id) with a checksum character: the same wallet
+  reproduces its code on reinstall, a checksum typo is rejected naming the
+  expected character, and a code that does not derive from the presenting
+  node's address is recorded `invalid_for_address` rather than dropped. Legacy
+  typed codes keep working, labelled `legacy`.
+- **The operator can find and copy their own code (row 224).** Dashboard card
+  with a working Copy button, a one-line startup summary, `gpn_node --referral`,
+  `GET /api/referral`, and an explanation page on gpncoin.ai.
+- **Operator-only referral visibility (row 226).** `GET /api/referrals?code=&sig=`
+  returns `{code, referred, first_seen, recent[]}` only when the signature
+  verifies against the address the code derives from (401 otherwise), contains
+  no referee addresses, and no route lists third-party attributions. The full
+  registry is `gpn-referrals --all` on the AP host.
+- **Deterministic referral export (row 227).** `gpn-referrals --export` is
+  schema-versioned, carries the registry sha256 and per-participant
+  `first_seen`/`last_seen`/`referred_by`/`derivation_verified`, dedupes by
+  address (five reinstalls appear once), is byte-identical on re-run, and keeps
+  self-referrals and `invalid_for_address` entries as evidence outside any
+  payout total.
+
+### Changed
+- **Referral share link is `/join?ref=<code>` (row 225),** with `/r/<code>`
+  redirecting to it; `/join` is a landing page that bakes the code into all four
+  install commands and shows it as plain text, so a screenshot keeps the
+  attribution. No surface asks anyone to share a `/download` URL.
+- **Retarget constants vs the shipped artifact resolved (row 229).** The 0.3.62
+  binary's `ADJUST … blocks=10 avg_s=4 target=4` is traced to its commit; the
+  source-vs-binary discrepancy is explained and any reasoning that relied on the
+  source constants is corrected.
+
+### Fixed
+- **Reorg band 33–288 blocks (row 228).** Fork-choice said `reorg=accepted` but
+  never downloaded the branch: an accepted fork at depth 40–250 is now imported
+  and reorged, and the two gates (`may_ask_for_blocks`, anchored
+  `anchor_mismatch`) are isolated experimentally so the log says which one
+  refused.
+
 ## [0.3.64] - 2026-11-20
 
 Bumped from 0.3.63 (`scripts/bump-version.py patch`).
