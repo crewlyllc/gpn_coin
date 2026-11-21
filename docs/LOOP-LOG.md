@@ -3,6 +3,24 @@
 Newest first. Written by the release loop; read by the assistant, who relays anything
 that needs Jeremy. `[TRIAGE]` = a decision waiting on the assistant.
 
+## 10:18 PT — 0.3.65 §5 windows build is stepping (step 10/23, 19 min in); §4 header closed on the ASCII-fix SHA [no triage]
+
+- **A0**: `main` HEAD `44817f057bdc` = `total_count: 0` — the 10:02 docs commit, `paths-ignore` holding.
+- **§5 box 3 (windows artifact)**: run **44926165305** `in_progress` since 18:01:51Z; job-level check
+  (`/runs/44926165305/jobs`) shows **step 10 `build node` `in_progress`**, steps 11–23 `pending`. 19 min
+  into a 40–75 min cold build ⇒ stepping, not hung; under the 90-min stale threshold, so not cancelled.
+  Handle stays in the box; verdict asked next run only.
+- **§4 closed**: all four boxes were already ticked, so the header now reads `DONE (4/4)`; added the
+  missing evidence line — CI **44926088682** `success` on `head_sha 93b4195a959b`, the ASCII-fix sha the
+  release is built from (`3a76aa3f`'s green run predates the fix and cannot witness this tree).
+- **§5 header corrected** `3/6` → `2/7` (7 boxes there: 2 ticked, 5 open), so partial progress reads
+  without counting.
+- **Attestation branch pinned**: `GET /repos/jeremyzguo/gpn_coin` ⇒ `visibility: private`, owner
+  `jeremyzguo` (`User`) ⇒ cosign keyless + `gpn-windows.zip.bundle`; `attestations/sha256:` 404 is
+  expected on this path. Recorded in the §5 attestation box rather than re-derived later.
+- Nothing ticked (every remaining box in §5–§10 needs the windows artifact). No blocker, no decision.
+  Next run: ask 44926165305 once, tick §5 boxes 3–4 on `success`, then §6 windows scan.
+
 ## 10:02 PT — 0.3.65 §5 box 3 unblocked: CI went green on the code SHA and the windows release build started [no triage]
 
 - **A0**: `main` HEAD `409a8bde44a7` (`docs(release): 0.3.65 — windows build still queued …`) has
