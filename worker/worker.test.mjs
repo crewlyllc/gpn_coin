@@ -847,6 +847,35 @@ test("speech submit: 202 + poll_url is passed through, clip forwarded", async ()
   assert.match(seen[0].body, /"voice_ref":"AAAA"/);
 });
 
+test("speech submit accepts a real reference clip (over the 64 KB chat cap)", async () => {
+  // 5 s of 22 kHz mono 16-bit WAV is 220 KB raw -> ~294 KB base64, i.e. 4.6x
+  // over AP_PROXY_MAX_BODY. A clip that size is the *smallest* the engine
+  // accepts, so this is the case that must work, not an edge case.
+  const clip = "Q".repeat(300 * 1024);
+  const payload = JSON.stringify({ input: "hello there", voice_ref: clip, consent: true });
+  assert.ok(payload.length > __test.AP_PROXY_MAX_BODY);
+  assert.ok(payload.length < __test.AUDIO_MAX_BODY);
+  const seen = [];
+  const res = await worker.fetch(
+    new Request("https://gpncoin.ai/api/v1/audio/speech", {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        origin: "https://gpncoin.ai",
+        "cf-connecting-ip": "203.0.113.45",
+      },
+      body: payload,
+    }),
+    {
+      __test_ap_transport: stubAp(jsonReply(202, { id: "c".repeat(32), status: "pending" }), seen),
+    },
+    { waitUntil() {} },
+  );
+  assert.equal(res.status, 202);
+  assert.equal(seen.length, 1);
+  assert.equal(seen[0].body.length, payload.length); // forwarded whole, not truncated
+});
+
 test("speech poll and clip download are proxied; the clip stays binary", async () => {
   const id = "b".repeat(32);
   const seen = [];

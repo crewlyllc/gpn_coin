@@ -4,7 +4,7 @@
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
 <title>Use GPN for AI — OpenAI-compatible inference on a live GPU network</title>
-<meta name="description" content="Point any OpenAI client at https://gpncoin.ai/api/v1 and run chat and image generation on GPUs across the GPN testnet. Free while the testnet runs. Try it in the browser, then copy a working curl, Python or Node example." />
+<meta name="description" content="Point any OpenAI client at https://gpncoin.ai/api/v1 and run chat, image, speech (text-to-speech with voice cloning) and fine-tuning on GPUs across the GPN testnet. Free while the testnet runs. Try it in the browser, then copy a working curl, Python or Node example." />
 <meta name="theme-color" content="#07090f" />
 <link rel="canonical" href="https://gpncoin.ai/ai" />
 <meta property="og:site_name" content="GPN" />
@@ -137,6 +137,9 @@
           <button class="tab" type="button" id="do-tab-video" role="tab" aria-selected="false"
                   aria-controls="do-video" data-os="video" tabindex="-1">🎬 Video generation
             <span class="tab-soon">coming soon</span></button>
+          <button class="tab" type="button" id="do-tab-audio" role="tab" aria-selected="false"
+                  aria-controls="do-audio" data-os="audio" tabindex="-1">🔊 Audio / speech
+            <span class="tab-live">live</span></button>
           <button class="tab" type="button" id="do-tab-finetune" role="tab" aria-selected="false"
                   aria-controls="do-finetune" data-os="finetune" tabindex="-1">🎛️ Fine-tuning
             <span class="tab-live">live</span></button>
@@ -702,6 +705,188 @@ GET  data[0].url                      → 200 image/png</code></pre>
             constants are estimates off the same throughput curve as images and text — there is no measured
             render to check them against. When a card with &gt;8&nbsp;GB VRAM joins the testnet and completes
             one end-to-end, it will appear here as a normal submit → poll → download flow like images.</p>
+        </div>
+
+        <!-- ==================== PURPOSE: AUDIO ==================== -->
+        <div class="qs-panel" id="do-audio" role="tabpanel" aria-labelledby="do-tab-audio" tabindex="0" hidden>
+          <p class="hint" style="margin-top:0"><b>Live.</b> Text-to-speech with voice cloning, routed as the
+            <code>AudioGeneration</code> capability beside <code>LLMInference</code>, <code>ImageGeneration</code>
+            and <code>FineTuning</code>. Same three steps as images: <b>submit</b> the text plus a reference clip
+            (answers <code>202</code>), <b>poll</b> until <code>status</code> is <code>completed</code>, then
+            <b>download</b> <code>data[0].url</code> — an MP3 of the text in that clip's voice.
+            A 7&nbsp;s clip rendered in <b>~6.7&nbsp;s</b> on a 4060 (cold engines load the model first, so the
+            first job of the day takes minutes).</p>
+
+          <div class="callout" style="margin:0 0 14px">
+            <span class="ct">Four rules the endpoint enforces</span>
+            <ul class="mb-0">
+              <li><b>The reference clip is 5–15&nbsp;s</b> of clear speech, WAV or FLAC, base64 in the request.
+                Shorter than 5&nbsp;s and the engine has too little speaker information (it answers
+                <code>503</code>, <code>payment: not_charged</code>); longer than 15&nbsp;s only costs VRAM.
+                The upload cap is 8&nbsp;MB.</li>
+              <li><b><code>consent</code> must be literally <code>true</code></b> — it means “I have permission
+                to clone this voice”. Without it the request is refused with <code>gpn_consent_required</code>
+                <i>before</i> any escrow.</li>
+              <li><b>Output is MP3</b> (24&nbsp;kHz mono). <code>response_format</code> accepts only
+                <code>mp3</code> / <code>audio/mpeg</code>.</li>
+              <li><b>Billed on measured output seconds</b>, not tokens: the price quotes a ceiling from
+                <code>max_seconds</code> and settles ceiling × measured / max, refunding the difference.
+                Polling is free.</li>
+            </ul>
+          </div>
+
+          <p class="hint" style="margin-top:0"><b>No retention.</b> The clip travels inside the request and the
+            signed assignment, is written to a temp file on the provider for the render, and is deleted
+            afterwards — the network never stores a voice sample. What is kept is the clip's
+            <code>sha256</code> (<code>voice_sha256</code> in the reply), so the audio is provably the product
+            of the clip you sent. The finished MP3 expires after 24&nbsp;h; <code>expires_at</code> says when.</p>
+
+          <div class="subtabs envtabs" role="tablist" aria-label="Choose your environment">
+            <button class="tab sub" type="button" id="a-os-tab-linux" role="tab" aria-selected="true"
+                    aria-controls="a-os-linux" data-os="linux">Linux</button>
+            <button class="tab sub" type="button" id="a-os-tab-macos" role="tab" aria-selected="false"
+                    aria-controls="a-os-macos" data-os="macos" tabindex="-1">macOS</button>
+            <button class="tab sub" type="button" id="a-os-tab-python" role="tab" aria-selected="false"
+                    aria-controls="a-os-python" data-os="python" tabindex="-1">Any OS · Python</button>
+          </div>
+
+          <!-- ===== Audio · Linux ===== -->
+          <div class="qs-panel sub" id="a-os-linux" role="tabpanel" aria-labelledby="a-os-tab-linux" tabindex="0">
+            <p class="hint" style="margin-top:0"><b>Runs on:</b> bash or zsh with curl, <code>jq</code> and
+              <code>base64</code> (coreutils, present everywhere). Record or trim your clip with
+              <code>ffmpeg</code> — the example uses <code>ref.wav</code>, 5–15&nbsp;s.</p>
+            <div class="codeblock">
+              <div class="codeblock-head"><span class="lang">bash · submit → poll → download MP3</span>
+                <button class="copy-btn" type="button" data-copy="#src-a-linux" aria-label="Copy the bash speech example">Copy</button></div>
+              <pre><code id="src-a-linux">API=https://gpncoin.ai/api/v1
+
+# 0. one clip, 5-15 s of speech (trim yours to ~7 s)
+#    ffmpeg -i in.m4a -ss 0 -t 7 -ac 1 -ar 22050 ref.wav
+
+# 1. submit: the clip travels inline as base64; 202 + id + poll_url
+jq -n --arg clip "$(base64 -w0 ref.wav)" '{
+  model: "xtts-v2",
+  input: "This is the example on the GPN AI page. Audio generation runs on the network idle GPUs.",
+  voice_ref: $clip,
+  consent: true,
+  language: "en",
+  max_seconds: 20
+}' > body.json
+
+job=$(curl -sS -X POST $API/audio/speech \
+  -H 'Content-Type: application/json' \
+  --data-binary @body.json)
+id=$(echo "$job" | jq -r .id)
+echo "job $id — $(echo "$job" | jq -r .status) — $(echo "$job" | jq -r .gpn.price_gpn) GPN"
+
+# 2. poll every 2 s — ~7 s of audio renders in ~7 s once the engine is warm
+while :; do
+  out=$(curl -sS $API/audio/speech/$id)
+  status=$(echo "$out" | jq -r .status)
+  [ "$status" = pending ] || break
+  sleep 2
+done
+[ "$status" = completed ] || { echo "failed: $(echo "$out" | jq -r .error)"; exit 1; }
+
+# 3. download the MP3 and check it against the signed sha256
+curl -sS "$(echo "$out" | jq -r '.data[0].url')" -o speech.mp3
+sha256sum speech.mp3      # == data[0].sha256
+echo "$out" | jq -r '.data[0].seconds'   # the billed duration
+file speech.mp3           # MPEG ADTS, layer III, 24 kHz, mono</code></pre>
+            </div>
+            <p class="hint mb-0">Only the <b>submit</b> reply carries <code>poll_url</code>; the poll reply does
+              not, so the loop rebuilds it from <code>$id</code>. Sending the clip inline is deliberate — the
+              access point keeps no store, so there is no upload-once-then-reference-id flow. An
+              out-of-window clip is refused up front with <code>503</code> and
+              <code>payment: not_charged</code> (clips under 5&nbsp;s say “accepted window is 5-15s”), so a
+              mistake costs nothing.</p>
+          </div>
+
+          <!-- ===== Audio · macOS ===== -->
+          <div class="qs-panel sub" id="a-os-macos" role="tabpanel" aria-labelledby="a-os-tab-macos" tabindex="0" hidden>
+            <p class="hint" style="margin-top:0"><b>Runs on:</b> the default zsh on any current macOS —
+              curl, Python 3 and <code>base64</code> ship with the OS. <code>ffmpeg</code> is the only optional
+              install (<code>brew install ffmpeg</code>) and only if your clip needs trimming.</p>
+            <div class="codeblock">
+              <div class="codeblock-head"><span class="lang">zsh · submit → poll → download MP3</span>
+                <button class="copy-btn" type="button" data-copy="#src-a-mac" aria-label="Copy the macOS speech example">Copy</button></div>
+              <pre><code id="src-a-mac">API=https://gpncoin.ai/api/v1
+json() { python3 -c "import json,sys; print(json.load(sys.stdin)$1)"; }
+
+# 1. submit — base64 of a 5-15 s clip (macOS base64 has no -w flag)
+python3 - &lt;&lt;'PY'
+import base64, json
+clip = base64.b64encode(open("ref.wav", "rb").read()).decode()
+json.dump({"model": "xtts-v2",
+           "input": "This is the example on the GPN AI page.",
+           "voice_ref": clip, "consent": True,
+           "language": "en", "max_seconds": 20},
+          open("body.json", "w"))
+PY
+
+job=$(curl -sS -X POST $API/audio/speech -H 'Content-Type: application/json' --data-binary @body.json)
+id=$(echo "$job" | json '["id"]')
+echo "job $id — $(echo "$job" | json '["status"]')"
+
+# 2. poll every 2 s
+while [ "$(curl -sS $API/audio/speech/$id | json '["status"]')" = pending ]; do sleep 2; done
+
+# 3. download the MP3
+out=$(curl -sS $API/audio/speech/$id)
+curl -sS "$(echo "$out" | json '["data"][0]["url"]')" -o speech.mp3
+shasum -a 256 speech.mp3      # == data[0].sha256
+say "done"                    # or: afplay speech.mp3</code></pre>
+            </div>
+            <p class="hint mb-0">Nothing to install: the clip is base64'd by Python because macOS
+              <code>base64</code> wraps lines by default and a wrapped string is not valid JSON. The
+              <code>json()</code> helper is the same one the image and fine-tuning tabs use.</p>
+          </div>
+
+          <!-- ===== Audio · Python ===== -->
+          <div class="qs-panel sub" id="a-os-python" role="tabpanel" aria-labelledby="a-os-tab-python" tabindex="0" hidden>
+            <p class="hint" style="margin-top:0"><b>Runs on:</b> any OS with Python 3 and
+              <code>pip install requests</code>. This is the shortest honest version: the whole
+              submit → poll → save flow is a dozen lines.</p>
+            <div class="codeblock">
+              <div class="codeblock-head"><span class="lang">python · requests (submit → poll → save)</span>
+                <button class="copy-btn" type="button" data-copy="#src-a-py" aria-label="Copy the Python speech example">Copy</button></div>
+              <pre><code id="src-a-py">import base64, time, requests
+
+API = "https://gpncoin.ai/api/v1"
+clip = base64.b64encode(open("ref.wav", "rb").read()).decode()   # 5-15 s
+
+# 1. submit — 202 in milliseconds
+r = requests.post(f"{API}/audio/speech", json={
+    "model": "xtts-v2",
+    "input": "This is the example on the GPN AI page.",
+    "voice_ref": clip,
+    "consent": True,          # must be literally true: "I have permission"
+    "language": "en",
+    "max_seconds": 20,
+}, timeout=120)
+r.raise_for_status()
+job = r.json()
+print(job["id"], job["status"], job["gpn"]["price_gpn"], "GPN")
+
+# 2. poll every 2 s
+while job["status"] == "pending":
+    time.sleep(2)
+    job = requests.get(f"{API}/audio/speech/{job['id']}", timeout=30).json()
+
+if job["status"] != "completed":
+    raise SystemExit(f"failed: {job.get('error')}")
+
+# 3. save the MP3
+art = job["data"][0]
+open("speech.mp3", "wb").write(requests.get(art["url"], timeout=60).content)
+print(f"{art['seconds']} s of audio, {art['bytes']} bytes, sha256 {art['sha256'][:12]}…")</code></pre>
+            </div>
+            <p class="hint mb-0"><code>seconds</code> is the billing unit and it is measured, not estimated:
+              the price you saw on submit is a ceiling (<code>max_seconds</code>), and the difference is
+              refunded in the same signed channel update. Check <code>gpn.payment</code> on the poll —
+              <code>channel</code> means it settled on-chain, <code>not_charged</code> means nothing was
+              taken.</p>
+          </div>
         </div>
 
         <!-- ==================== PURPOSE: FINE-TUNING ==================== -->

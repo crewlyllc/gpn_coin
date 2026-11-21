@@ -114,6 +114,14 @@ const FINETUNE_RATE_WINDOW_SECONDS = 3600;
  * larger cap than chat (64 KB) — but still a bounded one. */
 const FINETUNE_MAX_BODY = 256 * 1024;
 
+/** A speech body carries the reference clip inline, base64-encoded. The AP
+ * refuses clips over 8 MB decoded (`voice_ref is N bytes; the limit is 8 MB`),
+ * and base64 inflates by 4/3, so the encoded body can legitimately reach
+ * ~11.2 MB. 64 KB — the chat cap — rejects even a 2 s clip: 5 s of 22 kHz mono
+ * 16-bit WAV is 220 KB raw. That is how audio shipped in 0.3.61 but was never
+ * callable from gpncoin.ai (found 2026-11-20 writing the docs example). */
+const AUDIO_MAX_BODY = 12 * 1024 * 1024;
+
 /** Cheap read endpoints (models/health/providers). */
 const READ_RATE_MAX = 120;
 const READ_RATE_WINDOW_SECONDS = 60;
@@ -1303,6 +1311,7 @@ async function handleApi(request, env, path) {
   let cache = "no-store";
   let binary = false;
   let finetune = false;
+  let audio = false;
 
   if (route === "/health" || route === "/ping") upstream = "/health";
   else if (route === "/mode") upstream = "/mode";
@@ -1338,6 +1347,7 @@ async function handleApi(request, env, path) {
     // uploaded with the request; the AP never stores it (per-job fetch).
     upstream = "/v1/audio/speech";
     allow = "POST";
+    audio = true;
   } else if (/^\/v1\/audio\/speech\/[0-9a-f]{32}$/.test(route)) {
     upstream = route; // poll: pending -> completed | failed
   } else if (/^\/v1\/audio\/[0-9a-f]{32}(\/\d{1,2})?$/.test(route)) {
@@ -1411,7 +1421,11 @@ async function handleApi(request, env, path) {
   /** @type {string | null} */
   let body = null;
   if (isChat) {
-    const bodyCap = finetune ? FINETUNE_MAX_BODY : AP_PROXY_MAX_BODY;
+    const bodyCap = finetune
+      ? FINETUNE_MAX_BODY
+      : audio
+        ? AUDIO_MAX_BODY
+        : AP_PROXY_MAX_BODY;
     const declared = Number(request.headers.get("content-length") || 0);
     if (declared > bodyCap) {
       return apiJson(
@@ -1867,5 +1881,6 @@ export const __test = {
   FINETUNE_RATE_MAX,
   FINETUNE_RATE_WINDOW_SECONDS,
   FINETUNE_MAX_BODY,
+  AUDIO_MAX_BODY,
   STATIC_BOOTNODES,
 };
