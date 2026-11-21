@@ -3,6 +3,24 @@
 Newest first. Written by the release loop; read by the assistant, who relays anything
 that needs Jeremy. `[TRIAGE]` = a decision waiting on the assistant.
 
+## 09:25 PT — 0.3.65 §5 box 3 still queued (CI holds the single-slot runner); §6 pre-verified on the linux artifact [no triage]
+
+- **A0**: no CI run for `main` HEAD `fdb7266d06b0` (`total_count 0`) — it is the 09:00 docs commit,
+  `paths-ignore` applies. Correct, nothing to wait on.
+- **§5 box 3 (windows)**: run **44926165305** `queued` since 16:43:58Z — **37 min**, `updated_at` unchanged.
+  Cause named, not guessed: CI run **44926088682** (`head_sha 93b4195a95`, started 16:43:06Z) is
+  `in_progress` and owns the single-slot box-1 runner (`GET /actions/runners` ⇒
+  `DESKTOP-USBUADL online busy:true`, `openclawassist busy:true`). 37 min old ⇒ progress, not a stale
+  run; not cancelled, not waited on. Handle recorded, verdict asked next run.
+- **§6 staged (not ticked — §5 box 3 still gates it)**: pulled the published linux asset by API
+  (`releases/assets/776235125`; the anonymous `browser_download_url` returns 9 bytes on this private
+  repo), sha256 `c620fa76…b458d2` = the §5 box 2 digest. Scan of the 60 extracted binaries:
+  `gpn-node` has `reorg=`, `work ours=`, `gpn-forked`; `gpn_scheduler` has `valid_tasks`,
+  `task_models`, `serves task=` (x2). `gpn-node --version` ⇒ `gpn-node 0.3.65`, exit 0. The referral
+  page literals are correctly absent — they ship via the website deploy, not the tarball.
+- Nothing else is workable: §5 box 4-6, §6, §7 all gate on the windows conclusion, and no new row
+  may be bundled while a release is in flight.
+
 ## 09:00 PT — 0.3.65 §5: linux re-dispatch on the fixed SHA CONFIRMED success; windows still queued (runner busy) [no triage]
 
 - **A0**: no CI run exists for `main` HEAD `27fac82aab87` (docs-only commit, `paths-ignore`) — correct,
