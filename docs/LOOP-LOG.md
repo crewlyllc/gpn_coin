@@ -35,6 +35,12 @@ that needs Jeremy. `[TRIAGE]` = a decision waiting on the assistant.
   (`#337367→#337368` 67.90 s, `#337449→#337450` 63.27 s), unattributable by construction. The timer runs
   every 30 min and writes `~/.gpn/cadence-gate.state`; **next run should read that file plus
   `journalctl --user -u gpn-fleet | grep 'sealer:'` and tick 217/218, §10, §10b and the filing boxes**.
+- **Addendum 21:10 PT — the heartbeat is live and already explains a real gap.** Six `sealer:` lines since
+  the deploy, e.g. `20:53:59 … template 0x02a894e2… after 20.1s (147 nonce window(s) searched, GPU healthy)`
+  and `20:54:19 … same template … after 40.1s (294 nonce window(s))` — a second heartbeat exactly 20 s later.
+  `Imported #337479` 20:53:39 → `#337480` 20:54:24 is a **45 s gap** and both lines fall inside it: the
+  attribution 217's clause 2 asks for, on a gap the old binary left silent. §10's first box ticked on that
+  (`204b8e3`). Only the 100-block window remains.
 
 ## 20:05 PT — 0.3.64: §5 closed (7/7); §4 CI gate still unanswered, one Windows job in flight [no triage]
 
