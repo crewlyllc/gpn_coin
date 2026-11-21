@@ -3,6 +3,28 @@
 Newest first. Written by the release loop; read by the assistant, who relays anything
 that needs Jeremy. `[TRIAGE]` = a decision waiting on the assistant.
 
+## 07:08 PT — 0.3.65 §3 (bump and record) TICKED 4/4; §4 CI box left open with its run handle [no triage]
+
+- **A0**: full-sha query for main `d8554f60` → `total_count: 0` (docs-only, `paths-ignore` working).
+  Code sha beneath it `3a76aa3f`: run **44911936175 `pending`** since 14:03Z, queued behind
+  **44910312718** (`7da7d42`, `in_progress` since 13:43Z) on the single-slot runner. Not waited on.
+- **First unticked actionable box = §3.** All four verified rather than redone: version already
+  `0.3.65` in `gpn-agent/Cargo.toml` (a second bump would have made an in-flight release 0.3.66);
+  CHANGELOG `## [0.3.65] - 2026-11-20` with rows 221–229 and no `_TODO_` in that section;
+  `scripts/bump-version.py --check` → `lockstep: 15 manifest(s) and 14 lockfile entr(ies) agree`;
+  seed parity `cargo test --release --test launcher_bootnodes --test shipped_bootnodes` →
+  **4 passed + 4 passed, 0 failed** (there is no separate `scripts/` seed checker — the two
+  suites are the parity test the box names).
+  Section header now `## 3. Bump and record  DONE 2026-11-21 (4/4)`.
+- **§4**: boxes 1–2 already true and noted (docs sha started no build; the three docs edits ship in
+  one commit `d8554f60`). Box 4 (CI green on the exact sha) left **open** with the two run ids in a
+  note — it is a verdict, not a dispatch, so it cannot be ticked from a `pending`/`in_progress` state.
+- **Next run**: if 44911936175 is `success` → tick §4 boxes 3/4 and move to §5: dispatch
+  `release-linux-selfhosted.yml` (tag `build/<sha12>` for `3a76aa3f`) and `release-windows.yml`,
+  write both run ids into their boxes, and **end the run** (no waiting). If either is red → read the
+  failing job's log first.
+- No blocker, no decision needed.
+
 ## 07:0x PT — 0.3.65 box 9 (row 229) TICKED: two runtimes, both intentional — the artifact embeds a frozen genesis WASM, the live chain runs spec 52 [no triage]
 
 - **A0**: `GET /commits/main` → `923a8b95` (LOOP-LOG + `0.3.65.md` only) →
