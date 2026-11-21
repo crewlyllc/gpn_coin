@@ -1,7 +1,7 @@
 {
   "version": "0.3.65",
   "start": "2026-11-20T21:38:16-08:00",
-  "total_s": 52946,
+  "total_s": 55309,
   "rows": [
     {
       "box": "221",
@@ -402,6 +402,46 @@
       "since_start_s": 52946,
       "step_s": 0,
       "sha": "23e2024b0f190889f0fab6e56175b5b2ae80ffce"
+    },
+    {
+      "box": "The change observed on a real machine, with timestamps and the a",
+      "section": "10. Prove the behaviour",
+      "ticked_at": "2026-11-21T13:00:05-08:00",
+      "since_start_s": 55309,
+      "step_s": 2363,
+      "sha": "6bafe73bff39b60ca57c3d64b1c14f7cf9b21467"
+    },
+    {
+      "box": "Peers hold >5 minutes; no new `Reason:` bans; no unexpected `gpn",
+      "section": "10. Prove the behaviour",
+      "ticked_at": "2026-11-21T13:00:05-08:00",
+      "since_start_s": 55309,
+      "step_s": 0,
+      "sha": "6bafe73bff39b60ca57c3d64b1c14f7cf9b21467"
+    },
+    {
+      "box": "Mark the task row `DONE (date)` with version, commit sha and the",
+      "section": "10. Prove the behaviour",
+      "ticked_at": "2026-11-21T13:00:05-08:00",
+      "since_start_s": 55309,
+      "step_s": 0,
+      "sha": "6bafe73bff39b60ca57c3d64b1c14f7cf9b21467"
+    },
+    {
+      "box": "`scripts/release-timing.py <version> --json docs/releases/timing",
+      "section": "10b. Record how long the steps took",
+      "ticked_at": "2026-11-21T13:00:05-08:00",
+      "since_start_s": 55309,
+      "step_s": 0,
+      "sha": "6bafe73bff39b60ca57c3d64b1c14f7cf9b21467"
+    },
+    {
+      "box": "Name the slowest step and say what would shorten it. A step that",
+      "section": "10b. Record how long the steps took",
+      "ticked_at": "2026-11-21T13:00:05-08:00",
+      "since_start_s": 55309,
+      "step_s": 0,
+      "sha": "6bafe73bff39b60ca57c3d64b1c14f7cf9b21467"
     }
   ]
 }
