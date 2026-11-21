@@ -177,6 +177,11 @@ pub struct Report {
     pub os: String,
     #[serde(default)]
     pub pid: u32,
+    /// #230: the child's own account of a failed start — exit code, exit kind,
+    /// first output line, last log line. `None` for every other exit path, and
+    /// omitted from the NDJSON line when absent so old readers are unaffected.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub child: Option<serde_json::Value>,
 }
 
 /// Where the exit log lives.
@@ -212,6 +217,7 @@ pub fn new_report(kind: ExitKind, detail: impl AsRef<str>, remediation: impl AsR
         version: env!("CARGO_PKG_VERSION").to_string(),
         os: std::env::consts::OS.to_string(),
         pid: std::process::id(),
+        child: None,
     }
 }
 
@@ -573,6 +579,7 @@ mod tests {
             version: "0.0.0".into(),
             os: "test".into(),
             pid: 1,
+            child: None,
         }
     }
 

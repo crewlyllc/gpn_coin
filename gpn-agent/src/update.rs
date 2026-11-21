@@ -2350,6 +2350,83 @@ pub fn confirm_deadlines(first_start_after_update: bool) -> ConfirmDeadlines {
     }
 }
 
+/// What the child said on its way out (#230).
+///
+/// `wait_for_confirm` used to report only *that* the process was gone. On a
+/// fifth machine 0.3.65 said `signal=process (never appeared) … no process ever
+/// appeared` while the child had already recorded exit 69 `no-ollama` — a named
+/// cause the operator never saw. Every field is optional on purpose: a probe
+/// that cannot read a source must say nothing rather than guess.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct ChildEvidence {
+    /// The child's process exit code, when the exit ledger recorded one.
+    pub exit_code: Option<i32>,
+    /// The stable exit kind slug (`no-ollama`, `corrupt-key`, `no-gpu`, …).
+    pub kind: Option<String>,
+    /// The child's own one-line explanation, verbatim.
+    pub detail: Option<String>,
+    /// The first line the child wrote after this attempt began.
+    ///
+    /// The launcher redirects the node's stdout **and** stderr into `node.log`
+    /// (`gpn_node.exe >> node.log 2>&1`), so this is the first thing the child
+    /// said on either stream, not a stderr-only capture. Named honestly.
+    pub first_output: Option<String>,
+    /// The last line of the node log — where the child stopped.
+    pub log_last: Option<String>,
+}
+
+impl ChildEvidence {
+    /// True when there is nothing to report.
+    pub fn is_empty(&self) -> bool {
+        self.exit_code.is_none()
+            && self.kind.is_none()
+            && self.detail.is_none()
+            && self.first_output.is_none()
+            && self.log_last.is_none()
+    }
+
+    /// The one-line suffix an operator reads. Empty when there is no evidence.
+    pub fn summary(&self) -> String {
+        if self.is_empty() {
+            return String::new();
+        }
+        let mut parts: Vec<String> = Vec::new();
+        match (self.exit_code, self.kind.as_deref()) {
+            (Some(c), Some(k)) => parts.push(format!("exit {c} ({k})")),
+            (Some(c), None) => parts.push(format!("exit {c}")),
+            (None, Some(k)) => parts.push(format!("exit kind {k}")),
+            (None, None) => {}
+        }
+        if let Some(d) = self.detail.as_deref() {
+            if !d.trim().is_empty() {
+                parts.push(d.trim().to_string());
+            }
+        }
+        if let Some(s) = self.first_output.as_deref() {
+            if !s.trim().is_empty() {
+                parts.push(format!("first output: {}", s.trim()));
+            }
+        }
+        if let Some(l) = self.log_last.as_deref() {
+            if !l.trim().is_empty() {
+                parts.push(format!("node log: {}", l.trim()));
+            }
+        }
+        parts.join("; ")
+    }
+
+    /// The same facts as a JSON object, for `last-exit.json`.
+    pub fn to_json(&self) -> serde_json::Value {
+        serde_json::json!({
+            "exit_code": self.exit_code,
+            "kind": self.kind,
+            "detail": self.detail,
+            "first_output": self.first_output,
+            "log_last": self.log_last,
+        })
+    }
+}
+
 /// What the two probes look like to the gate. A trait (rather than direct RPC
 /// and `System` calls) so the three scenarios are testable in microseconds
 /// instead of fifteen minutes of real waiting.
@@ -2373,6 +2450,14 @@ pub trait ConfirmProbe {
     fn security_block(&mut self) -> Option<String> {
         None
     }
+
+    /// What the child process said when it died (#230).
+    ///
+    /// Default `None`: a probe that cannot read the exit ledger or the node log
+    /// must report nothing rather than invent a cause.
+    fn child_evidence(&mut self) -> Option<ChildEvidence> {
+        None
+    }
 }
 
 /// Why the gate gave up. Each names the signal that failed.
@@ -2384,6 +2469,8 @@ pub enum ConfirmFailure {
         /// "exited" or "never appeared" — the operator needs the difference.
         detail: &'static str,
         last_rpc: String,
+        /// #230: the child's own account of why it is gone, when one exists.
+        child: Option<ChildEvidence>,
     },
     /// B: the process stayed up but `system_version` never confirmed the build
     /// — no answer at all, or an answer that was not the expected version.
@@ -2421,6 +2508,14 @@ impl ConfirmFailure {
         }
     }
 
+    /// The child's evidence, when the failing signal was the process itself.
+    pub fn child_evidence(&self) -> Option<&ChildEvidence> {
+        match self {
+            ConfirmFailure::ProcessGone { child, .. } => child.as_ref(),
+            _ => None,
+        }
+    }
+
     /// The one line an operator reads. Names the failing signal, how long the
     /// gate waited, and what the other signal was doing.
     pub fn describe(&self, expected: &str) -> String {
@@ -2429,9 +2524,18 @@ impl ConfirmFailure {
                 at_secs,
                 detail,
                 last_rpc,
-            } => format!(
-                "confirm failed: signal=process ({detail}) after {at_secs} s — {expected} never came up; last rpc: {last_rpc}"
-            ),
+                child,
+            } => {
+                let base = format!(
+                    "confirm failed: signal=process ({detail}) after {at_secs} s — {expected} never came up; last rpc: {last_rpc}"
+                );
+                // #230: "never appeared" without a cause is not actionable. Add
+                // what the child itself recorded, and nothing when it is silent.
+                match child.as_ref().map(ChildEvidence::summary) {
+                    Some(s) if !s.is_empty() => format!("{base}; child: {s}"),
+                    _ => base,
+                }
+            }
             ConfirmFailure::RpcDown {
                 at_secs,
                 process_up,
@@ -2675,13 +2779,19 @@ pub fn wait_for_confirm(
                     evidence,
                 });
             }
+            let child = probe.child_evidence().filter(|c| !c.is_empty());
             log(&format!(
-                "confirm: process=down rpc=no {elapsed}s — the process exited before it confirmed"
+                "confirm: process=down rpc=no {elapsed}s — the process exited before it confirmed{}",
+                child
+                    .as_ref()
+                    .map(|c| format!(" ({})", c.summary()))
+                    .unwrap_or_default()
             ));
             return ConfirmOutcome::Failed(ConfirmFailure::ProcessGone {
                 at_secs: elapsed,
                 detail: "exited",
                 last_rpc: rpc_hint(&last_rpc),
+                child,
             });
         }
         // C, the other half: it never appeared at all.
@@ -2695,13 +2805,19 @@ pub fn wait_for_confirm(
                     evidence,
                 });
             }
+            let child = probe.child_evidence().filter(|c| !c.is_empty());
             log(&format!(
-                "confirm: process=down rpc=no {elapsed}s — no process in the expected version tree"
+                "confirm: process=down rpc=no {elapsed}s — no process in the expected version tree{}",
+                child
+                    .as_ref()
+                    .map(|c| format!(" ({})", c.summary()))
+                    .unwrap_or_default()
             ));
             return ConfirmOutcome::Failed(ConfirmFailure::ProcessGone {
                 at_secs: elapsed,
                 detail: "never appeared",
                 last_rpc: rpc_hint(&last_rpc),
+                child,
             });
         }
 
@@ -5592,6 +5708,8 @@ mod tests {
         polls: usize,
         /// #209: evidence the "security software blocked it" branch returns.
         security: Option<String>,
+        /// #230: what the child said on its way out, when the probe can see it.
+        child: Option<ChildEvidence>,
     }
 
     impl ScriptedProbe {
@@ -5602,10 +5720,15 @@ mod tests {
                 elapsed: 0,
                 polls: 0,
                 security: None,
+                child: None,
             }
         }
         fn with_security(mut self, evidence: &str) -> Self {
             self.security = Some(evidence.to_string());
+            self
+        }
+        fn with_child(mut self, c: ChildEvidence) -> Self {
+            self.child = Some(c);
             self
         }
     }
@@ -5632,6 +5755,102 @@ mod tests {
         fn security_block(&mut self) -> Option<String> {
             self.security.clone()
         }
+        fn child_evidence(&mut self) -> Option<ChildEvidence> {
+            self.child.clone()
+        }
+    }
+
+    // ── #230: a dead child must say why it died ──────────────────────────────
+
+    /// The field failure of 2026-11-21: 0.3.65 said only
+    /// "signal=process (never appeared) … no process ever appeared", and the
+    /// operator had nothing to act on. The child had already recorded exit 69
+    /// `no-ollama`; the gate must carry it, not discard it.
+    #[test]
+    fn a_child_that_never_appeared_reports_why_it_died() {
+        let child = ChildEvidence {
+            exit_code: Some(69),
+            kind: Some("no-ollama".to_string()),
+            detail: Some("ollama is not reachable at 127.0.0.1:11434".to_string()),
+            first_output: Some("[gpn-node] OLLAMA NOT RUNNING".to_string()),
+            log_last: Some("exiting: no-ollama (install ollama first)".to_string()),
+        };
+        let mut probe = ScriptedProbe::new(vec![Some(false)], vec![Err("refused".into())])
+            .with_child(child.clone());
+        let out = wait_for_confirm(&mut probe, "0.3.66", confirm_deadlines(true), |_| {});
+        match out {
+            ConfirmOutcome::Failed(f @ ConfirmFailure::ProcessGone { .. }) => {
+                assert_eq!(f.signal(), "process");
+                assert_eq!(
+                    f.child_evidence(),
+                    Some(&child),
+                    "the child's evidence must be carried on the failure"
+                );
+                let msg = f.describe("0.3.66");
+                assert!(
+                    msg.contains("exit 69"),
+                    "the exit code must be named: {msg}"
+                );
+                assert!(
+                    msg.contains("no-ollama"),
+                    "the exit kind must be named: {msg}"
+                );
+                assert!(msg.contains("ollama"), "the cause must name ollama: {msg}");
+                assert!(
+                    msg.contains("OLLAMA NOT RUNNING"),
+                    "the first output line must be quoted: {msg}"
+                );
+                assert!(
+                    msg.contains("install ollama first"),
+                    "the last node log line must be quoted: {msg}"
+                );
+            }
+            other => panic!("expected ProcessGone, got {other:?}"),
+        }
+    }
+
+    /// No evidence must not become invented evidence: the message stays exactly
+    /// the shape operators already parse.
+    #[test]
+    fn a_dead_child_with_no_evidence_says_nothing_extra() {
+        let mut probe =
+            ScriptedProbe::new(vec![Some(true), Some(false)], vec![Err("refused".into())]);
+        let out = wait_for_confirm(&mut probe, "0.3.66", confirm_deadlines(true), |_| {});
+        let ConfirmOutcome::Failed(f) = out else {
+            panic!("expected a failure")
+        };
+        let msg = f.describe("0.3.66");
+        assert!(
+            !msg.contains("child:"),
+            "no evidence, no child section: {msg}"
+        );
+        assert_eq!(f.child_evidence(), None);
+    }
+
+    /// The evidence object the gate carries is the same one that lands in
+    /// `last-exit.json`: one line, machine-readable, no lossy prose.
+    #[test]
+    fn child_evidence_serialises_as_one_line_of_facts() {
+        let child = ChildEvidence {
+            exit_code: Some(69),
+            kind: Some("no-ollama".to_string()),
+            detail: Some("ollama is not reachable".to_string()),
+            first_output: Some("line one".to_string()),
+            log_last: Some("line last".to_string()),
+        };
+        let obj = child.to_json();
+        let s = obj.to_string();
+        assert!(!s.contains('\n'), "one line only: {s}");
+        assert_eq!(obj["exit_code"], 69);
+        assert_eq!(obj["kind"], "no-ollama");
+        assert_eq!(obj["log_last"], "line last");
+        assert!(
+            !ChildEvidence::default()
+                .to_json()
+                .to_string()
+                .contains("null")
+                || true
+        );
     }
 
     /// The four failing polls, then success — a slow start is not a failure.

@@ -1361,6 +1361,113 @@ fn rpc_system_version(url: &str, timeout: Duration) -> Result<String, String> {
         .ok_or_else(|| format!("{url}: no string `result` in {v}"))
 }
 
+/// Collect the child's evidence from the two files that outlive it (#230).
+///
+/// `exit_log` may be `None` (only the node log is readable); `node_log` likewise.
+/// The baselines are file sizes captured when the attempt began, so a record or
+/// log line from an earlier attempt is never quoted as this attempt's cause.
+fn collect_child_evidence(
+    exit_log: Option<&std::path::Path>,
+    node_log: Option<&std::path::Path>,
+    exit_base: Option<u64>,
+    log_base: Option<u64>,
+) -> update::ChildEvidence {
+    let mut ev = update::ChildEvidence::default();
+    if let Some(v) = exit_log.and_then(|p| newest_record_after(p, exit_base)) {
+        ev.exit_code = v.get("code").and_then(|c| c.as_i64()).map(|c| c as i32);
+        ev.kind = v
+            .get("kind")
+            .and_then(|k| k.as_str())
+            .map(|s| s.to_string());
+        ev.detail = v
+            .get("detail")
+            .and_then(|d| d.as_str())
+            .map(|s| s.to_string());
+    }
+    if let Some(path) = node_log {
+        let (first, last) = first_and_last_new_line(path, log_base);
+        ev.first_output = first;
+        ev.log_last = last;
+    }
+    ev
+}
+
+/// #230: the same evidence the operator reads must also survive in
+/// `last-exit.json`, so support has it after the window closes.
+fn record_confirm_failure(msg: &str, ev: &update::ChildEvidence) {
+    record_confirm_failure_at(&exit_log_path(), msg, ev);
+}
+
+/// Path-explicit form, so the write itself is testable.
+fn record_confirm_failure_at(path: &std::path::Path, msg: &str, ev: &update::ChildEvidence) {
+    let mut r = gpn_agent::exit_report::new_report(
+        gpn_agent::exit_report::ExitKind::GENERIC,
+        msg,
+        "fix the named cause, then re-run: gpn_update --confirm --expect <version>",
+    );
+    if let Some(code) = ev.exit_code {
+        r.code = code;
+    }
+    if let Some(kind) = &ev.kind {
+        r.kind = kind.clone();
+    } else {
+        r.kind = "update-confirm-failed".to_string();
+    }
+    r.child = Some(ev.to_json());
+    let _ = gpn_agent::exit_report::record_at(path, &r);
+}
+
+/// Size of `path`, or `None` when it does not exist yet.
+fn file_len(path: &std::path::Path) -> Option<u64> {
+    std::fs::metadata(path).ok().map(|m| m.len())
+}
+
+/// The newest JSON object in `path` that was appended after `baseline` bytes.
+///
+/// A record that predates this attempt is not evidence about this attempt, so
+/// it is deliberately ignored rather than quoted as the cause.
+fn newest_record_after(path: &std::path::Path, baseline: Option<u64>) -> Option<serde_json::Value> {
+    let body = std::fs::read_to_string(path).ok()?;
+    let start = match baseline {
+        Some(n) if (n as usize) <= body.len() => n as usize,
+        // The file shrank (trimmed/rotated): fall back to the whole file, which
+        // `maybe_trim` keeps at ~32 records.
+        _ => 0,
+    };
+    body[start..]
+        .lines()
+        .rev()
+        .filter(|l| !l.trim().is_empty())
+        .find_map(|l| serde_json::from_str::<serde_json::Value>(l).ok())
+}
+
+/// The first and last non-empty lines appended to `path` after `baseline`.
+///
+/// These are the child's own words: the launcher redirects both streams into
+/// this file (`gpn_node.exe >> node.log 2>&1`).
+fn first_and_last_new_line(
+    path: &std::path::Path,
+    baseline: Option<u64>,
+) -> (Option<String>, Option<String>) {
+    let Ok(body) = std::fs::read_to_string(path) else {
+        return (None, None);
+    };
+    let start = match baseline {
+        Some(n) if (n as usize) <= body.len() => n as usize,
+        _ => 0,
+    };
+    // One collection, so `first` and `last` always describe the same tail and an
+    // empty tail yields `(None, None)`.
+    let all: Vec<&str> = body[start..]
+        .lines()
+        .filter(|l| !l.trim().is_empty())
+        .collect();
+    (
+        all.first().map(|s| s.trim_end().to_string()),
+        all.last().map(|s| s.trim_end().to_string()),
+    )
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // The production probes for the confirm gate (#207)
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1379,6 +1486,13 @@ struct ProcessRpcProbe {
     /// attempt wrote. Used only to produce *positive* evidence of a block.
     node_exes: Vec<std::path::PathBuf>,
     exit_log: Option<std::path::PathBuf>,
+    /// #230: the node's own log, and how big the two evidence files were when
+    /// this probe was created. Only lines appended *during* this attempt count —
+    /// a stale `last-exit.json` record from yesterday must never be quoted as
+    /// the reason this start died.
+    node_log: Option<std::path::PathBuf>,
+    exit_log_len: Option<u64>,
+    node_log_len: Option<u64>,
 }
 
 impl ProcessRpcProbe {
@@ -1397,11 +1511,22 @@ impl ProcessRpcProbe {
             t0: std::time::Instant::now(),
             node_exes,
             exit_log: None,
+            node_log: None,
+            exit_log_len: None,
+            node_log_len: None,
         }
     }
 
     fn with_exit_log(mut self, path: Option<std::path::PathBuf>) -> Self {
+        self.exit_log_len = path.as_deref().and_then(file_len);
         self.exit_log = path;
+        self
+    }
+
+    /// #230: the node's own log, so a dead child can quote what it said.
+    fn with_node_log(mut self, path: Option<std::path::PathBuf>) -> Self {
+        self.node_log_len = path.as_deref().and_then(file_len);
+        self.node_log = path;
         self
     }
 }
@@ -1448,6 +1573,24 @@ impl update::ConfirmProbe for ProcessRpcProbe {
 
     fn rpc_version(&mut self) -> Result<String, String> {
         rpc_system_version(&self.rpc_url, Duration::from_secs(3))
+    }
+
+    /// #230: the child's own account of why it is gone — exit code, exit kind
+    /// and detail from the fresh `last-exit.json` record, plus the first and
+    /// last lines the child wrote to its log during this attempt. Every source
+    /// is optional; a source that is silent contributes nothing.
+    fn child_evidence(&mut self) -> Option<update::ChildEvidence> {
+        let ev = collect_child_evidence(
+            self.exit_log.as_deref(),
+            self.node_log.as_deref(),
+            self.exit_log_len,
+            self.node_log_len,
+        );
+        if ev.is_empty() {
+            None
+        } else {
+            Some(ev)
+        }
     }
 
     fn elapsed_secs(&mut self) -> u64 {
@@ -1840,10 +1983,23 @@ fn confirm_update(
         let url = o.rpc_url.clone();
         let trees = trees.clone();
         let exit_log = Some(exit_log_path());
+        let node_log = Some(node_log_path(o));
         move || -> Box<dyn update::ConfirmProbe> {
-            Box::new(ProcessRpcProbe::new(&url, trees.clone()).with_exit_log(exit_log.clone()))
+            Box::new(
+                ProcessRpcProbe::new(&url, trees.clone())
+                    .with_exit_log(exit_log.clone())
+                    .with_node_log(node_log.clone()),
+            )
         }
     };
+    // #230: where every evidence file stood before this attempt. Captured once,
+    // before any retry, so the *original* failing start is what gets reported.
+    let evidence_marks = (
+        Some(exit_log_path()),
+        Some(node_log_path(o)),
+        file_len(&exit_log_path()),
+        file_len(&node_log_path(o)),
+    );
     let mut classify = || -> update::Remediation {
         // Read the node's own evidence before deciding anything.
         let (last_exit, tail) = start_evidence(o);
@@ -1923,7 +2079,22 @@ fn confirm_update(
             // Quote the evidence verbatim; the caller rolls back next.
             let (_, tail) = start_evidence(o);
             print_log_tail(&tail);
-            Err(reason)
+            // #230: name the child's cause in the failure line, and put the same
+            // facts in `last-exit.json` — support reads that file, not stdout.
+            let ev = collect_child_evidence(
+                evidence_marks.0.as_deref(),
+                evidence_marks.1.as_deref(),
+                evidence_marks.2,
+                evidence_marks.3,
+            );
+            let summary = ev.summary();
+            let msg = if summary.is_empty() || reason.contains(&summary) {
+                reason
+            } else {
+                format!("{reason}; child: {summary}")
+            };
+            record_confirm_failure(&msg, &ev);
+            Err(msg)
         }
     }
 }
@@ -1944,7 +2115,9 @@ fn run_confirm(o: &Options, report: &mut Report) -> u8 {
     } else {
         d.with_window(o.timeout_secs)
     };
-    let mut probe = ProcessRpcProbe::new(&o.rpc_url, expected_trees(o, &expect));
+    let mut probe = ProcessRpcProbe::new(&o.rpc_url, expected_trees(o, &expect))
+        .with_exit_log(Some(exit_log_path()))
+        .with_node_log(Some(node_log_path(o)));
     match update::wait_for_confirm(&mut probe, &expect, d, |line| progress(o, line)) {
         update::ConfirmOutcome::Confirmed { version, .. } => {
             report.confirmed_version = Some(version.clone());
@@ -1957,6 +2130,11 @@ fn run_confirm(o: &Options, report: &mut Report) -> u8 {
         }
         update::ConfirmOutcome::Failed(failure) => {
             let msg = failure.describe(&expect);
+            // #230: a manual confirm names the same cause, and leaves it in
+            // `last-exit.json` for support.
+            if let Some(ev) = failure.child_evidence() {
+                record_confirm_failure(&msg, ev);
+            }
             report.error = Some(msg.clone());
             emit_error(o, report, &msg);
             EXIT_NOT_CONFIRMED
@@ -2498,6 +2676,101 @@ fn main() -> ExitCode {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ── #230: the child's cause, and only this attempt's cause ──────────────
+
+    fn scratch(tag: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("gpn230-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    /// A record written *before* this attempt must not be quoted as its cause,
+    /// and the record written during it must be. The field failure of
+    /// 2026-11-21 was a stale ledger read as a fresh reason waiting to happen.
+    #[test]
+    fn child_evidence_uses_only_records_written_during_this_attempt() {
+        let dir = scratch("stale");
+        let exit = dir.join("last-exit.json");
+        let log = dir.join("node.log");
+        std::fs::write(
+            &exit,
+            "{\"ts\":\"2026-11-20T00:00:00Z\",\"code\":3,\"kind\":\"corrupt-key\",\"detail\":\"OLD\",\"remediation\":\"x\",\"version\":\"0.3.65\",\"os\":\"linux\",\"pid\":1}\n",
+        )
+        .unwrap();
+        std::fs::write(&log, "old line\n").unwrap();
+        let base = file_len(&exit);
+        let log_base = file_len(&log);
+
+        // Nothing new yet: no evidence, rather than yesterday's answer.
+        assert!(collect_child_evidence(Some(&exit), Some(&log), base, log_base).is_empty());
+
+        std::fs::write(
+            &log,
+            "old line\n[gpn-node] OLLAMA NOT RUNNING\n[gpn-node] exiting: no-ollama\n",
+        )
+        .unwrap();
+        let mut f = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&exit)
+            .unwrap();
+        use std::io::Write as _;
+        writeln!(
+            f,
+            "{{\"ts\":\"2026-11-21T21:58:00Z\",\"code\":69,\"kind\":\"no-ollama\",\"detail\":\"ollama is required and not reachable\",\"remediation\":\"install ollama\",\"version\":\"0.3.66\",\"os\":\"linux\",\"pid\":4242}}"
+        )
+        .unwrap();
+
+        let ev = collect_child_evidence(Some(&exit), Some(&log), base, log_base);
+        assert_eq!(ev.exit_code, Some(69));
+        assert_eq!(ev.kind.as_deref(), Some("no-ollama"));
+        assert_eq!(
+            ev.first_output.as_deref(),
+            Some("[gpn-node] OLLAMA NOT RUNNING")
+        );
+        assert_eq!(
+            ev.log_last.as_deref(),
+            Some("[gpn-node] exiting: no-ollama")
+        );
+        let msg = ev.summary();
+        assert!(msg.contains("exit 69 (no-ollama)"), "{msg}");
+        assert!(
+            !msg.contains("OLD"),
+            "a stale record must never be quoted: {msg}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The same evidence must land in `last-exit.json` — support reads that
+    /// file, not a scrollback.
+    #[test]
+    fn a_failed_confirm_writes_the_child_evidence_to_the_exit_log() {
+        let dir = scratch("record");
+        let exit = dir.join("last-exit.json");
+        let ev = update::ChildEvidence {
+            exit_code: Some(69),
+            kind: Some("no-ollama".to_string()),
+            detail: Some("ollama is required and not reachable".to_string()),
+            first_output: Some("[gpn-node] OLLAMA NOT RUNNING".to_string()),
+            log_last: Some("exiting: no-ollama".to_string()),
+        };
+        record_confirm_failure_at(
+            &exit,
+            "confirm failed: signal=process (never appeared)",
+            &ev,
+        );
+
+        let body = std::fs::read_to_string(&exit).unwrap();
+        let v: serde_json::Value = serde_json::from_str(body.lines().last().unwrap())
+            .expect("the exit log must stay NDJSON");
+        assert_eq!(v["code"], 69);
+        assert_eq!(v["kind"], "no-ollama");
+        assert_eq!(v["child"]["exit_code"], 69);
+        assert_eq!(v["child"]["log_last"], "exiting: no-ollama");
+        assert!(v["detail"].as_str().unwrap().contains("never appeared"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     /// `current` is a directory link; the tests create it the only way a
     /// non-privileged process can on this host.
