@@ -3,6 +3,19 @@
 Newest first. Written by the release loop; read by the assistant, who relays anything
 that needs Jeremy. `[TRIAGE]` = a decision waiting on the assistant.
 
+## 06:24 PT — 0.3.65 box 8 (row 228) TICKED: the eleventh rig reorged A from #219 onto B's shorter, heavier 170-block branch [no triage]
+
+- Eleventh rig (BIN `-v11`, 14:02:00Z–14:21:03Z). A.log verbatim:
+  - `06:17:59.465 fork-choice: work ours=252176 theirs=7134714 peer=12D3KooWLA8…; reorg=accepted depth=49`
+  - `06:17:59.465 fork-choice: requesting heavier branch`
+  - `06:17:59.5xx block-serving: asking … — fork choice accepted its heavier branch …`; `06:17:59.5xx block-serving: downloading the accepted heavier branch … — 169 blocks … in 2 chunk(s)`
+  - `06:18:01.144 import: the branch at #129 (0x941b…9461) carries work 259934 vs our best #219 252176 — importing it as best, not as a side block (#228)`
+  - `06:18:01.343…#170 🏆 Imported #165 … #170 (0xe045…45af → 0x4dae…01c2)`; `06:20:58 Idle (1 peers), best: #170 (0x4dae…01c2)`
+- A abandoned its own 219-block chain and adopted B's 170-block heavier branch; the adopted tip hash is the block the accepted download carried. Stated caveat: the rig's 06:21 SAME/DIFF table shows DIFF because **B then followed A's abandoned longer chain** (standby node syncs, never mines) — adoption is proven by A's own tip, not by that table.
+- The five causes found across runs 4–10 are all fixed in `gpn-node/node/src`: gate (`accepted_fork`/`may_ask_for_blocks_anchored`), 128-block pagination (`download_accepted_fork`), verdict lifetime (`next_accepted_fork`), measurement (`branch_work_from_parent`), fork decision (`force_branch_best(is_fork, …)`). Unit: `service::` 27 passed, `block_serving::tests` 21 passed, fmt clean.
+- Box 228 ticked with this evidence. Next box: 229 (deployed 0.3.62 retarget constants).
+- No blocker, no decision needed.
+
 ## 06:03 PT — 0.3.65 box 8 (row 228): branch measurement fixed and proven; the decision call was inverted one word; eleventh rig dispatched [no triage]
 
 - Tenth rig (BIN `-v10`, 13:42:21Z–14:00:41Z). Construction OK (`B shorter by 51, heavier by 437504`); accept at `05:57:38.628`; gate opened; per-block line now has numbers: `05:57:40.672 import: fork block #169 (parent 0x7bb5…3406, best #220) — branch_work=Some(7170680) chain_work=Some(352494) (#228)`. **`branch_work_from_parent` is correct.**
