@@ -161,11 +161,14 @@ clears it.
 to `last-exit.json` (`"kind":"onboard"`):
 
 - **`entry-free-account-used`** — this account already used its one free
-  entry. Fund the wallet and use the paid path:
-  `gpn_register` (no `--entry`).
+  entry. Registering still costs nothing: re-register through the unsigned
+  re-registration path (`register_provider_entry_unsigned`, what
+  `gpn_register --entry` submits first), or register directly with
+  `gpn_register` (no `--entry`) — `register_provider` is fee-free from spec 53.
+  Neither asks for a deposit or a fee.
 - **`entry-free-gpu-used`** — this **GPU's fingerprint** already consumed a
-  free entry (a different account, or an earlier install). Use a different
-  physical GPU, or fund the wallet and use the paid path.
+  free entry (a different account, or an earlier install). Use the unsigned
+  re-registration path, or a different physical GPU. Nothing to pay either way.
 - **`entry-gpu-already-owned`** — the fingerprint is bound to another
   account. Use that account or a different GPU.
 - **`entry-free-per-block-cap`** — the chain allows only 2 free entries per

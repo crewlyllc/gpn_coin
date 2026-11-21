@@ -144,8 +144,9 @@ pub enum EntryPlan {
     FreeEntrySpent,
     /// The per-block cap is exhausted right now; retry after the next block.
     FreeBudgetThisBlock,
-    /// `--entry` was not requested: keep the legacy fee-paying behaviour.
-    PaidPath,
+    /// `--entry` was not requested: register directly via `register_provider`
+    /// (no proof of work, and `Pays::No` since spec 53 — it costs nothing).
+    Direct,
     /// Mine a proof and submit `register_provider_entry`.
     Proceed,
 }
@@ -153,15 +154,15 @@ pub enum EntryPlan {
 /// Decide the next step. Pure — no I/O — so every branch is unit-tested.
 ///
 /// `want_entry` is false when the operator did not ask for the free path; then
-/// the answer is always [`EntryPlan::PaidPath`] except for the read-only
-/// "already registered" short-circuit, and the legacy paid call is used exactly
-/// as before.
+/// the answer is always [`EntryPlan::Direct`] except for the read-only
+/// "already registered" short-circuit, and the plain `register_provider` call
+/// is used — which costs nothing at spec 53 and up.
 pub fn plan_entry(want_entry: bool, status: &EntryStatus) -> EntryPlan {
     if status.registered {
         return EntryPlan::AlreadyRegistered;
     }
     if !want_entry {
-        return EntryPlan::PaidPath;
+        return EntryPlan::Direct;
     }
     if status.attested {
         return EntryPlan::AlreadyAttested;
@@ -225,8 +226,8 @@ pub enum EntryOutcome {
     /// The combined call was missing from metadata; attest + legacy register
     /// both succeeded.
     RegisteredViaFallback,
-    /// The operator asked for the paid path and it succeeded.
-    RegisteredPaid,
+    /// The operator asked for the direct path and it succeeded (no fee).
+    RegisteredDirect,
     /// Declined or failed, with a stable reason code.
     Failed(FailureReason, String),
 }
@@ -238,7 +239,7 @@ impl EntryOutcome {
             Self::AlreadyRegistered
                 | Self::Registered
                 | Self::RegisteredViaFallback
-                | Self::RegisteredPaid
+                | Self::RegisteredDirect
                 | Self::AlreadyAttested
         )
     }
@@ -248,14 +249,16 @@ impl EntryOutcome {
         match self {
             Self::AlreadyRegistered => "already registered".into(),
             Self::AlreadyAttested => {
-                "already attested — this account cannot use another free entry; use the paid path"
+                "already attested — this account cannot use another free entry; it registers \
+                 through the unsigned re-registration path (register_provider_entry_unsigned) \
+                 or the fee-free register_provider call, and neither costs anything"
                     .into()
             }
             Self::Registered => "registered via proof-of-work entry (no coins spent)".into(),
             Self::RegisteredViaFallback => {
                 "attested and registered via the fallback path (no coins spent)".into()
             }
-            Self::RegisteredPaid => "registered via the paid path".into(),
+            Self::RegisteredDirect => "registered directly (no fee, no coins spent)".into(),
             Self::Failed(reason, detail) => format!("{}: {detail}", reason.code()),
         }
     }
@@ -439,8 +442,10 @@ pub async fn run_entry<C: EntryChain, M: PowMiner>(
         EntryPlan::FreeEntrySpent => {
             return EntryOutcome::Failed(
                 FailureReason::FreeEntryAccountUsed,
-                "this account already used its one free proof-of-work entry — use the paid \
-                 `register_provider` path (deposit GPN first)"
+                "this account already used its one free proof-of-work entry — registration is \
+                 still free: re-register through the unsigned re-registration path \
+                 (`register_provider_entry_unsigned`) or the fee-free `register_provider` call; \
+                 neither asks for a deposit or a fee"
                     .to_string(),
             )
         }
@@ -452,10 +457,10 @@ pub async fn run_entry<C: EntryChain, M: PowMiner>(
                     .to_string(),
             )
         }
-        EntryPlan::PaidPath => {
-            log("proof-of-work entry not requested — using the legacy paid registration path");
+        EntryPlan::Direct => {
+            log("proof-of-work entry not requested — registering directly (no fee, no proof of work)");
             return match chain.submit_register_provider(params).await {
-                Ok(()) => EntryOutcome::RegisteredPaid,
+                Ok(()) => EntryOutcome::RegisteredDirect,
                 Err(e) => EntryOutcome::Failed(FailureReason::SubmitRejected, e),
             };
         }
@@ -557,15 +562,19 @@ pub fn classify_submit_error(err: &str) -> (FailureReason, String) {
         return (
             FailureReason::FreeEntryGpuUsed,
             format!(
-                "this GPU's hardware fingerprint already consumed a free entry — a different \
-                 physical GPU or the paid path is required ({err})"
+                "this GPU's hardware fingerprint already consumed a free entry — the unsigned \
+                 re-registration path covers it, or use a different physical GPU ({err})"
             ),
         );
     }
     if l.contains("freeentryaccountused") || l.contains("already consumed its one fee-free") {
         return (
             FailureReason::FreeEntryAccountUsed,
-            format!("this account already used its free entry — use the paid path ({err})"),
+            format!(
+                "this account already used its free entry — re-register via \
+                 `register_provider_entry_unsigned` (unsigned re-registration, no fee) or \
+                 `register_provider` (fee-free since spec 53) ({err})"
+            ),
         );
     }
     if l.contains("freeentrylimitreached") || l.contains("per-block cap") {
@@ -725,7 +734,8 @@ pub fn attest_entry_call(pow: &EntryPow, params: &EntryParams) -> subxt::tx::Dyn
     )
 }
 
-/// `ComputeMarketplace::register_provider(requirements)` — the paid path.
+/// `ComputeMarketplace::register_provider(requirements)` — the direct path
+/// (no proof of work, and fee-free from spec 53).
 pub fn register_provider_call(params: &EntryParams) -> subxt::tx::DynamicPayload {
     subxt::dynamic::tx(
         "ComputeMarketplace",
@@ -1050,7 +1060,7 @@ mod tests {
     }
 
     #[test]
-    fn no_pow_flag_keeps_the_paid_path_unchanged() {
+    fn no_pow_flag_registers_directly_without_mining() {
         let chain = FakeChain::new(fresh_status(), easy_target());
         let miner = InjectedMiner {
             start: 0,
@@ -1065,8 +1075,8 @@ mod tests {
             false,
             &mut log,
         ));
-        assert_eq!(outcome, EntryOutcome::RegisteredPaid);
-        assert_eq!(miner.calls.get(), 0, "paid path must not mine");
+        assert_eq!(outcome, EntryOutcome::RegisteredDirect);
+        assert_eq!(miner.calls.get(), 0, "the direct path must not mine");
         assert_eq!(*chain.submitted_plain.borrow(), 1);
         assert!(chain.submitted_entry.borrow().is_empty());
     }
@@ -1138,7 +1148,12 @@ mod tests {
         match outcome {
             EntryOutcome::Failed(reason, detail) => {
                 assert_eq!(reason, FailureReason::FreeEntryAccountUsed);
-                assert!(detail.contains("paid"));
+                assert!(detail.contains("register_provider_entry_unsigned"));
+                assert!(
+                    !detail.to_ascii_lowercase().contains("paid"),
+                    "a spent free entry must not offer a 'paid path': {detail}"
+                );
+                assert!(!detail.to_ascii_lowercase().contains("deposit gpn"));
             }
             other => panic!("unexpected {other:?}"),
         }
@@ -1268,7 +1283,7 @@ mod tests {
     fn plan_matrix_is_total() {
         let mut s = fresh_status();
         assert_eq!(plan_entry(true, &s), EntryPlan::Proceed);
-        assert_eq!(plan_entry(false, &s), EntryPlan::PaidPath);
+        assert_eq!(plan_entry(false, &s), EntryPlan::Direct);
         s.registered = true;
         assert_eq!(plan_entry(false, &s), EntryPlan::AlreadyRegistered);
         s = fresh_status();

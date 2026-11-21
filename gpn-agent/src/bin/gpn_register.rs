@@ -7,13 +7,15 @@
 //!   `ComputeMarketplace::register_provider_entry(pow, …)` — one call that
 //!   proves the work, records the attestation and registers the provider. This
 //!   is the path a zero-balance node needs.
-//! * **default (no `--entry`)** — the legacy paid path: `register_provider`.
-//!   It still needs the account to exist/fund the fee, exactly as before.
+//! * **default (no `--entry`)** — direct registration: `register_provider`.
+//!   No proof of work and **no payment**: at spec 53 the call is `Pays::No`,
+//!   so registering costs nothing on every path. The account only has to
+//!   exist (a signed origin), and it must not already be registered.
 //!
 //! Usage:
 //!   gpn_register --entry [--endpoint ws://127.0.0.1:9944] [--signer //Alice]
 //!                        [--gflops N] [--gpu-hash HEX32] [--gpu-count N]
-//!   gpn_register [endpoint] [signer_uri]           (legacy paid registration)
+//!   gpn_register [endpoint] [signer_uri]           (direct registration, free)
 //!
 //! Idempotent: an already-registered account exits 0 with "already registered"
 //! and never mines.
@@ -155,7 +157,9 @@ async fn main() {
         println!("gpn_register — register this machine as a GPU provider");
         println!();
         println!("  gpn_register --entry [options]   # free in coins: proof-of-work entry");
-        println!("  gpn_register [endpoint] [signer] # paid registration (legacy)");
+        println!(
+            "  gpn_register [endpoint] [signer] # direct registration (free, no proof of work)"
+        );
         println!();
         println!("Options:");
         println!("  --endpoint <url>    chain RPC (default ws://127.0.0.1:9944)");
@@ -198,7 +202,7 @@ async fn main() {
         if args.entry {
             "proof-of-work entry (free in coins)"
         } else {
-            "paid registration (legacy)"
+            "direct registration (free, no proof of work)"
         }
     );
 
@@ -238,7 +242,7 @@ async fn main() {
     // mandatory for the free path.
     let (gpu_hash, gpu_count, gflops) =
         if !args.entry && args.gpu_hash.is_none() && args.gflops.is_none() {
-            // Legacy paid path never used a fingerprint; keep it that way.
+            // The direct path never used a fingerprint; keep it that way.
             (
                 [0u8; 32],
                 args.gpu_count.unwrap_or(1),
@@ -273,7 +277,7 @@ async fn main() {
                         eprintln!("gpn_register: {e}");
                         std::process::exit(2);
                     }
-                    println!("  GPU probe unavailable ({e}); using paid path parameters");
+                    println!("  GPU probe unavailable ({e}); using direct-registration parameters");
                     ([0u8; 32], args.gpu_count.unwrap_or(1), 0)
                 }
             }

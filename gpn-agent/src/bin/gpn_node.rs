@@ -4341,7 +4341,7 @@ fn onboard_is_done(outcome: &EntryOutcome) -> bool {
         EntryOutcome::AlreadyRegistered
             | EntryOutcome::Registered
             | EntryOutcome::RegisteredViaFallback
-            | EntryOutcome::RegisteredPaid
+            | EntryOutcome::RegisteredDirect
     )
 }
 
@@ -4381,8 +4381,10 @@ fn spawn_onboard(cfg: Config, explicit: bool) {
                         ExitKind::ONBOARD,
                         &e,
                         "gpn_register --entry  (retry manually; `gpn_node --diagnose` shows the \
-                         GPU/identity/chain state). If this account or GPU already used its free \
-                         entry, fund the wallet and use the paid registration path.",
+                         GPU/identity/chain state). Registering costs nothing on any path: if this \
+                         account or GPU already used its free entry, re-register through the \
+                         unsigned `register_provider_entry_unsigned` path or the fee-free \
+                         `register_provider` call — no fee, no deposit.",
                     );
                     let _ = exit_report::record_at(&exit_report::default_path(), &report);
                 }
@@ -5764,7 +5766,7 @@ mod idle_cli_tests {
         for outcome in [
             EntryOutcome::Registered,
             EntryOutcome::RegisteredViaFallback,
-            EntryOutcome::RegisteredPaid,
+            EntryOutcome::RegisteredDirect,
             EntryOutcome::AlreadyRegistered,
         ] {
             assert!(

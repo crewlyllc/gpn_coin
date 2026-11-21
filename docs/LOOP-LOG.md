@@ -1,3 +1,29 @@
+## 14:43 PT — 0.3.66 item 232 done: "paid registration" purged from code, docs and binaries [no triage]
+
+- **A0**: `GET /commits/main` ⇒ `b7087825d7cc1bf2f7110f02a17de800daae65d3`; one run for it
+  (**44957382382**, `CI`) is `pending` — noted, **not waited on**, per the dispatch rule. Local
+  checkout was 1 ahead / 5 behind and its one commit (`4de3ad0`) had landed upstream as
+  `6f2b768`, so it was reset to `origin/main` before any work.
+- **Box worked — §3b item 232, ticked with evidence.** Identifiers, not just strings:
+  `EntryPlan::PaidPath` → `EntryPlan::Direct`, `EntryOutcome::RegisteredPaid` →
+  `RegisteredDirect` (9 call sites), so "paid" is no longer a concept in the onboarding code.
+  Operator text rewritten: `gpn_register` prints
+  `mode: direct registration (free, no proof of work)`; the spent-free-entry failure now names the
+  **unsigned re-registration path** (`register_provider_entry_unsigned`) and the fee-free
+  `register_provider` instead of "deposit GPN first" — in `onboard.rs` (3 sites),
+  `classify_submit_error` (2), `gpn_node.rs`'s retry hint and `docs/run-a-node.md`'s failure table.
+- **Proof**: `grep -rniE "paid (path|registration)|registration fee|deposit GPN"` now returns only
+  historical notes, the rule that forbids the phrase, job-payment wording, and the test that
+  outlaws it. `strings` of the built `gpn_register` **and** `gpn_node` → 0 matches, and the node
+  binary carries the new hint verbatim. `cargo test --lib onboard` 12/12 (the
+  `free_entry_spent_reports_a_specific_reason` test was extended to assert the unsigned path is
+  named and "paid"/"deposit GPN" are absent), `cargo test --bin gpn_node onboard` 2/2,
+  `cargo fmt -- --check` clean, CI's own clippy line (`-D warnings` + allow-list) Finished clean.
+- **Still open in this release**: item 231 is `AWAITING-OWNER` in `docs/NEEDS-TRIAGE.md` (spec-53
+  enactment needs Jeremy's offline sudo key D5). Nothing new for him this run.
+- **Next run**: item 231 stays parked on his answer; otherwise §3 (bump/CHANGELOG already written
+  at bundle time — verify with `bump-version.py --check`) and §4.
+
 ## 15:0x PT — 0.3.66 item 231 source half: `register_provider` is `Pays::No` at spec 53, build dispatched [TRIAGE]
 
 - **A0**: `GET /commits/main` ⇒ `fecadeff5e59f14d624abca85a84a0d797bd6620` (docs-only: LOOP-LOG +
