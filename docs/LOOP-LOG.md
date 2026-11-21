@@ -27,7 +27,9 @@ that needs Jeremy. `[TRIAGE]` = a decision waiting on the assistant.
 - **Note for the next box (222):** the provider still advertises a flat `capabilities[]`; `tasks.rs` reads only that,
   so the matrix (`task → models`) is row 222's work. Also worth a look: default routing picked `tuned-6542:latest`
   (a toy fine-tune) for an unspecified chat call and produced garbage — a catalogue/allowlist question, not this row.
-- **Next run**: box 2 = **222** (provider task matrix), code only — no CI gate.
+- **Push**: `c03600a` → `main` (97b257c..c03600a). CI run **44874120688** is `pending` on that sha —
+  a build is expected (the commit carries `.rs`), not a `paths-ignore` break. Not waited on: box 2 is code.
+- **Next run**: box 2 = **222** (provider task matrix), code only — no CI gate; read 44874120688's conclusion first.
 
 ## 21:37 PT — §C: 0.3.65 opened, all 9 NEW rows bundled (221–229), checklist generated, one push [no triage]
 
