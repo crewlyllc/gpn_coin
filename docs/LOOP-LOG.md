@@ -1,3 +1,23 @@
+## 12:20 PT — §8 stranger-download proof: both assets match the signed manifest byte-for-byte  [no triage]
+
+- **A0**: `origin/main` was `3ee5cb3d386e1992e7a564b9b1c5dd0861b6df23` ("release 0.3.65: §7b capability
+  boxes ticked"), a docs-only commit (`docs/LOOP-LOG.md`, `docs/releases/0.3.65.md`), so
+  `GET /actions/runs?head_sha=3ee5cb3…` ⇒ `total_count: 0` — expected under `ci.yml` paths-ignore,
+  not a missing run. Local checkout was 1 commit behind; pulled `--ff-only` before touching anything.
+- **Box worked: §8 "Verify as a stranger would" — 3/3, now DONE 12:20 PT.** Anonymous (no token, no
+  cookies, no account) `curl -sL` of the two URLs `releases.json` publishes:
+  linux `200` / **340,776,960 B** / `c620fa767b7eeebd879fa16617d990989d67c3cc0c1b6936569db093c8b458d2`;
+  windows `200` / **248,752,159 B** / `38d9ee82e15c3263d8e93913e00f1639894ab05681a136d4a116d806dc40bede`.
+  All four values equal `https://gpncoin.ai/releases.json` (0.3.65, published 18:57:29Z) exactly, and the
+  linux hash equals the `release_id` the fleet's own 11:19 self-update recorded — a stranger's bytes and
+  the running fleet's bytes are the same bytes.
+- **Corrected a stale instruction, not just ticked it:** §8's third box names `downloads.md`; that path
+  is **404** live and has never existed. The stamp lives at `docs/downloads.html` ⇒ 200, line 50
+  "Verified against: chain spec 52 / release 0.3.65 — checked 2026-11-21 at block 340,878", and
+  `/download` says "Current signed release: 0.3.65". Polled live, not read from the repo copy.
+- **Remaining in 0.3.65**: §1 one box left unticked by design (no pre-fix failing run archived for
+  221–227 — gap recorded, not papered over), §10 Prove the behaviour (3), §10b timing (2), §0b filing (2,
+  gated on §10). Next run starts at §10.
 # LOOP-LOG
 
 ## 12:15 PT — §7b capability boxes ticked; found + fixed the site proxy's missing `/api/v1/jobs` route [no triage]
