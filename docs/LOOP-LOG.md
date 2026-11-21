@@ -17,6 +17,14 @@
   the *discovery* column, so every box would have quoted "found 2026-11-21 …" instead of its
   acceptance criteria (0.3.66's 231/232 rows put the clause mid-description). Now it takes the
   clause from the description when present. Same commit.
+- **Blocked by our own guard, then fixed it**: `scripts/git-hooks/pre-commit` (single-writer guard,
+  added 2026-11-21) read `published` from `network.json latest_version` — which `bump-version.py`
+  sets to the version being *bundled*. So at the exact commit that opens 0.3.66 the hook saw
+  published==highest and refused it: "source changes with no open bundle". A guard that forbids
+  bundling is wrong, not the bundle. `published` now comes from `docs/releases/INDEX.md` (a row is
+  written only after the checklist is ticked and the manifest is live), with network.json as an
+  offline fallback when INDEX has no rows. Verified: hook passes with 0.3.66 open and would refuse
+  again once 0.3.66 is filed. Commit `f1db747`, one push (`77ea397..f1db747`).
 - **Next run**: start at 0.3.66 box 1 (§1 of the checklist), one box per run.
 
 ## 12:20 PT — §8 stranger-download proof: both assets match the signed manifest byte-for-byte  [no triage]
