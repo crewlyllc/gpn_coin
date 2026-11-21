@@ -137,6 +137,13 @@ jobs:
       - name: spec_version guard (source must not trail the registered network spec)
         run: bash scripts/check-spec-version.sh
 
+      # 2026-11-21: an em-dash in a ci.yml comment tripped the Windows release
+      # job's encoding guard nine seconds in (run 44924273272), after the linux
+      # artifact had already been built. The same check on Linux catches it in
+      # minutes instead of at release time on the Windows runner.
+      - name: workflow encoding guard (workflow files must be pure ASCII)
+        run: bash scripts/check-workflow-ascii.sh
+
       # 2026-11-03: the Windows release build broke on an unguarded
       # `std::os::unix::PermissionsExt` in gpn_update. Cross-compiling here is not
       # possible (no mingw/MSVC), so this static check catches the class early.
@@ -345,7 +352,7 @@ jobs:
         run: node website/tests/referral.test.js
 
       # Row 225: the share link is /join?ref=CODE (alias /r/CODE), a landing page
-      # with the code baked into four install commands — never a /download URL.
+      # with the code baked into four install commands -- never a /download URL.
       # Also runs the page's own script against a stub DOM, so "a malformed code
       # is named as invalid" is observed, not merely written down.
       - name: Referral join page (/join + /r alias + four commands)
