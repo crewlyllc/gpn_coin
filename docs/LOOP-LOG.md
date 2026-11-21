@@ -3,6 +3,38 @@
 Newest first. Written by the release loop; read by the assistant, who relays anything
 that needs Jeremy. `[TRIAGE]` = a decision waiting on the assistant.
 
+## 19:10 PT — red CI was a 5 s speed assertion on a loaded runner; cancelled the stale run blocking BOTH the CI gate and the Windows build; §6 linux scan ticked [no triage]
+
+- **A0**: main HEAD was `13a0c8c` (loop-log only) → no CI run, expected under paths-ignore. The
+  release gate run **44853610678** (`9df5341`) had been `pending` with **0 jobs for 60 min**.
+- **Root cause found (the blocker was not "contention")**: `ci.yml:53 concurrency: group:
+  ci-${{ github.ref }}` was held by run **44847689477** (`f5ed974a`, started 01:02Z, 118 min old,
+  superseded, one job already red). That same run held the **single-slot Windows runner**, which is
+  why the 0.3.64 Windows build **44856009729** sat `queued` for 40 min. Cancelled by API → 202,
+  observed `completed cancelled`; **44856009729 went `in_progress` within 60 s** and the gate run left
+  `pending`.
+- **Red job read, quoted, classified**: job **136689883851**, step `Test gpn-agent (non-GPU)` →
+  `test happy_path_202_poll_completes_with_zero_transactions ... FAILED`,
+  `panicked at tests/image_channel.rs:276:5: an off-chain render job must not wait for block
+  inclusion`, `test result: FAILED. 7 passed; 1 failed ... 8.14s`. **Our test** — it asserted
+  `elapsed < 5s` around a stub round-trip: a speed test wearing a correctness test's name. The same
+  test idles in **0.03 s** here. The real property is structural (no chain client ⇒ no create
+  possible; `f.stub.jobs == 1` ⇒ exactly one off-chain POST). Bound is now a **120 s deadlock guard**
+  with that reasoning in the comment. Fixed in **6f0e780**, tests-only
+  (`git diff --stat 9df5341..6f0e780` → no production code, so the 9df5341 artifacts are not stale);
+  local re-run `cargo test --release --test image_channel` → **8 passed; 0 failed** in 0.10 s.
+  New CI run **44858730640** on `6f0e780`, handle recorded, not waited on.
+- **§6 box 1 + box 2 ticked with artifact evidence**: linux asset `gpn-linux.tar.gz`
+  340,489,746 B, `updated_at 02:40:52Z`, API digest `sha256:e768dd45…c560cb`, downloaded through the
+  authenticated asset API and `sha256sum` **matches**. Strings scanned in the *node* binary
+  **`gpn-node`** (not `gpn_node`, the launcher, which carries none of them): `reorg=` 1,
+  `work ours=` 1, `gpn-forked` 2, `still searching template` 1. `./gpn-node --version` →
+  `gpn-node 0.3.64`; `./gpn_node --version` → `gpn_node 0.3.64 (spec 52, 9df5341)`.
+- **Still unticked (needs the Windows artifact)**: §4 CI green (**44858730640** pending),
+  §5 attestation-for-published-digest, §5 verifier, §7 cut. Windows build 44856009729 is building.
+- **Blockers**: none. **Triage**: none. **Next run**: ask GitHub once for 44858730640 and
+  44856009729; on green + publish, tick §4, the §5 remainder, and run §7's `release-cut.sh`.
+
 ## 18:33 PT — 0.3.64 builds in flight (linux building, windows queued); the one red run is the known macOS billing job, cause re-confirmed [no triage]
 
 - **A0**: main HEAD `3798b1f` (loop-log/docs only) → `runs?head_sha=3798b1f…` → `total_count: 0`,
