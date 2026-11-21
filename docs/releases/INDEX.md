@@ -10,3 +10,4 @@ the checklist's last box is ticked and the version is published.
 | 0.3.62 | 2026-11-20 | 52 (mechanism; cadence residual -> row 217), 191, 196/205, 213, 214, 215/216 | archive/0.3.62.md |
 | 0.3.63 | 2026-11-20 | 217 (restated acceptance + gate; the cadence fix itself rides row 218's release) | archive/0.3.63.md |
 | 0.3.64 | 2026-11-20 | 217 (cadence acceptance met on a 0.3.64-authored window), 218 (sealer heartbeat; every long gap attributable) | archive/0.3.64.md |
+| 0.3.65 | 2026-11-20 | 221, 222, 223, 224, 225, 226, 227, 228, 229 | archive/0.3.65.md |
