@@ -3,6 +3,34 @@
 Newest first. Written by the release loop; read by the assistant, who relays anything
 that needs Jeremy. `[TRIAGE]` = a decision waiting on the assistant.
 
+## 18:30 PT — 0.3.64 §1-§3 ticked with fresh local evidence; §5 both builds dispatched and the run ended [no triage]
+
+- **A0**: main HEAD `9df5341` (the 0.3.64 bundle commit) has CI run **44853610678**, `pending`,
+  `created_at 02:02:16Z`, **`total_count` of jobs = 0** at 18:35 PT — queued behind the single-slot
+  runner (contention, not a fault). Not waited on; the checklist carries the handle.
+- **§1 + §2 + §3 ticked, all re-run in this checkout at `9df5341`** (not copied from the bundle log):
+  - `seal_watch_tests` → `5 passed; 0 failed (290 filtered out)`.
+  - `cargo test --release -p gpn-node --bin gpn-node` → `293 passed; 0 failed; 2 ignored`.
+  - `cargo fmt --all -- --check` (in `gpn-node/`) → exit 0.
+  - `gpn-agent` parity `shipped_bootnodes` + `launcher_bootnodes` → `4 + 4 = 8 passed, 0 failed`.
+  - `bump-version.py --check` → `lockstep: 15 manifest(s) and 14 lockfile entr(ies) agree`, 0.3.64.
+  - Fail-before for 218 recorded machine-re-runnably: `git grep -c 'sealer:' 1300b28` → **0 hits
+    (exit 1)**, at HEAD → 2. Call site `service.rs:3229` (`SealWatch::new(SEAL_HEARTBEAT_MS)`).
+- **§4**: control pair proves paths-ignore still selective — `head_sha=465a818` (docs) → 0 runs;
+  `9df5341` (Cargo.toml) → run 44853610678. My one push this run (`182916f`, checklist only) →
+  `runs?head_sha=182916f` → **0**, so it cannot supersede the release CI run.
+- **§5 dispatched (this is why the run ended here)**: `scripts/dispatch-release.sh 9df5341…` → tag
+  `build/9df534110e3b`; linux run **44856005252** (`in_progress`), windows run **44856009729**
+  (`queued`), same `head_sha` on both. Attestation ordering verified statically for a private
+  repo (cosign sign at :699, unconditional provenance gate at :720 that throws, publish at :748).
+- **Found and named, not fixed (wrong place to push)**: `release-unix.yml` is dispatched every
+  release and dies in 3 s — annotation *"The job was not started because recent account payments
+  have failed or your spending limit needs to be increased"* = hosted macOS billing. macOS is not
+  in the manifest and there is an owner rule against spending money, so the dispatch itself is the
+  bug; `scripts/dispatch-release.sh`'s workflow list should drop it. Queued for the next batch.
+- **Blockers**: none. **Triage**: none. **Next run**: poll 44853610678 (CI) + 44856005252 /
+  44856009729 (builds) once, tick §4 box 4 and §5 boxes 6-7, then §6 artifact scan.
+
 ## 17:55 PT — 0.3.63 verified complete; 0.3.64 bundled (217 re-bundle + 218 sealer heartbeat) [no triage]
 
 - **A0**: main HEAD `465a818` — no CI run exists for that sha (`head_sha=` → `total_count: 0`);
