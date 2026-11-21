@@ -31,8 +31,15 @@
   `Sudo.sudo(System.set_code)` with D5 (the path specs 44/45/51 took, ~2 min) · B committee
   governance (3-of-5, 10-block timelock) · C fold it into the next release's `set_code`.
   Recommendation: **A**. Written to `docs/NEEDS-TRIAGE.md`.
-- **Next run**: read `/tmp/spec53-build.log` for `SPEC53 BUILD OK` and the decoded `spec_version: 53`,
-  add the `wasm/README-pending-upgrade.md` row, then item 232 (purge the paid-registration language).
+- **Build finished inside this run (3m41s), verified rather than assumed**: 534 023 B, `sha256
+  d5c1b69a…42819f`, `blake2_256` code hash `0xd4224aa6…a3e6a`, and — after zstd-decompressing the
+  blob (8-byte magic `52bc537646db8e05` first) — `authoring 1 / spec_version 53 / impl 1`. The build
+  script's first decode pass scanned the *compressed* bytes and printed a false
+  `spec_version: NOT FOUND`; fixed in `build-spec53-wasm.sh` so a rebuild self-verifies. Artifact
+  committed at `wasm/gpn_runtime_spec53_free_registration.compact.compressed.wasm`, row added to
+  `wasm/README-pending-upgrade.md` (BUILT + TESTED — NOT APPLIED, owner-gated).
+- **Next run**: item 232 (purge the paid-registration language from code, docs and the site), unless
+  Jeremy answers the spec-53 enactment TRIAGE first — then enact and close 231.
 
 ## 14:12 PT — 0.3.66 item 230 implemented and proven live (confirm failure names the child's cause) [no triage]
 

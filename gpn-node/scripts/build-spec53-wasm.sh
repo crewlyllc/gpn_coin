@@ -63,18 +63,30 @@ echo
 echo "artifact: $DEST"
 ls -l "$DEST"
 sha256sum "$DEST"
+# The artifact is a `compact.compressed` blob: 8-byte magic header then a zstd
+# frame. Scanning the *compressed* bytes for the version section finds nothing
+# (that produced a false "spec_version: NOT FOUND" on the first spec-53 build),
+# so decompress first — the same decoder reproduces the recorded spec-52 values.
 python3 - "$DEST" <<'PY'
 import hashlib, struct, sys
 b = open(sys.argv[1], 'rb').read()
 print("size:                 %d bytes" % len(b))
 print("blake2_256 code hash: 0x" + hashlib.blake2b(b, digest_size=32).hexdigest())
+print("magic:                %s (expect 52bc537646db8e05)" % b[:8].hex())
+try:
+    import zstandard as zstd
+    raw = zstd.ZstdDecompressor().decompress(b[8:])
+except ImportError:
+    import subprocess
+    raw = subprocess.run(["zstd", "-d", "-c"], input=b[8:], capture_output=True).stdout
+print("decompressed:         %d bytes" % len(raw))
 needle = b'\x0cgpn\x0cgpn'
-at = b.find(needle)
+at = raw.find(needle)
 if at < 0:
     print("spec_version:          NOT FOUND")
     sys.exit(1)
 off = at + len(needle)
-authoring, spec, impl = struct.unpack_from('<III', b, off)
+authoring, spec, impl = struct.unpack_from('<III', raw, off)
 print("authoring_version:    %d" % authoring)
 print("spec_version:         %d" % spec)
 print("impl_version:         %d" % impl)
