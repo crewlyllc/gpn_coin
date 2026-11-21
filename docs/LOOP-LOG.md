@@ -3,6 +3,30 @@
 Newest first. Written by the release loop; read by the assistant, who relays anything
 that needs Jeremy. `[TRIAGE]` = a decision waiting on the assistant.
 
+## 20:05 PT — 0.3.64: §5 closed (7/7); §4 CI gate still unanswered, one Windows job in flight [no triage]
+
+- **A0**: origin/main HEAD `ebf2943` is docs-only (`total_count: 0` runs — paths-ignore, expected).
+  The release commit's own CI (`9df5341`, run `44853610678`) polled **once**: secret-scan ✅,
+  fmt+clippy ✅, linux build+tests ✅ (02:59:29→03:30:45Z), `Build + unit tests (windows,
+  self-hosted)` **in_progress since 03:23:56Z on DESKTOP-USBUADL** (~35 min of a 40–75 min cold
+  build). **No failure to diagnose**; not cancelled — it is the only attestation-bearing Windows
+  build of this sha. Run `44858730640` (`6f0e780`, the image_channel test fix) still `pending`,
+  `jobs: []`, queued behind the same concurrency group: contention, not a fault.
+- **Box ticked** (`docs/releases/0.3.64.md`):
+  - §5 "the attestation exists for the digest that is actually published" — re-derived in this run:
+    `bash scripts/verify-windows-bundle.sh windows-latest` → API digest
+    `sha256:4d5b9f4e…3927329` == downloaded bytes `4d5b9f4e…3927329` (247,027,527 B), bundle 9,033 B,
+    `cosign verify-blob --bundle` → **`Verified OK`**. §5 is now **7/7 DONE**.
+    Caveat written in the box: the `releases.json` half lands with the cut, and release-cut
+    sha256-checks both assets against the API digests before signing, so a drifting manifest fails
+    its own step 2 rather than publishing silently.
+- **No cut attempted this run**: the gate is unchanged from 19:35 (`in_progress:None`), and a second
+  identical `release-cut` retry without new information is a guess, not a test. `~/.gpn/release-in-flight`
+  verified **absent** (last run's lock leak did not recur), so the next run can cut immediately.
+- **Next run**: poll `44853610678` once. `success` → tick §4 and run
+  `scripts/release-cut.sh --version 0.3.64`; `failure` → read that job's log, quote the line, fix
+  the cause. Then §7 → §9/§10 (deploy 0.3.64 so 217/218 can be measured on the heartbeat binary).
+
 ## 19:58 PT — 0.3.64: cosign verify OK, cut attempted and correctly refused by its CI gate [no triage]
 
 - **A0**: main HEAD `fecf30f` — `GET /actions/runs?head_sha=fecf30f` → `total_count: 0`; docs-only
