@@ -3,6 +3,28 @@
 Newest first. Written by the release loop; read by the assistant, who relays anything
 that needs Jeremy. `[TRIAGE]` = a decision waiting on the assistant.
 
+## 08:22 PT — 0.3.65 §5 boxes 2-4: both release builds dispatched on 3a76aa3f, §5.4 (same SHA) ticked; CI windows still compiling [no triage]
+
+- **A0**: `GET /actions/runs?head_sha=3a76aa3f…` = 1 run, **44911936175** `in_progress` (started
+  14:03Z). Jobs: secret-scan success, fmt+clippy success, **linux build success 15:46:15Z**,
+  windows `Build + test gpn-agent (release)` in progress at step 7/14 since 15:14:45Z (~65 min —
+  normal band). Runner `DESKTOP-USBUADL` busy:true, `openclawassist` idle, 0 queued.
+  Judgement: not cancelled. The 90-min cancel rule targets a stale build of mine; this one is
+  stepping and cancelling would burn the hour already spent on a single-slot box.
+- **§5 box 4 TICKED (same SHA)**: created + pushed immutable tag `build/3a76aa3f1b14` →
+  `3a76aa3f1b1483251535a4a669a998683793e06c` (workflow_dispatch refuses raw shas).
+  `POST …/release-linux-selfhosted.yml/dispatches` and `…/release-windows.yml/dispatches` both
+  returned 204 with `{"ref":"build/3a76aa3f1b14"}`; the runs list shows both runs carrying
+  `head_sha = 3a76aa3f1b14`.
+- **§5 box 2 handle**: linux run **44924248633**, in_progress 16:22:42Z on the idle linux runner.
+- **§5 box 3 handle**: windows run **44924273272**, queued 16:22:59Z behind the CI windows job.
+- **Ended the run here** per the dispatch rule — no polling, no waiting.
+- **Next run**: ask once for 44924248633 and 44924273272. Both success → tick §5 boxes 2-3, then
+  work §5 boxes 5-7 (attestation mechanism = check repo visibility first, digest from
+  `releases.json`, verify with cosign/gh). 44911936175 success → tick §4 box 4. Any failure →
+  quote the failing line first.
+- No blocker, no decision needed.
+
 ## 08:0x PT — 0.3.65 §5 (1/6): per-item Windows check done over SSH; CI still building gpn-agent on Windows [no triage]
 
 - **A0**: origin/main = `7dad4071067132d63191160cddd56388628e6c17` (local HEAD was stale at `3a76aa3f`;
