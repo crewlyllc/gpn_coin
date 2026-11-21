@@ -1,5 +1,21 @@
 # LOOP-LOG
 
+## 11:43 PT — §7b box 3 ticked: site == GitHub == binaries on 0.3.65, proven from re-downloaded published bytes [no triage]
+
+- **A0**: `main` HEAD `c30c68c8a1fca03ca76ca2889389f92edb50d26c` ⇒ one run `44941059831`, `status=pending`
+  (created 19:27Z). Not waited on, per the do-not-block rule; the box worked is docs/verification, not a build.
+- **§7b "both surfaces agree with the binaries" ticked.** Measured this turn, not copied:
+  `releases.json` `0.3.65` (18:57:29Z) with linux `c620fa76…8d2` 340,776,960 B / windows `38d9ee82…ede`
+  248,752,159 B; `GET /releases/tags/{linux,windows}-latest` on **jeremyzguo and crewlyllc** return those
+  same digests; the published linux tarball was re-downloaded (sha256 = manifest), `tar xz -O ./gpn-node`
+  ran ⇒ `gpn-node 0.3.65`; the published windows zip (sha256 = manifest) contains `gpn-node/0.3.65`;
+  running process `POST :9944 system_version` ⇒ `"0.3.65"`.
+- **Found, not a blocker:** the rolling releases carry no version in `name`/`body` (name `'GPN Linux (latest)'`,
+  body names only a build commit — and the two platforms name *different* commits, `1f980e58…` vs `6c3dd06d…`).
+  Version identity is therefore only provable by digest + in-binary stamp. Noted in the box; a future
+  release script should stamp the release name.
+- Next run: §7b capability box, then §8 (stranger download), §10, §10b, then archive/INDEX filing (§0b).
+
 ## 11:33 PT — fleet node self-updated to 0.3.65; §7b-1 closed by walking the install path, 9 doc stamps refreshed from it [no triage]
 
 - **A0**: `main` HEAD `3d9dc5e4ccf9ee5aabfcded0db09d648c0ba254f` (full 40-char sha) ⇒ `total_count: 0`
