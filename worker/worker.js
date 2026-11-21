@@ -1330,6 +1330,7 @@ async function handleApi(request, env, path) {
     const postRoute =
       route === "/v1/chat/completions" ||
       route === "/chat/completions" ||
+      route === "/v1/jobs" ||
       route === "/v1/images/generations" ||
       route === "/v1/audio/speech" ||
       route === "/v1/finetunes";
@@ -1360,6 +1361,17 @@ async function handleApi(request, env, path) {
   } else if (route === "/v1/models" || route === "/models") {
     upstream = "/v1/models";
     cache = "public, max-age=60";
+  } else if (route === "/v1/tasks") {
+    // The task vocabulary (row 221): the words the AP actually serves and the
+    // endpoint each one maps to. `website/ai.html` renders its table from this,
+    // so it must be reachable from the public site or the table never loads.
+    upstream = "/v1/tasks";
+    cache = "public, max-age=60";
+  } else if (route === "/v1/jobs") {
+    // One dispatcher for every task word (row 221). The site documents this as
+    // the single runnable call; without a route here that example 404'd.
+    upstream = "/v1/jobs";
+    allow = "POST";
   } else if (route === "/v1/chat/completions" || route === "/chat/completions") {
     upstream = "/v1/chat/completions";
     allow = "POST";
@@ -1521,7 +1533,11 @@ async function handleApi(request, env, path) {
         !Array.isArray(parsed) &&
         ((Array.isArray(parsed.messages) && parsed.messages.length > 0) ||
           typeof parsed.prompt === "string" ||
-          typeof parsed.input === "string");
+          typeof parsed.input === "string" ||
+          // /v1/jobs: a task word (with `inputs`) is the whole payload; the
+          // AP's own parser decides what that word needs.
+          typeof parsed.task === "string" ||
+          (Array.isArray(parsed.inputs) && parsed.inputs.length > 0));
       if (!usable) {
         return apiJson(
           {

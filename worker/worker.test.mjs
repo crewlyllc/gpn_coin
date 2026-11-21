@@ -1360,3 +1360,76 @@ test("GET /api/network is a JSON 502 (never HTML) when the AP is unreachable", a
   const body = await res.json();
   assert.equal(body.error.type, "gpn_proxy_error");
 });
+
+/* ── /api/v1/jobs and /api/v1/tasks (rows 221/222, documented on ai.html) ─── */
+
+test("POST /api/v1/jobs is proxied to the AP's /v1/jobs with the body intact", async () => {
+  const seen = [];
+  const reqBody = {
+    task: "chat",
+    inputs: [{ type: "text", text: "Say hello" }],
+    params: { wait: true, max_tokens: 32 },
+  };
+  const res = await worker.fetch(
+    new Request("https://gpncoin.ai/api/v1/jobs", {
+      method: "POST",
+      headers: { "content-type": "application/json", "cf-connecting-ip": "203.0.113.61" },
+      body: JSON.stringify(reqBody),
+    }),
+    {
+      AP_TOKEN: "t",
+      __test_ap_transport: stubAp(
+        jsonReply(200, { object: "chat.completion", task: "chat" }),
+        seen,
+      ),
+    },
+    { waitUntil() {} },
+  );
+  assert.equal(res.status, 200);
+  assert.equal(res.headers.get("x-gpn-proxy"), "access-point");
+  assert.deepEqual(await res.json(), { object: "chat.completion", task: "chat" });
+  assert.equal(seen.length, 1);
+  assert.equal(seen[0].method, "POST");
+  assert.equal(seen[0].path, "/v1/jobs");
+  assert.deepEqual(JSON.parse(seen[0].body), reqBody);
+});
+
+test("GET /api/v1/tasks is proxied and readable cross-origin", async () => {
+  const seen = [];
+  const doc = { object: "list", default: "chat", data: [{ task: "chat", served: true }] };
+  const res = await worker.fetch(
+    new Request("https://gpncoin.ai/api/v1/tasks", {
+      headers: { origin: "https://elsewhere.example", "cf-connecting-ip": "203.0.113.62" },
+    }),
+    { AP_TOKEN: "t", __test_ap_transport: stubAp(jsonReply(200, doc), seen) },
+    { waitUntil() {} },
+  );
+  assert.equal(res.status, 200);
+  assert.equal(res.headers.get("access-control-allow-origin"), "*");
+  assert.match(res.headers.get("cache-control"), /max-age=60/);
+  assert.deepEqual(await res.json(), doc);
+  assert.equal(seen[0].method, "GET");
+  assert.equal(seen[0].path, "/v1/tasks");
+});
+
+test("/api/v1/jobs: GET is a 405, an empty body is a 400, not a lost job", async () => {
+  const get = await worker.fetch(
+    new Request("https://gpncoin.ai/api/v1/jobs", {
+      headers: { "cf-connecting-ip": "203.0.113.63" },
+    }),
+    {},
+    { waitUntil() {} },
+  );
+  assert.equal(get.status, 405);
+
+  const empty = await worker.fetch(
+    new Request("https://gpncoin.ai/api/v1/jobs", {
+      method: "POST",
+      headers: { "content-type": "application/json", "cf-connecting-ip": "203.0.113.64" },
+      body: JSON.stringify({}),
+    }),
+    {},
+    { waitUntil() {} },
+  );
+  assert.equal(empty.status, 400);
+});
