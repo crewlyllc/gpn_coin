@@ -2452,6 +2452,7 @@ pub async fn new_full<
                                     // fact about the next one: the gate re-learns
                                     // it from the next claim.
                                     peer_tips.set_anchor_mismatch(peer, false);
+                                    peer_tips.set_accepted_fork(peer, false);
                                 }
                                 NotificationEvent::NotificationReceived {
                                     peer, notification, ..
@@ -2547,6 +2548,17 @@ pub async fn new_full<
                                                 primary_tip_held,
                                                 peer_is_primary,
                                             },
+                                        );
+                                        // Row 228: an accepted heavier branch makes
+                                        // this peer the one source that can give us
+                                        // that branch. The download gate and the
+                                        // repeat rule both refuse it by default; the
+                                        // verdict is what opens them, and nothing
+                                        // else does. Any other decision closes it
+                                        // again on the same claim.
+                                        peer_tips.set_accepted_fork(
+                                            peer,
+                                            matches!(decision, fc::Decision::Reorg { .. }),
                                         );
                                         {
                                             let mut f = fork_shared.lock().unwrap();

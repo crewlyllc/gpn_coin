@@ -279,6 +279,13 @@ pub struct PeerTips {
     /// [`crate::sync_source`]). Not persisted: an anchor verdict is about a
     /// claim on a connection, and a restart re-learns both.
     mismatched: Mutex<std::collections::HashSet<PeerId>>,
+    /// Peers whose branch fork choice has **accepted** as heavier than ours
+    /// (row 228). Such a peer is a source for exactly as long as that verdict
+    /// stands, and it is the one exception to "never ask a peer that is behind
+    /// us on a branch we do not hold": its branch is the branch we are trying
+    /// to adopt. Cleared the moment the decision changes, so the ban-avoidance
+    /// rule comes straight back.
+    accepted_fork: Mutex<std::collections::HashSet<PeerId>>,
 }
 
 /// Claims remembered across restarts; a few dozen peers at most, and an old
@@ -310,6 +317,7 @@ impl PeerTips {
             inner: Mutex::new(inner),
             path: Some(path),
             mismatched: Mutex::new(Default::default()),
+            accepted_fork: Mutex::new(Default::default()),
         })
     }
 
@@ -369,6 +377,25 @@ impl PeerTips {
     /// Does this peer's claim contradict a signed anchor?
     pub fn anchor_mismatch(&self, peer: &PeerId) -> bool {
         self.mismatched
+            .lock()
+            .map(|s| s.contains(peer))
+            .unwrap_or(false)
+    }
+
+    /// Record that fork choice accepted this peer's heavier branch (row 228).
+    pub fn set_accepted_fork(&self, peer: PeerId, accepted: bool) {
+        if let Ok(mut set) = self.accepted_fork.lock() {
+            if accepted {
+                set.insert(peer);
+            } else {
+                set.remove(&peer);
+            }
+        }
+    }
+
+    /// Has fork choice accepted this peer's branch as the heavier one?
+    pub fn accepted_fork(&self, peer: &PeerId) -> bool {
+        self.accepted_fork
             .lock()
             .map(|s| s.contains(peer))
             .unwrap_or(false)
@@ -1038,7 +1065,17 @@ pub fn may_ask_for_blocks_anchored(
     peer_height: u64,
     peer_tip_known: Option<bool>,
     anchor_mismatch: bool,
+    accepted_fork: bool,
 ) -> bool {
+    // Row 228: the one peer both rules above exist to refuse is exactly the
+    // peer fork choice has *proved* holds the heavier branch. A deeper reorg
+    // can only ever be downloaded from it, so an accepted verdict overrides
+    // both refusals — and nothing else does. `service.rs` clears the verdict
+    // as soon as the decision changes, so this is a narrow, self-expiring
+    // exception rather than a new default.
+    if accepted_fork {
+        return true;
+    }
     if anchor_mismatch {
         return false;
     }
@@ -1098,6 +1135,12 @@ pub trait PeerTipSource: Send + Sync {
     fn anchor_mismatch(&self, _who: &PeerId) -> bool {
         false
     }
+    /// Has fork choice accepted this peer's branch as heavier than ours (row
+    /// 228)? Default `false`: an implementation with no fork choice must not
+    /// open the gate.
+    fn accepted_fork(&self, _who: &PeerId) -> bool {
+        false
+    }
 }
 
 impl<Block: BlockT> PoliteDownloader<Block> {
@@ -1138,7 +1181,8 @@ impl<Block: BlockT> PoliteDownloader<Block> {
         let our_best = self.source.our_best();
         let tip_known = self.source.peer_tip_known(who);
         let mismatch = self.source.anchor_mismatch(who);
-        if may_ask_for_blocks_anchored(our_best, height, tip_known, mismatch) {
+        let accepted = self.source.accepted_fork(who);
+        if may_ask_for_blocks_anchored(our_best, height, tip_known, mismatch, accepted) {
             // One line per peer per process, with the facts the decision used:
             // without it there is no way to tell "we asked because we had to"
             // from "we asked because the gate did not fire".
@@ -1148,10 +1192,18 @@ impl<Block: BlockT> PoliteDownloader<Block> {
                 .map(|mut m| m.insert(*who, ()).is_none())
                 .unwrap_or(false);
             if first {
-                info!(
-                    "block-serving: asking {who} for blocks (claim #{height}, our tip \
-                     #{our_best}, their tip known to us: {tip_known:?})"
-                );
+                if accepted {
+                    info!(
+                        "block-serving: asking {who} for blocks {height} behind our tip \
+                         #{our_best} — fork choice accepted its heavier branch, so it is a \
+                         source for exactly as long as that verdict stands (#228)"
+                    );
+                } else {
+                    info!(
+                        "block-serving: asking {who} for blocks (claim #{height}, our tip \
+                         #{our_best}, their tip known to us: {tip_known:?})"
+                    );
+                }
             }
             return true;
         }
@@ -1183,6 +1235,109 @@ impl<Block: BlockT> PoliteDownloader<Block> {
             debug!("block-serving: still not asking {who} for blocks (tip #{height})");
         }
         false
+    }
+
+    /// Fetch a whole accepted heavier branch, `MAX_BLOCKS_IN_RESPONSE` blocks
+    /// at a time, and return it as one wire response (#228).
+    ///
+    /// `Ok(None)` means "this is not that shape; send it as it is": every
+    /// refusal to act here is the previous behaviour, never a new failure.
+    async fn download_accepted_fork(
+        &self,
+        who: &PeerId,
+        request: &BlockRequest<Block>,
+    ) -> Result<
+        Option<Result<(Vec<u8>, sc_network::ProtocolName), RequestFailure>>,
+        oneshot::Canceled,
+    > {
+        if request.direction != sc_network_common::sync::message::Direction::Descending {
+            return Ok(None);
+        }
+        let FromBlock::Hash(tip) = request.from else {
+            return Ok(None);
+        };
+        let total = request.max.unwrap_or(0) as usize;
+        if total <= MAX_BLOCKS_IN_RESPONSE {
+            // Already one answer: nothing to paginate.
+            return Ok(None);
+        }
+        if !request.fields.contains(BlockAttributes::HEADER) {
+            // Without headers there is no parent hash to walk down with.
+            return Ok(None);
+        }
+
+        let mut blocks: Vec<BlockData> = Vec::with_capacity(total.min(512));
+        let mut from = FromBlock::Hash(tip);
+        let mut remaining = total;
+        let mut protocol: Option<sc_network::ProtocolName> = None;
+        let mut bytes_so_far = 0usize;
+
+        while remaining > 0 {
+            let max = remaining.min(MAX_BLOCKS_IN_RESPONSE);
+            let chunk = BlockRequest::<Block> {
+                id: request.id,
+                fields: request.fields,
+                from,
+                direction: sc_network_common::sync::message::Direction::Descending,
+                max: Some(max as u32),
+            };
+            let (bytes, proto) = match self.inner.download_blocks(*who, chunk).await? {
+                Ok(v) => v,
+                Err(e) => {
+                    // Nothing collected yet: report the peer's answer verbatim.
+                    return if blocks.is_empty() {
+                        Ok(Some(Err(e)))
+                    } else {
+                        Ok(Some(Err(RequestFailure::Refused)))
+                    };
+                }
+            };
+            protocol = Some(proto);
+            let Ok(response) = BlockResponse::decode(&bytes[..]) else {
+                return if blocks.is_empty() {
+                    // Undecodable and nothing accumulated: hand the raw answer
+                    // back untouched, exactly as before this change.
+                    Ok(Some(Ok((bytes, protocol.expect("just set")))))
+                } else {
+                    Ok(Some(Err(RequestFailure::Refused)))
+                };
+            };
+            if response.blocks.is_empty() {
+                break;
+            }
+            let got = response.blocks.len();
+            let Some(lowest) = response.blocks.last() else {
+                break;
+            };
+            // The parent of the lowest block is where the next chunk starts.
+            let next = <Block::Header as Decode>::decode(&mut &lowest.header[..]).ok();
+            let next_number = next.as_ref().map(|h| *h.number());
+            let next_parent = next.as_ref().map(|h| *h.parent_hash());
+            bytes_so_far += bytes.len();
+            blocks.extend(response.blocks);
+            remaining = remaining.saturating_sub(got);
+            if bytes_so_far as u64 > MAX_RESPONSE_SIZE - 20 * 1024 {
+                break;
+            }
+            match (next_number, next_parent) {
+                (Some(n), Some(parent)) if !n.is_zero() && got == max => {
+                    from = FromBlock::Hash(parent);
+                }
+                // The peer sent a short chunk (or a header we cannot read):
+                // anything more is a guess, so return what we have.
+                _ => break,
+            }
+        }
+
+        if blocks.is_empty() {
+            return Ok(None);
+        }
+
+        let Some(protocol) = protocol else {
+            return Ok(None);
+        };
+        let response = BlockResponse { blocks };
+        Ok(Some(Ok((response.encode_to_vec(), protocol))))
     }
 
     /// What the peer's handler counts as "the same request": fields, start
@@ -1219,6 +1374,21 @@ impl<Block: BlockT> BlockDownloader<Block> for PoliteDownloader<Block> {
         // immediate refusal has no window to fall into.
         if !self.should_ask(&who) {
             return Ok(Err(RequestFailure::Refused));
+        }
+
+        // Row 228: the accepted heavier branch is downloaded by the SDK as ONE
+        // descending request from the branch tip down to our last finalized
+        // block. A peer answers at most `MAX_BLOCKS_IN_RESPONSE` (128) blocks,
+        // so a branch whose tip is more than 128 blocks below us comes back
+        // truncated, never connects to our chain, and the engine asks again
+        // with the identical request — which the repeat cap then refuses.
+        // Fork choice has already proved this branch is the one we want, so we
+        // walk it down ourselves and hand back a single response that reaches
+        // our chain.
+        if self.source.accepted_fork(&who) {
+            if let Some(outcome) = self.download_accepted_fork(&who, &request).await? {
+                return Ok(outcome);
+            }
         }
 
         let key = Self::key(who, &request);
@@ -1346,6 +1516,10 @@ where
     fn anchor_mismatch(&self, who: &PeerId) -> bool {
         self.tips.anchor_mismatch(who)
     }
+
+    fn accepted_fork(&self, who: &PeerId) -> bool {
+        self.tips.accepted_fork(who)
+    }
 }
 
 /// Why a request could not be answered. Every variant is reported to the peer
@@ -1385,6 +1559,8 @@ mod tests {
         peers: std::sync::Mutex<HashMap<PeerId, (u64, Option<bool>)>>,
         /// Peers whose claim contradicts the signed anchor.
         mismatched: std::sync::Mutex<std::collections::HashSet<PeerId>>,
+        /// Peers whose heavier branch fork choice has accepted (row 228).
+        accepted: std::sync::Mutex<std::collections::HashSet<PeerId>>,
     }
 
     impl PeerTipSource for HonestSource {
@@ -1404,6 +1580,9 @@ mod tests {
         }
         fn anchor_mismatch(&self, who: &PeerId) -> bool {
             self.mismatched.lock().unwrap().contains(who)
+        }
+        fn accepted_fork(&self, who: &PeerId) -> bool {
+            self.accepted.lock().unwrap().contains(who)
         }
     }
 
@@ -1459,6 +1638,99 @@ mod tests {
         let mut r = request(id);
         r.from = FromBlock::Number(number);
         r
+    }
+
+    /// A block hash for a height in the fake branch, so a test can name the
+    /// parent of the block below the one it asked for.
+    fn hash_of(number: u32) -> <Block as BlockT>::Hash {
+        <Block as BlockT>::Hash::from_low_u64_be(number as u64)
+    }
+
+    fn test_header(number: u32) -> <Block as BlockT>::Header {
+        <Block as BlockT>::Header::new(
+            number,
+            Default::default(),
+            Default::default(),
+            hash_of(number.saturating_sub(1)),
+            Default::default(),
+        )
+    }
+
+    /// The request `chain_sync` makes for an accepted fork: descending from the
+    /// branch tip, as many blocks as there are between it and our finalized head.
+    fn branch_request(tip: <Block as BlockT>::Hash, max: u32) -> BlockRequest<Block> {
+        BlockRequest::<Block> {
+            id: 0,
+            fields: BlockAttributes::HEADER | BlockAttributes::BODY,
+            from: FromBlock::Hash(tip),
+            direction: sc_network_common::sync::message::Direction::Descending,
+            max: Some(max),
+        }
+    }
+
+    /// A peer serving one branch, `MAX_BLOCKS_IN_RESPONSE` blocks per call, in
+    /// the wire order a real server uses (highest block first).
+    #[derive(Default)]
+    struct BranchServer {
+        calls: Mutex<Vec<(PeerId, BlockRequest<Block>)>>,
+    }
+
+    impl std::fmt::Debug for BranchServer {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.write_str("BranchServer")
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl BlockDownloader<Block> for BranchServer {
+        fn protocol_name(&self) -> &sc_network::ProtocolName {
+            static NAME: std::sync::OnceLock<sc_network::ProtocolName> = std::sync::OnceLock::new();
+            NAME.get_or_init(|| sc_network::ProtocolName::from("/test/sync/2"))
+        }
+
+        async fn download_blocks(
+            &self,
+            who: PeerId,
+            request: BlockRequest<Block>,
+        ) -> Result<Result<(Vec<u8>, sc_network::ProtocolName), RequestFailure>, oneshot::Canceled>
+        {
+            self.calls.lock().unwrap().push((who, request.clone()));
+            let start: u32 = match request.from {
+                FromBlock::Number(n) => n,
+                FromBlock::Hash(h) => {
+                    // The test writes the height into the low bytes of the hash.
+                    let bytes: [u8; 32] = h.encode().try_into().expect("32-byte hash");
+                    u32::from_be_bytes([bytes[28], bytes[29], bytes[30], bytes[31]])
+                }
+            };
+            let max = request.max.unwrap_or(0).min(MAX_BLOCKS_IN_RESPONSE as u32);
+            let mut blocks = Vec::new();
+            let mut n = start;
+            while blocks.len() < max as usize && n > 0 {
+                blocks.push(BlockData {
+                    hash: hash_of(n).encode(),
+                    header: test_header(n).encode(),
+                    body: Vec::new(),
+                    receipt: Vec::new(),
+                    message_queue: Vec::new(),
+                    justification: Vec::new(),
+                    is_empty_justification: false,
+                    justifications: Vec::new(),
+                    indexed_body: Vec::new(),
+                });
+                n -= 1;
+            }
+            let encoded = BlockResponse { blocks }.encode_to_vec();
+            Ok(Ok((encoded, self.protocol_name().clone())))
+        }
+
+        fn block_response_into_blocks(
+            &self,
+            _request: &BlockRequest<Block>,
+            _response: Vec<u8>,
+        ) -> Result<Vec<MessageBlockData<Block>>, BlockResponseError> {
+            Ok(Vec::new())
+        }
     }
 
     /// The three cases the change is judged on, expressed against the same
@@ -1669,21 +1941,122 @@ mod tests {
     #[test]
     fn a_peer_that_mismatches_the_signed_anchor_is_never_asked_for_blocks() {
         // Ahead of us, on our chain by the height rule — still refused.
-        assert!(!may_ask_for_blocks_anchored(180_000, 307_300, None, true));
+        assert!(!may_ask_for_blocks_anchored(
+            180_000, 307_300, None, true, false
+        ));
         assert!(!may_ask_for_blocks_anchored(
             180_000,
             69_295,
             Some(true),
-            true
+            true,
+            false
         ));
         // No mismatch: the old rules apply unchanged.
-        assert!(may_ask_for_blocks_anchored(180_000, 307_300, None, false));
+        assert!(may_ask_for_blocks_anchored(
+            180_000, 307_300, None, false, false
+        ));
         assert!(!may_ask_for_blocks_anchored(
             297_825,
             280_600,
             Some(false),
+            false,
             false
         ));
+        // Row 228: an accepted heavier branch is the one exception to both
+        // refusals — that peer is the only place the branch can come from.
+        assert!(may_ask_for_blocks_anchored(
+            297_825,
+            280_600,
+            Some(false),
+            true,
+            true
+        ));
+        assert!(may_ask_for_blocks_anchored(
+            297_825,
+            280_600,
+            Some(false),
+            false,
+            true
+        ));
+    }
+
+    /// Row 228: an accepted heavier branch that is far more than
+    /// `PEER_BEHIND_MARGIN` behind us is still downloaded from that peer, and
+    /// the whole branch is fetched even though a peer answers at most 128
+    /// blocks per request. Without this the engine asks once, gets nothing that
+    /// connects, asks again, and the third identical request is refused.
+    #[tokio::test]
+    async fn an_accepted_heavier_branch_is_fetched_whole_in_128_block_chunks() {
+        let inner = Arc::new(BranchServer::default());
+        let mut source = HonestSource {
+            our_best: 400,
+            ..Default::default()
+        };
+        let fork = PeerId::random();
+        source
+            .peers
+            .lock()
+            .unwrap()
+            .insert(fork, (200, Some(false)));
+        source.mismatched.lock().unwrap().insert(fork);
+        source.accepted.lock().unwrap().insert(fork);
+        let polite = PoliteDownloader::new(inner.clone(), Arc::new(source));
+
+        let out = polite
+            .download_blocks(fork, branch_request(hash_of(200), 200))
+            .await;
+        let Ok(Ok((bytes, _))) = out else {
+            panic!("the accepted branch must be fetched, got {out:?}");
+        };
+        let decoded = BlockResponse::decode(&bytes[..]).expect("one encoded response");
+        assert_eq!(
+            decoded.blocks.len(),
+            200,
+            "the whole branch, not 128 blocks"
+        );
+        let first =
+            <<Block as BlockT>::Header as Decode>::decode(&mut &decoded.blocks[0].header[..])
+                .expect("header");
+        let last = <<Block as BlockT>::Header as Decode>::decode(
+            &mut &decoded.blocks.last().unwrap().header[..],
+        )
+        .expect("header");
+        assert_eq!(
+            *first.number(),
+            200,
+            "the response starts at the branch tip"
+        );
+        assert_eq!(*last.number(), 1, "and reaches the bottom of the range");
+
+        let calls = inner.calls.lock().unwrap();
+        assert_eq!(calls.len(), 2, "two chunks of at most 128 blocks");
+        assert_eq!(calls[0].1.max, Some(128));
+        assert_eq!(calls[1].1.max, Some(72));
+        assert_eq!(calls[1].1.from, FromBlock::Hash(hash_of(72)));
+    }
+
+    /// The same request to a peer whose branch fork choice did NOT accept is
+    /// refused exactly as before: the ban-avoidance rule is not weakened.
+    #[tokio::test]
+    async fn a_branch_nobody_accepted_is_still_refused() {
+        let inner = Arc::new(BranchServer::default());
+        let mut source = HonestSource {
+            our_best: 400,
+            ..Default::default()
+        };
+        let peer = PeerId::random();
+        source
+            .peers
+            .lock()
+            .unwrap()
+            .insert(peer, (200, Some(false)));
+        source.mismatched.lock().unwrap().insert(peer);
+        let polite = PoliteDownloader::new(inner.clone(), Arc::new(source));
+        let out = polite
+            .download_blocks(peer, branch_request(hash_of(200), 200))
+            .await;
+        assert!(matches!(out, Ok(Err(RequestFailure::Refused))));
+        assert_eq!(inner.calls.lock().unwrap().len(), 0, "nothing on the wire");
     }
 
     #[tokio::test]
