@@ -3,6 +3,15 @@
 Newest first. Written by the release loop; read by the assistant, who relays anything
 that needs Jeremy. `[TRIAGE]` = a decision waiting on the assistant.
 
+## 05:26 PT — 0.3.65 box 8 (row 228): eighth rig ran the whole path and still no import decision; wrapper instrumented, ninth rig dispatched [no triage]
+
+- A0: no CI verdict read this run for the pushed fix `8b5b718` (build in flight/queued); not blocked on it — this box is a rig proof, not a build.
+- Eighth rig (BIN `-v8`, 13:01:14Z–13:20:18Z), A.log verbatim: `05:17:15.717 fork-choice: … reorg=accepted depth=49`; `05:17:15.721 block-serving: asking … 180 blocks behind our tip #229 — fork choice accepted its heavier branch`; `05:17:15.742 downloading the accepted heavier branch … 180 blocks … 2 chunk(s)`; then 180 `🆕 Imported #91..#270` in 0.3 s with `best: #229` unchanged. **Zero `import: the branch at` lines.**
+- The guard is silent, so two causes remain and cannot be separated from it: (a) `WorkFirstImport` is not in the sync import path, (b) `branch_work`/`chain_work` returned `None`. Neither is a guessable fact — instrumented instead.
+- **Instrumented 05:25 PT**: one `import: fork block #N (parent …, best #M) — branch_work=… chain_work=… (#228)` line per fork block. fmt clean; release build 05:25 PT; `strings` count 1. The next log answers (a) vs (b) vs (c) "measured lighter" directly.
+- **Ninth rig dispatched 13:20:43Z** — `BIN=/tmp/row228/gpn-node-ea10413-v9`, phase 3 ~05:36 PT. Not waited on. Box 228 stays unticked.
+- No blocker, no decision needed.
+
 ## 05:02 PT — 0.3.65 box 8 (row 228): seventh rig proved the gate + download; the import wrapper never ran because the SDK had already set fork_choice; fixed, eighth rig dispatched [no triage]
 
 - A0: no CI run existed for `origin/main` HEAD `ea104134…f949` at run start (`total_count: 0`); nothing waited on. Code fix pushed as `71d60b3`, which started a build for the next run to read.

@@ -300,7 +300,17 @@ impl BlockImport<Block> for WorkFirstImport {
                 let hash = block.post_hash.unwrap_or_else(|| block.header.hash());
                 let number = u64::from(*block.header.number());
                 let ours = chain_work(&self.client, u64::from(info.best_number));
-                if let (Some(theirs), Some(ours)) = (branch_work(&self.client, hash), ours) {
+                let theirs = branch_work(&self.client, hash);
+                // Run 8 (05:17:15) again produced no decision line. Whether that
+                // is a wrapper that is never called or a measurement that
+                // returns `None` cannot be told from a silent guard, so say
+                // which, per block. Cheap, and it is the experiment.
+                log::info!(
+                    "import: fork block #{number} (parent {parent:?}, best #{best}) — \
+                     branch_work={theirs:?} chain_work={ours:?} (#228)",
+                    best = info.best_number
+                );
+                if let (Some(theirs), Some(ours)) = (theirs, ours) {
                     if force_branch_best(parent != info.best_hash, theirs, ours) {
                         log::info!(
                             "import: the branch at #{number} ({hash:?}) carries work {theirs} vs \
