@@ -35,6 +35,22 @@
     return RE.test(value) ? value : null;
   }
 
+  /* The raw `?ref=` / `?r=` value, unvalidated, or null when the parameter is
+     absent. A landing page needs this to tell "no code" apart from "a code
+     that is not valid", so it can name the malformed one instead of silently
+     behaving as if no link had been followed. Never render this value. */
+  function rawFromSearch(search) {
+    var params;
+    try {
+      params = new URLSearchParams(search || "");
+    } catch (e) {
+      return null;
+    }
+    var raw = params.get("ref");
+    if (raw === null) raw = params.get("r");
+    return raw;
+  }
+
   /* `?ref=CODE` or `?r=CODE`. Anything invalid (wrong length, bad char,
      percent-encoded payload, `<script>`) yields null and is ignored. */
   function fromSearch(search) {
@@ -71,6 +87,7 @@
     MAX: MAX,
     RE: RE,
     validate: validate,
+    rawFromSearch: rawFromSearch,
     fromSearch: fromSearch,
     argFor: argFor,
     renderInto: renderInto

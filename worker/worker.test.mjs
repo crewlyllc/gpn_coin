@@ -343,6 +343,38 @@ test(".html is a PERMANENT redirect to the clean URL", async () => {
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
+// /r/<code> — the short referral alias (row 225)
+// ─────────────────────────────────────────────────────────────────────────────
+
+test("/r/<code> permanently redirects to /join?ref=<code>, keeping the code", async () => {
+  const env = { ASSETS: { fetch: async () => new Response("asset", { status: 200 }) } };
+  const ctx = { waitUntil() {} };
+
+  const r = await worker.fetch(new Request("https://gpncoin.ai/r/GPN-ZYCU-4W49-6R"), env, ctx);
+  assert.equal(r.status, 301);
+  assert.equal(r.headers.get("location"), "/join?ref=GPN-ZYCU-4W49-6R");
+
+  // A malformed code still reaches the page that names it as invalid.
+  const bad = await worker.fetch(new Request("https://gpncoin.ai/r/%3Cscript%3E"), env, ctx);
+  assert.equal(bad.status, 301);
+  assert.equal(bad.headers.get("location"), "/join?ref=%3Cscript%3E");
+
+  // `/join` itself is an asset (join.html); it must not be redirected.
+  let seen = null;
+  const page = await worker.fetch(
+    new Request("https://gpncoin.ai/join?ref=GPN-ZYCU-4W49-6R"),
+    { ASSETS: { fetch: async (r) => (seen = r, new Response("join", { status: 200 })) } },
+    ctx,
+  );
+  assert.equal(page.status, 200);
+  assert.equal(new URL(seen.url).pathname, "/join");
+
+  // Deeper paths and POSTs are not the alias.
+  const deep = await worker.fetch(new Request("https://gpncoin.ai/r/a/b"), env, ctx);
+  assert.equal(deep.status, 200);
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Signed release manifest (/releases.json) — see docs/updates.md
 // ─────────────────────────────────────────────────────────────────────────────
 

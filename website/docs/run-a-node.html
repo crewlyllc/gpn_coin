@@ -95,15 +95,20 @@ takes the same flag itself, on first run:</p>
 ./gpn_node --ref team-alpha            # standalone (no --setup)
 ./gpn_node --ref=team-alpha            # --ref=CODE works too
 </code></pre>
-<p><strong>Share links.</strong> <code>https://gpncoin.ai/download?ref=team-alpha</code> (also <code>?r=</code>) renders
-the code into the page's copy-paste commands: the Windows block becomes
+<p><strong>Share links.</strong> Share <code>https://gpncoin.ai/join?ref=team-alpha</code> (short alias
+<code>https://gpncoin.ai/r/team-alpha</code>, which 301s to the same place). <code>/join</code> is a landing
+page, not a download: it says what GPN is, what the code means, and shows the install commands
+with the code already in them — the visitor reaches the download only by choosing to. The page
+renders the code into those commands: the Windows block becomes
 <code>powershell ... -File C:\gpn\bin\install.ps1 --ref team-alpha</code> and the Linux
 block <code>./install.sh --ref team-alpha</code>. The Windows installer records the code
 itself (write-once, same file and rule as <code>install.sh</code>), so the referral
 survives the first <code>gpn_node</code> start. The page validates the code against
-<code>^[A-Za-z0-9_-]{4,32}$</code> and silently ignores anything else (that is the XSS
-boundary: the value is written as text, never as markup), and remembers it for
-the browser session so it survives clicking around the site.</p>
+<code>^[A-Za-z0-9_-]{4,32}$</code> and names a malformed one as invalid rather than guessing
+(that is the XSS boundary: the value is written as text, never as markup), and remembers it
+for the browser session so it survives clicking around the site. The download page still
+accepts a referral parameter for links already in circulation, but it is no longer the link
+anyone is asked to share.</p>
 <ul>
 <li>Write-once: the binary stores the code only if <code>$GPN_PREFIX/referral</code> does not
   exist yet; an existing value wins and the new <code>--ref</code> is ignored with a log

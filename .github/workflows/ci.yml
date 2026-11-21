@@ -344,6 +344,13 @@ jobs:
       - name: Referral links (website ?ref= validation)
         run: node website/tests/referral.test.js
 
+      # Row 225: the share link is /join?ref=CODE (alias /r/CODE), a landing page
+      # with the code baked into four install commands — never a /download URL.
+      # Also runs the page's own script against a stub DOM, so "a malformed code
+      # is named as invalid" is observed, not merely written down.
+      - name: Referral join page (/join + /r alias + four commands)
+        run: node website/tests/join.test.js
+
       # Join form: exactly one success message and exactly one failure address
       # (crewlyllc@gmail.com, never shown on success). Pure Node, no browser.
       - name: Join form copy + fallback address

@@ -197,6 +197,28 @@ export default {
           },
         });
       }
+
+      // Row 225: `/r/<code>` is the short referral alias. A referral link is
+      // shared as `/join?ref=<code>` — a landing page, not a download — and the
+      // alias 301s to it with the code preserved. The code is carried through
+      // verbatim (re-encoded), never interpreted here: `/join` is the page that
+      // validates it and names a malformed one as invalid.
+      const alias = path.match(/^\/r\/([^/]+)$/);
+      if (alias) {
+        let code = alias[1];
+        try {
+          code = decodeURIComponent(code);
+        } catch {
+          // Leave the raw text; the page will reject it and say so.
+        }
+        return new Response(null, {
+          status: 301,
+          headers: {
+            location: "/join?ref=" + encodeURIComponent(code),
+            "cache-control": "public, max-age=86400",
+          },
+        });
+      }
     }
 
     if (path === "/seeds.json" || path === "/seeds" || path === "/bootnodes.txt" || path === "/seeds.txt") {

@@ -61,15 +61,21 @@ takes the same flag itself, on first run:
 ./gpn_node --ref=team-alpha            # --ref=CODE works too
 ```
 
-**Share links.** `https://gpncoin.ai/download?ref=team-alpha` (also `?r=`) renders
-the code into the page's copy-paste commands: the Windows block becomes
+**Share links.** Share `https://gpncoin.ai/join?ref=team-alpha` (short alias
+`https://gpncoin.ai/r/team-alpha`, which 301s to the same place). `/join` is a
+landing page, not a download: it says what GPN is, what the code means, and
+shows the install commands with the code already in them — the visitor reaches
+the download only by choosing to. The page renders the code into those
+commands: the Windows block becomes
 `powershell ... -File C:\gpn\bin\install.ps1 --ref team-alpha` and the Linux
 block `./install.sh --ref team-alpha`. The Windows installer records the code
 itself (write-once, same file and rule as `install.sh`), so the referral
 survives the first `gpn_node` start. The page validates the code against
-`^[A-Za-z0-9_-]{4,32}$` and silently ignores anything else (that is the XSS
-boundary: the value is written as text, never as markup), and remembers it for
-the browser session so it survives clicking around the site.
+`^[A-Za-z0-9_-]{4,32}$` and names a malformed one as invalid rather than
+guessing (that is the XSS boundary: the value is written as text, never as
+markup), and remembers it for the browser session so it survives clicking
+around the site. The download page still accepts a referral parameter for links already in
+circulation, but it is no longer the link anyone is asked to share.
 
 - Write-once: the binary stores the code only if `$GPN_PREFIX/referral` does not
   exist yet; an existing value wins and the new `--ref` is ignored with a log
