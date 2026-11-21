@@ -3,6 +3,33 @@
 Newest first. Written by the release loop; read by the assistant, who relays anything
 that needs Jeremy. `[TRIAGE]` = a decision waiting on the assistant.
 
+## 11:12 PT — 0.3.65 IS PUBLISHED (windows run green, cosign Verified OK, release-cut exit 0); §5/§6/§7 closed 13/13 [no triage]
+
+- **A0**: `main` HEAD `50ed5f7` = `total_count: 0` (docs commit, `paths-ignore` holding). No red to triage.
+- **§5 windows (the box the last four runs were parked on)**: run **44926165305** finished
+  `conclusion = success`, 18:01:51Z → 18:27:34Z, all 23 steps green — incl. 21 keyless sign, 22 provenance
+  gate, 23 publish. So the 78-minute queue was contention, exactly as diagnosed; nothing needed cancelling.
+- **§5 boxes 3–7 ticked** (7/7): asset `gpn-windows.zip` 248,752,159 B
+  `sha256 38d9ee82…0bede` + `.bundle` 9,049 B. Downloaded both by API and re-hashed locally (matched the
+  API digests), then `cosign verify-blob … ⇒ Verified OK` against the sha256 that will ship.
+- **§6 closed (2/2)**: windows strings scanned — `reorg=` 1, `work ours=` 1, `gpn-forked` 2 in
+  `gpn-node.exe`; `valid_tasks` 1, `task_models` 1, `serves task=` 2 in `gpn_scheduler.exe` — the same
+  literals the linux tarball proved (previously the pending half). `--version` from the *installed*
+  box-1 binary: `gpn-node.exe 0.3.65`, `LastWriteTimeUtc 18:23:51Z` (the build's own deploy step).
+- **§7 closed (4/4)** — **the release is out.** `release-cut.sh --version 0.3.65`: content scan `5 marker(s)
+  present in each` platform, mirror digests re-verified on `crewlyllc`, signed manifest, commit **4e77ca1**
+  pushed, `live manifest is 0.3.65`, anonymous download digests match, `released 0.3.65`.
+- **§7b**: GitHub + mirror asset digests identical on both repos (ticked). `download.html` was **still
+  serving 0.3.64** — found, fixed, pushed `a9f1b17`, live page now `0.3.65`. `seeds.json` has no version
+  field (vacuous, recorded). Left open only on `docs/run-a-node.html`'s `Verified against … 0.3.64`
+  stamp: 12 pages share it and re-stamping it before actually walking the install path on 0.3.65 would
+  be a fake verification — that belongs to §9/§10.
+- **Evidence correction made mid-run**: I first wrote the §5 box-6 note as "the `releases.json` digest",
+  then checked and found `releases.json` still served 0.3.64 (release-cut had not run). Wording fixed to
+  cite the GitHub release API digest, which is what the verifier actually bound.
+- Next run: §7b box 1's last condition via §9/§10 (fleet nodes on 0.3.65), then §8 stranger-view, then
+  §8's capability list and the filing boxes.
+
 ## 10:18 PT — 0.3.65 §5 windows build is stepping (step 10/23, 19 min in); §4 header closed on the ASCII-fix SHA [no triage]
 
 - **A0**: `main` HEAD `44817f057bdc` = `total_count: 0` — the 10:02 docs commit, `paths-ignore` holding.
