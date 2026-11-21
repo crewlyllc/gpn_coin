@@ -3,6 +3,35 @@
 Newest first. Written by the release loop; read by the assistant, who relays anything
 that needs Jeremy. `[TRIAGE]` = a decision waiting on the assistant.
 
+## 23:55 PT — no box worked: my checkout was one commit stale and the box was already live [no triage]
+
+- **A0**: `GET /commits/main` → **`8e6a2b5`**; `actions/runs?head_sha=8e6a2b5` → **0 runs** (docs-only).
+  The previous run's CI (run **44879998162**, `a13512d`) was still **queued** at 07:23Z → not waited on.
+- **What went wrong, in mechanism terms**: I read the checklist from **local HEAD `dd580c4`**, where
+  box 5 (row 225) was still unticked, and spent this run building a `/join` page, a `/r/:code`
+  `_redirects` rule and a JS BLAKE2b for the checksum — all of which **already existed on `main`** in
+  `bb6d8a3`/`a13512d` (`website/join.html`, `worker/worker.js`, `website/tests/join.test.js`). I had
+  asked the API for main's sha at the start and **did not compare it with my own HEAD**; the API answer
+  and the working tree disagreed by one commit and I never reconciled them. Same failure class as the
+  `rev-parse origin/main` trap in TOOLS.md, one layer closer: the stale thing was the checkout itself.
+- **Repair**: fetched, `git reset --hard 8e6a2b5`; the duplicate work is parked on local branch
+  `dup-225` (never pushed, so the live page is untouched). Verified the row is genuinely done rather
+  than claimed: `curl https://gpncoin.ai/join?ref=GPN-ZYCU-4W49-6R` → **200**, 4 `data-ref-arg`
+  placeholders; `/r/GPN-ZYCU-4W49-6R` → **301** → `/join?ref=…`. Box 5 stays ticked; its evidence is real.
+- **Cost of the mistake**: one run's work discarded. **Lesson written into TOOLS.md**: before working a
+  box, `git fetch` and compare `git rev-parse HEAD` against `GET /commits/main` — a docs-only commit is
+  invisible in `git log --oneline -1` if you never fetched, and the box you are about to "fix" may
+  already be ticked and live.
+- **Next run, box 6 = row 226** (referral visibility is operator-only). Plan, with the one design call
+  already made so it is work and not a question: the count endpoint belongs on the **access point
+  (`:8092`)**, because that is the only process that holds `referral-registry.json`; `GET
+  /api/referrals?code=&sig=` verifies an **sr25519 signature over `gpn-referrals-v1‖code`** from the
+  address the code derives from (`verify_for_address` already recomputes that), answers
+  `{code, referred, first_seen, recent[]}` with **no addresses**, and `401` otherwise; admin view is
+  `gpn-referrals --all` reading the registry file on the AP host. Tests: valid sig → count, wrong sig →
+  401, someone else's code → 401, response has no address strings, and a grep proving no other route
+  returns third-party attributions.
+
 ## 23:40 PT — 0.3.65 box 5 (row 225) DONE: the share link is /join, and /r works on the live site [no triage]
 
 - **A0**: `GET /commits/main` → `dd580c4` (box 4 ticked) → `actions/runs?head_sha=…` → **no run at all**
