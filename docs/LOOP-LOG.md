@@ -3,6 +3,30 @@
 Newest first. Written by the release loop; read by the assistant, who relays anything
 that needs Jeremy. `[TRIAGE]` = a decision waiting on the assistant.
 
+## 21:00 PT — 0.3.64: peer-stability box ticked on measured evidence; cadence window is 73 blocks short, handle set for the 21:31 timer run [no triage]
+
+- **A0**: `GET /commits/main` → HEAD `0b20b74`; `GET /actions/runs?head_sha=0b20b74` → **`total_count: 0`**
+  (docs-only commit, `ci.yml` paths-ignore — expected, not a missing build). No failure to diagnose.
+- **Box ticked (§10) — "Peers hold >5 minutes; no new `Reason:` bans; no unexpected `gpn-isolated`/`gpn-forked`.**
+  Measured on the post-update binary (restart `20:50:33`, pid 3436525): peer-count histogram over
+  `20:51:00–20:58:12` → **85 × `Idle (3 peers)`**, 2 × `1 peers` (the two re-dial samples right after
+  restart), 3 peers held **20:51:12 → 20:58:12 (7 min 0 s)**; `grep -icE 'Reason:|gpn-isolated|gpn-forked'`
+  → **0**; `canonical/anchor-match=true` **35**, `anchor-match=false` **0**; `system_health`
+  `{"peers":3,"isSyncing":false}`, `system_peers` → 3 AUTHORITY peers (#337489–#337494).
+  The previous run had ticked nothing here because the hold was tied to the 100-block window; the box's
+  three clauses are independently measurable and all pass, so it is ticked on its own evidence.
+- **Not ticked — §3b 217/218, §10 last box, §10b, §0b filing (both):** all wait on the first 100-block
+  window authored entirely by 0.3.64. Checked the gate state instead of guessing: `~/.gpn/cadence-gate.state`
+  `checked_at 2026-11-21T04:51:20Z` window `337367..337466`, `RESULT: FAIL` — the **same two pre-deploy gaps**
+  (67.90 s / 63.27 s) as the 21:02 run, unchanged and authored by 0.3.63. Chain head is **#337496** (hex
+  `0x52655`), i.e. 27 of the 100 post-deploy blocks exist; the clean window needs head ≈#337567 (≈21:16 PT).
+  `gpn-cadence-gate.timer` next fires **21:01** then **21:31** — **21:31 is the first clean one**. Handle written
+  into the checklist; the run ended rather than sleeping ~19 min inside it.
+- **Next run (≈21:27+):** read `~/.gpn/cadence-gate.state`; if `exit 0`, tick 217, 218, §10's last box,
+  then run §10b `release-timing.py 0.3.64`, the two §0b filing boxes, and mark GPN-LIST rows COMPLETE.
+  If it still FAILs with unexplained >3x gaps on **post-deploy** blocks, that is a real 217 failure —
+  read the suspect gaps against `sealer:` lines and fix, do not re-run the timer for a nicer number.
+
 ## 21:05 PT — 0.3.64 IS RELEASED and the fleet runs it: cut, publish, site stamp, self-update all done; only the 218 behaviour proof waits on a clean 100-block window [no triage]
 
 - **A0**: origin/main HEAD was `d6c0e37` → `total_count: 0` (docs-only, paths-ignore, expected).
