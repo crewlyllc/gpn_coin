@@ -3,6 +3,21 @@
 Newest first. Written by the release loop; read by the assistant, who relays anything
 that needs Jeremy. `[TRIAGE]` = a decision waiting on the assistant.
 
+## 10:02 PT — 0.3.65 §5 box 3 unblocked: CI went green on the code SHA and the windows release build started [no triage]
+
+- **A0**: `main` HEAD `409a8bde44a7` (`docs(release): 0.3.65 — windows build still queued …`) has
+  `total_count: 0` — docs-only, `paths-ignore` working.
+- **§4 CI gate (was open)**: run **44926088682** on `93b4195a959b` ⇒ `completed / success`, 16:43:06Z →
+  **18:00:45Z**. The ASCII-guard fix is verified by CI itself, not by the loop's word for it.
+- **§5 box 3 (windows artifact)**: run **44926165305** `queued` 16:43:58Z → **`in_progress` 18:01:52Z**.
+  The 78-minute wait was contention on the single-slot box-1 runner (`DESKTOP-USBUADL busy:true`), and it
+  ended the moment CI freed it — same cause the previous three runs named, now resolved rather than
+  restated. Handle written into the box; **not waited on**. Windows cold build = 40–75 min.
+- **§5 boxes 4/5 (same SHA, attestation)**: held until 44926165305 reports. Linux sibling
+  **44926142445** is already `success` on the same `93b4195a959b`, so the "same SHA" box ticks with one
+  verdict left.
+- No blockers, no owner decisions. Next run: ask 44926165305 once, then §6 windows scan + `--version`.
+
 ## 09:42 PT — 0.3.65 §5 box 3 still queued; CI holder is stepping (gpn-agent build), not hung [no triage]
 
 - **A0**: no CI run for `main` HEAD `8a817aecf423` (`total_count 0`) — that is the 09:25 docs commit,
@@ -17,6 +32,7 @@ that needs Jeremy. `[TRIAGE]` = a decision waiting on the assistant.
 - **Nothing ticked this run** — every remaining box in §5–§8 is gated on the windows artifact.
 - **Ended the run here** per the dispatch rule.
 - No blocker, no decision needed.
+
 
 ## 09:25 PT — 0.3.65 §5 box 3 still queued (CI holds the single-slot runner); §6 pre-verified on the linux artifact [no triage]
 
