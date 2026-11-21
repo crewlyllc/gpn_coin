@@ -3,6 +3,36 @@
 Newest first. Written by the release loop; read by the assistant, who relays anything
 that needs Jeremy. `[TRIAGE]` = a decision waiting on the assistant.
 
+## 21:37 PT — §C: 0.3.65 opened, all 9 NEW rows bundled (221–229), checklist generated, one push [no triage]
+
+- **A0**: HEAD `163b927` → `GET /actions/runs?head_sha=163b927` → **1 run, `pending`** (44870322382).
+  That commit carries `scripts/release-timing.py` (the `--follow` fix), so a build is *expected* here —
+  `paths-ignore` did not swallow it. Not waited on. Two earlier runs on `75a3460`/`07ba323`
+  (44867740901, 44868181586) show `completed cancelled` ~6 min after creation = concurrency-group
+  supersede, not a failure. Runner state: `DESKTOP-USBUADL online busy=true`, `openclawassist online
+  busy=false` — contention, not a fault.
+- **State check**: `awk` over the state column → **0 IN-PROGRESS**, 190 + 2 COMPLETE, 7 BLOCKED,
+  **9 NEW (221–229)**. 0.3.64 archived with 0 unticked boxes, so §B was already satisfied and the
+  loop is at §C.
+- **§C done**: rows 221–229 `NEW → IN-PROGRESS` (9 flipped) · `bump-version.py patch` → **0.3.65**
+  (15 manifests + `network.json` + 14 lockfile entries) · `bump-version.py --check` →
+  `lockstep: 15 manifest(s) and 14 lockfile entr(ies) agree`, `gpn version: 0.3.65` · CHANGELOG `[0.3.65]`
+  written from the nine row titles (no `_TODO_`) · `make-release-checklist.py 0.3.65` → **9 in-progress,
+  7 blocked rows** in `docs/releases/0.3.65.md`. One commit `385e6d9`, one push to `main`.
+- **Bundle shape**: 221 task vocabulary + `/v1/jobs` dispatcher · 222 provider task matrix · 223
+  wallet-derived referral codes · 224 operator-facing code surface (dashboard/`--referral`/`/api/referral`) ·
+  225 `/join?ref=` share link · 226 operator-only referral visibility · 227 `gpn-referrals --export` ·
+  228 the reorg band 33–288 that accepts and never downloads · 229 retarget constants vs the shipped
+  0.3.62 artifact. 228 and 229 are real defects found by the staged row-194 run and belong ahead of
+  the referral surface in priority, even though the checklist lists 221 first.
+- **Generator nit (cosmetic, not fixed in code)**: row 223's title contains a second `done when`
+  clause, so the generated box was truncated mid-title; that one box's title/`done when` line was
+  repaired by hand in `0.3.65.md`. The other 8 boxes are clean. Worth teaching
+  `make-release-checklist.py` to split on the *last* `— done when:` — a `scripts/` change, deferred.
+- **Next run**: box 1 of `docs/releases/0.3.65.md` — 221 (task vocabulary + dispatcher), which is code,
+  so the change is written and tested locally, not gated on the pending CI run. No decision needed;
+  no [TRIAGE].
+
 ## 21:20 PT — 0.3.64 is FINISHED and FILED: cadence gate PASS on a fully 0.3.64-authored window; 217 + 218 COMPLETE; §10b timing recorded (and its tool fixed) [no triage]
 
 - **A0**: HEAD `5b1ffc2` → `GET /actions/runs?head_sha=` → **`total_count: 0`** (docs-only commit,
