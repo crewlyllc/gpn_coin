@@ -1,3 +1,24 @@
+## 13:12 PT — 0.3.65 closed; 0.3.66 bundled (230/231/232) and checklist generated [no triage]
+
+- **A0**: `origin/main` == local HEAD `77ea397f1590538061332eb7a7e20ad5bdc09c87` (docs-only
+  "loop log: 0.3.65 finished"); `GET /actions/runs?head_sha=<full 40>` ⇒ `total_count: 0` — expected
+  under `ci.yml` paths-ignore. Nothing waited on, nothing in flight that blocks a bundle.
+- **B satisfied → C executed**: 0.3.65 checklist is filed (`docs/releases/archive/0.3.65.md`, INDEX
+  row present), `releases.json` serves 0.3.65 and the process reports `0.3.65` (§10 box 1, 12:53 PT),
+  and rows 221–229 are `COMPLETE 0.3.65` (done in the 13:05 run).
+- **Bundled** the only three `NEW` rows — **230** (confirm failure must name the child's cause),
+  **231** (`register_provider` call_index 0 must be `Pays::No`), **232** (purge "paid registration"
+  language). Marked `IN-PROGRESS`; nothing deleted.
+- **Version**: `scripts/bump-version.py patch` → **0.3.66**; `--check` ⇒ `lockstep: 15 manifest(s)
+  and 14 lockfile entr(ies) agree`; `network.json latest_version` → 0.3.66; CHANGELOG section
+  written (no `_TODO_`).
+- **Checklist**: `scripts/make-release-checklist.py 0.3.66` ⇒ `docs/releases/0.3.66.md` (3 in-progress).
+- **Tooling fix found while generating**: the generator took the checklist's `done when:` line from
+  the *discovery* column, so every box would have quoted "found 2026-11-21 …" instead of its
+  acceptance criteria (0.3.66's 231/232 rows put the clause mid-description). Now it takes the
+  clause from the description when present. Same commit.
+- **Next run**: start at 0.3.66 box 1 (§1 of the checklist), one box per run.
+
 ## 12:20 PT — §8 stranger-download proof: both assets match the signed manifest byte-for-byte  [no triage]
 
 - **A0**: `origin/main` was `3ee5cb3d386e1992e7a564b9b1c5dd0861b6df23` ("release 0.3.65: §7b capability

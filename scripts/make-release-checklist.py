@@ -53,7 +53,12 @@ def main():
         short = short.replace("**", "").strip()
         short = (short[:110] + "…") if len(short) > 110 else short
         section.append(f"- [ ] **{iid} — {short}**")
-        accept = re.sub(r"^done when:\s*", "", accept)
+        # the acceptance clause normally lives at the end of the description
+        # column ("… — done when: …"); the fourth column is the discovery note.
+        low = title.lower()
+        if "done when:" in low:
+            accept = title[low.index("done when:") + len("done when:"):]
+        accept = re.sub(r"^done when:\s*", "", accept.strip())
         section.append(f"      - done when: {accept[:200]}")
         section.append("      - notes:")
     # BLOCKED rows are deliberately NOT added (owner decision 2026-11-18): a release

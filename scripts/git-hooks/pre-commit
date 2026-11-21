@@ -13,7 +13,17 @@ source_changed=$(git diff --cached --name-only | grep -E '^(gpn-agent/src|gpn-no
 [ -z "$source_changed" ] && exit 0
 
 # A published version is CLOSED: a deep clone already served it to strangers.
-published=$(/usr/bin/python3 -c "import json;print(json.load(open('network.json')).get('latest_version',''))" 2>/dev/null)
+#
+# `published` must be the version that was actually PUBLISHED, not network.json's
+# latest_version — bump-version.py sets that to the version being *bundled*, so
+# from the bump commit onward it names a release nobody can download yet. Using it
+# made the hook refuse the very commit that opens a bundle (2026-11-21, 0.3.66).
+# The published record is releases/INDEX.md: a row is added there only after the
+# checklist is fully ticked and the signed manifest is live.
+published=$(sed -n 's/^| \([0-9][0-9.]*\) |.*$/\1/p' docs/releases/INDEX.md 2>/dev/null | sort -V | tail -1)
+if [ -z "$published" ]; then
+  published=$(/usr/bin/python3 -c "import json;print(json.load(open('network.json')).get('latest_version',''))" 2>/dev/null)
+fi
 # The OPEN bundle is the newest checklist version that is NEWER than what is published.
 # Old checklists lying around (0.3.52–0.3.59 are still unfiled) must not count as "a bundle is open".
 highest=$(ls docs/releases/[0-9]*.md 2>/dev/null | sed 's#.*/##; s#\.md$##' | sort -V | tail -1)

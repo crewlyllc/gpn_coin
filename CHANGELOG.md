@@ -8,6 +8,37 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 versions are [Semantic Versioning](https://semver.org/spec/v2.0.0.html), with
 the GPN-specific meaning of each level documented in `docs/updates.md`.
 
+## [0.3.66] - 2026-11-21
+
+Bumped from 0.3.65 (`scripts/bump-version.py patch`).
+
+**Registering a provider becomes free on every path, and the product stops
+telling people it costs money.** A failed update on a fresh machine now reports
+why the node died instead of only that it did.
+
+### Added
+- **A confirm failure that names its cause (row 230).** When the child node exits
+  before the first health poll, the failure carries the child's exit code, the
+  first stderr line and the last line of the node log — so a missing ollama reads
+  "ollama not found (exit 69)" instead of "no process ever appeared". The same
+  evidence is written into `last-exit.json`.
+
+### Changed
+- **`register_provider` (call_index 0) no longer charges a fee (row 231).** The
+  weight annotation carries `Pays::No`, matching
+  `register_provider_entry`/`_unsigned` and `accept_job`; a zero-balance account
+  can register through it, and a pallet test asserts
+  `get_dispatch_info().pays_fee == Pays::No`. The runtime change takes effect at
+  the next spec via set_code.
+- **"Paid registration" language purged (row 232).** `onboard.rs`,
+  `gpn_register.rs` and the website's buy/deploy pages no longer describe a
+  registration cost that does not exist; a spent free entry now points at the
+  unsigned re-registration path, and the site says plainly that joining costs
+  nothing.
+
+### Fixed
+- **Update failures are diagnosable (row 230).** See Added.
+
 ## [0.3.65] - 2026-11-20
 
 Bumped from 0.3.64 (`scripts/bump-version.py patch`).
