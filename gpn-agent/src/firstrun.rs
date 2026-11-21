@@ -220,6 +220,11 @@ pub fn help_text() -> String {
         "                         too). Write-once: an existing code is kept and\n",
         "                         the new one is ignored with a log line. Invalid\n",
         "                         codes only warn - a referral never blocks a start.\n",
+        "  gpn_node --referral    print THIS machine's referral code and share link\n",
+        "                         (derived from the wallet address, so it needs\n",
+        "                         no network and starts nothing); --referral --json\n",
+        "                         for the dashboard/scripts. Also shown once in\n",
+        "                         the startup summary and on the dashboard card.\n",
         "  gpn_node --ensure-wallet  headless: create this machine's wallet if\n",
         "                         missing, print the payout address, exit (used\n",
         "                         by the service/launcher on every start)\n",
@@ -1436,6 +1441,10 @@ mod tests {
         assert!(
             h.contains("--ref CODE") && h.contains("--ref=CODE"),
             "--help must document the referral flag: {h}"
+        );
+        assert!(
+            h.contains("--referral"),
+            "--help must document `--referral` (row 224: the operator has to be able to find their code): {h}"
         );
         for key in [
             "GPN_BASE_PATH",

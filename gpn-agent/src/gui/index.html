@@ -55,6 +55,27 @@
   .idlehead h2{margin:0;color:var(--text);text-transform:none;letter-spacing:0;font-size:17px}
   .explain{color:var(--muted);font-size:13.5px;margin:6px 0 16px;max-width:70ch}
 
+  /* Referral card (row 224): the code is the thing an operator is most likely
+     to copy, so it gets its own panel rather than a status tile. */
+  .refbox{
+    background:linear-gradient(180deg,rgba(34,211,238,.09),rgba(18,26,40,1) 70%);
+    border:1px solid var(--line);border-radius:var(--radius);padding:18px 18px 20px;
+  }
+  .refhead{display:flex;flex-wrap:wrap;gap:10px;align-items:baseline;justify-content:space-between}
+  .refhead h2{margin:0;color:var(--text);text-transform:none;letter-spacing:0;font-size:17px}
+  .refcode{display:flex;flex-wrap:wrap;gap:12px;align-items:center}
+  .refcode code{
+    font-family:var(--mono);font-size:24px;font-weight:700;letter-spacing:.06em;
+    color:var(--text);background:var(--panel);border:1px solid var(--line);
+    border-radius:var(--radius-sm);padding:10px 14px;word-break:break-all;
+  }
+  .refcode button{background:var(--grad);border:0;color:#08101a;font-weight:800;
+    border-radius:var(--radius-sm);padding:11px 18px;font-size:14px;cursor:pointer;font-family:var(--font)}
+  .refcode button:disabled{opacity:.5;cursor:not-allowed}
+  .refsub{color:var(--muted);font-size:12.5px;margin:10px 0 0;word-break:break-all}
+  .refsub a{color:#22d3ee}
+  .refsub.bad{color:var(--amber)}
+
   fieldset{border:0;padding:0;margin:0 0 16px}
   legend{font-size:13px;color:var(--muted);padding:0;margin-bottom:8px}
   .durs{display:flex;flex-wrap:wrap;gap:8px}
@@ -190,6 +211,24 @@
     <p id="msg" role="status" aria-live="polite"></p>
   </section>
 
+  <section class="refbox" id="refBox" aria-labelledby="refH">
+    <div class="refhead">
+      <h2 id="refH">Your referral code</h2>
+      <span class="pill" id="refPill" hidden><span class="dot" aria-hidden="true"></span><span id="refPillText">derived from your wallet</span></span>
+    </div>
+    <p class="explain">
+      Every node has one, and it is not chosen — it is computed from this node's payout wallet, so the
+      same wallet always gives the same code after a reinstall. Share the link when you invite someone;
+      it tells the network who they came from, nothing more.
+    </p>
+    <div class="refcode">
+      <code id="refCode">…</code>
+      <button id="refCopy" type="button" disabled>Copy code</button>
+    </div>
+    <p class="refsub" id="refLink" hidden></p>
+    <p class="refsub" id="refNote">&nbsp;</p>
+  </section>
+
   <section aria-labelledby="procH">
     <h2 id="procH">Processes</h2>
     <table>
@@ -227,6 +266,74 @@
     el.className = kind || "";
   }
 
+  /* ---- referral card (row 224) ----------------------------------------
+     The code is derived server-side from the payout wallet and fetched from
+     /api/referral, so the browser never computes it and never invents one.
+     A machine with no wallet says so, in the words the API gives us. */
+  var refLoaded = false, refCodeText = "";
+
+  function loadReferral() {
+    refLoaded = true;
+    fetch("/api/referral", { cache: "no-store" })
+      .then(function (r) { if (!r.ok) throw new Error("HTTP " + r.status); return r.json(); })
+      .then(function (j) {
+        var note = $("refNote"), link = $("refLink"), btn = $("refCopy");
+        if (j && j.wallet && j.code) {
+          refCodeText = j.code;
+          text($("refCode"), j.code);
+          link.hidden = false;
+          link.textContent = "";
+          var a = document.createElement("a");
+          a.href = j.link;              /* built from the code, never the reverse */
+          a.textContent = j.link;
+          a.target = "_blank";
+          a.rel = "noopener";
+          link.appendChild(a);
+          note.className = "refsub";
+          text(note, "Derived from " + j.address +
+            ". Back up the wallet — the code is the address, and it cannot be regenerated without it.");
+          btn.disabled = false;
+          $("refPill").hidden = false;
+        } else {
+          refCodeText = "";
+          text($("refCode"), "no wallet yet");
+          link.hidden = true;
+          note.className = "refsub bad";
+          text(note, (j && j.error) || "This node has no wallet, so it has no code yet.");
+          btn.disabled = true;
+          $("refPill").hidden = true;
+        }
+      })
+      .catch(function (e) {
+        text($("refCode"), "unavailable");
+        text($("refNote"), "Could not read the code: " + e);
+      });
+  }
+
+  $("refCopy").addEventListener("click", function () {
+    var btn = $("refCopy");
+    if (!refCodeText) return;
+    var done = function () {
+      btn.textContent = "Copied ✓";
+      setTimeout(function () { btn.textContent = "Copy code"; }, 1800);
+    };
+    var fallback = function () {
+      /* No clipboard API over plain http on a LAN address — select the text. */
+      var r = document.createRange();
+      r.selectNodeContents($("refCode"));
+      var sel = window.getSelection();
+      sel.removeAllRanges();
+      sel.addRange(r);
+      try { document.execCommand("copy"); done(); }
+      catch (e) { btn.textContent = "Select and copy"; }
+    };
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      navigator.clipboard.writeText(refCodeText).then(done, fallback);
+    } else {
+      fallback();
+    }
+  });
+
   function render(s) {
     lastStatus = s;
     var idle = s.idle || {};
@@ -238,6 +345,11 @@
     var pill = $("statePill");
     pill.className = "pill" + (idleOn ? " idle" : (nodeUp ? "" : " down"));
     text($("stateText"), idleOn ? ("idle · " + fmtDur(remaining)) : (nodeUp ? "active" : "node down"));
+
+    // Referral card (row 224): fetched once, and again whenever the payout
+    // account appears — the code is derived from it, so it cannot be shown
+    // before the node knows its own address.
+    if (s.account && !refLoaded) { loadReferral(); }
 
     // Idle box
     $("idleBox").className = "idlebox" + (idleOn ? " idle" : "");

@@ -743,6 +743,117 @@ fn run_ensure_node_key(argv: &[String]) -> i32 {
     }
 }
 
+/// Which account this machine's referral code belongs to.
+///
+/// Same order of authority as the wallet row of `--diagnose`: an explicit
+/// keystore, then `GPN_SIGNER`, then the fleet payout account. Never invents
+/// one — a machine with no wallet has no code, and saying so is the answer.
+fn operator_account(base: &Path) -> Result<(String, &'static str), String> {
+    let keystore = env_str("GPN_SIGNER_FILE")
+        .map(|s| PathBuf::from(expand_tilde(&s)))
+        .unwrap_or_else(|| gpn_agent::firstrun::default_keystore_path(base));
+    if keystore.is_file() {
+        match gpn_agent::firstrun::read_keystore(&keystore) {
+            Ok(ks) => return Ok((ks.address, "local keystore")),
+            Err(e) => return Err(format!("keystore {} is unusable: {e}", keystore.display())),
+        }
+    }
+    if let Some(signer) = env_str("GPN_SIGNER").filter(|s| !s.trim().is_empty()) {
+        return match gpn_agent::firstrun::ss58_of_uri(&signer) {
+            Ok(a) => Ok((a, "GPN_SIGNER")),
+            Err(e) => Err(format!("GPN_SIGNER is unusable: {e}")),
+        };
+    }
+    if let Some((addr, source)) = fleet_payout_account() {
+        return Ok((addr, source));
+    }
+    Err(format!(
+        "no wallet on this machine yet (looked for {} and GPN_SIGNER) — run `gpn_node \
+         --ensure-wallet` to create this machine's payout identity",
+        keystore.display()
+    ))
+}
+
+/// `gpn_node --referral [--json]` — print the operator's own code and link.
+///
+/// Exit 0 in both the configured and the no-wallet case (the done-when for row
+/// 224 says "exit 0 and no RPC listener"); `--json` carries `wallet: false` so a
+/// caller can tell the difference without parsing prose.
+fn run_referral(argv: &[String]) -> i32 {
+    // The same base the node itself will use (including the legacy-DB redirect),
+    // so `--referral` can never report "no wallet" for a keystore the node is
+    // actively signing with — that divergence is how a money question gets a
+    // wrong answer.
+    let base = resolve_effective_base(
+        env_str("GPN_BASE_PATH")
+            .filter(|s| !s.trim().is_empty())
+            .map(|s| PathBuf::from(expand_tilde(&s))),
+    );
+    let json = argv.iter().any(|a| a == "--json");
+
+    match operator_account(&base) {
+        Ok((address, source)) => match gpn_agent::referral::derive_code(&address) {
+            Ok(compact) => {
+                let display = gpn_agent::referral::display_form(&compact);
+                let link = gpn_agent::referral::share_link(&compact);
+                if json {
+                    println!(
+                        "{{\"wallet\":true,\"address\":\"{address}\",\"source\":\"{source}\",\
+                         \"code\":\"{display}\",\"compact\":\"{compact}\",\"display\":\"{display}\",\
+                         \"link\":\"{link}\"}}"
+                    );
+                } else {
+                    asciiprintln!("[referral] your code: {display}");
+                    asciiprintln!("[referral] address  : {address}  ({source})");
+                    asciiprintln!("[referral] share    : {link}");
+                    asciiprintln!(
+                        "[referral] this code is derived from the address — back up the keystore or the code is gone with it"
+                    );
+                }
+                0
+            }
+            Err(e) => {
+                if json {
+                    println!("{{\"wallet\":true,\"address\":\"{address}\",\"error\":\"{e}\"}}");
+                } else {
+                    asciiprintln!(
+                        "[referral] {address} cannot produce a code: {e} — is it an ss58 account?"
+                    );
+                }
+                0
+            }
+        },
+        Err(e) => {
+            if json {
+                println!("{{\"wallet\":false,\"error\":\"{e}\"}}");
+            } else {
+                asciiprintln!("[referral] {e}");
+                asciiprintln!(
+                    "[referral] once a wallet exists, `gpn_node --referral` prints the code and its share link"
+                );
+            }
+            0
+        }
+    }
+}
+
+/// One startup line, so an operator who never opens the dashboard still learns
+/// their code and where to copy it. Silent when there is no account to derive
+/// from (a fleet node with nothing configured) — never a guessed code.
+fn print_referral_line(cfg: &Config) {
+    if cfg.account.trim().is_empty() {
+        return;
+    }
+    let Ok(compact) = gpn_agent::referral::derive_code(&cfg.account) else {
+        return;
+    };
+    asciiprintln!(
+        "  referral: {}  ·  share {}  ·  copy it from the dashboard or `gpn_node --referral`",
+        gpn_agent::referral::display_form(&compact),
+        gpn_agent::referral::share_link(&compact)
+    );
+}
+
 fn run_ensure_wallet() -> i32 {
     let base_path =
         resolve_effective_base(env_str("GPN_BASE_PATH").map(|s| PathBuf::from(expand_tilde(&s))));
@@ -4421,6 +4532,15 @@ async fn main() {
         None => {}
     }
 
+    // ── `--referral` (row 224): this machine's code, printable and copyable. ─
+    // Read-only and answered before `Config::load()`, so it opens no RPC
+    // listener, starts no child and works on a machine whose chain is broken —
+    // the operator's first question ("what is my code?") must never need a
+    // running node. `--json` is for the dashboard and install scripts.
+    if argv.iter().any(|a| a == "--referral") {
+        std::process::exit(run_referral(&argv));
+    }
+
     // ── `--diagnose`: one PASS/FAIL screen with the fix per line. ────────────
     // Answered before `Config::load()` on purpose: it must run even when the
     // config is the thing that is broken. Read-only (no install, no fetch).
@@ -4576,6 +4696,7 @@ async fn main() {
     }
 
     print_dashboard_hint(&cfg);
+    print_referral_line(&cfg);
 
     // ── Apply a staged update first: it must be swapped in before any child is
     //    spawned, so this process can be replaced cleanly (short outage). ─────

@@ -1,0 +1,200 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>GPN referral codes — your wallet, in a form you can read out loud</title>
+<meta name="description" content="Every GPN node has exactly one referral code. It is not chosen: it is derived from the node's wallet address, so anyone can check it offline. How to find yours, what it is for, and what it is not." />
+<meta name="theme-color" content="#07090f" />
+<link rel="canonical" href="https://gpncoin.ai/referrals" />
+<meta property="og:site_name" content="GPN" />
+<meta property="og:url" content="https://gpncoin.ai/referrals" />
+<meta property="og:image" content="https://gpncoin.ai/assets/og.png" />
+<meta property="og:image:width" content="1200" />
+<meta property="og:image:height" content="630" />
+<meta name="twitter:card" content="summary_large_image" />
+<meta name="twitter:image" content="https://gpncoin.ai/assets/og.png" />
+<meta property="og:title" content="GPN referral codes — derived from your wallet" />
+<meta property="og:description" content="Your code is a short, checkable fingerprint of your node's wallet address. Find it, copy it, share the link." />
+<meta property="og:type" content="website" />
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%237c6cff'/%3E%3Ctext x='16' y='22' font-size='16' font-family='sans-serif' font-weight='700' text-anchor='middle' fill='%2307090f'%3EG%3C/text%3E%3C/svg%3E" />
+<link rel="stylesheet" href="assets/style.css" />
+<style>
+  .ref-big {
+    font-family: var(--mono); font-size: clamp(1.6rem, 5vw, 2.6rem); font-weight: 800;
+    letter-spacing: .08em; color: var(--text); background: var(--bg-2);
+    border: 1px solid var(--line); border-radius: var(--radius-sm);
+    padding: 14px 18px; display: inline-block; word-break: break-all; margin: 6px 0 4px;
+  }
+  .ref-row { display: flex; flex-wrap: wrap; gap: 12px; align-items: center; margin-top: 12px; }
+  .ref-row .copy-btn { margin-left: 0; }
+  .kv { display: grid; grid-template-columns: max-content 1fr; gap: 6px 18px; margin: 14px 0; }
+  .kv dt { color: var(--muted-2); font-size: .82rem; text-transform: uppercase; letter-spacing: .06em; font-weight: 700; }
+  .kv dd { margin: 0; font-family: var(--mono); font-size: .88rem; word-break: break-all; }
+  .ref-table td, .ref-table th { font-size: .86rem; vertical-align: top; }
+  .ref-check { color: var(--green); font-weight: 700; }
+  .ref-no { color: var(--muted); }
+</style>
+</head>
+<body>
+<a class="skip-link" href="#main">Skip to content</a>
+
+<header class="site-header">
+  <div class="wrap nav">
+    <a class="brand" href="./" aria-label="GPN home"><span class="dot" aria-hidden="true">G</span><span>GPN<br><small>GPU-NATIVE NETWORK</small></span></a>
+    <button class="nav-toggle" id="nav-toggle" aria-expanded="false" aria-controls="nav-links" aria-label="Toggle navigation">☰</button>
+    <nav class="nav-links" id="nav-links" aria-label="Primary">
+      <a href="./">Home</a>
+      <a href="download">Download</a>
+      <a href="deploy">Deploy</a>
+      <a href="ai">AI</a>
+      <a href="chat">Chat</a>
+      <a href="access-points">Access Points</a>
+      <a href="nodes">Nodes</a>
+      <a href="buy">Buy GPN</a>
+      <a href="referrals" aria-current="page">Referrals</a>
+      <a href="docs">Docs</a>
+      <a href="contact">Contact</a>
+      <a href="./#join">Join us</a>
+    </nav>
+    <div class="nav-actions"><button class="theme-toggle" id="theme-toggle" aria-pressed="false" title="Switch theme">☾</button></div>
+  </div>
+</header>
+
+<main id="main">
+
+  <section class="page-head first">
+    <div class="wrap">
+      <span class="kicker">Referrals</span>
+      <h1>Your code is your wallet, shortened</h1>
+      <p>Every GPN node has exactly one referral code, and nobody types it in. It is computed from the
+        node's <b>payout wallet</b> — the same address block rewards go to — so the same wallet always
+        produces the same code, a different wallet always produces a different one, and anyone can
+        check a code against an address <b>offline</b>. You cannot squat someone else's code without
+        their wallet, and you cannot lose yours unless you lose the wallet.</p>
+    </div>
+  </section>
+
+  <section>
+    <div class="wrap">
+
+      <h2>What one looks like</h2>
+      <p class="sub">Thirteen characters: <code>GPN</code>, nine payload characters, one checksum character.
+        The dashes are for reading aloud — the node accepts the code with or without them.</p>
+      <div class="ref-big" id="live-code">GPN-AX3R-YC7C-KV</div>
+      <p class="small muted">That is a real code, from a real address on the dev testnet
+        (<code>5GrwvaEF5zXb26Fz9rcQpDWS57CtERHpNehXCPcNoHGKutQY</code>, the well-known “Alice” account —
+        <b>not</b> a wallet anyone should send value to). It is here so you can watch a code be
+        checked instead of taking our word for it.</p>
+
+      <h2 style="margin-top:34px">How it is derived</h2>
+      <p class="sub">Short enough to reimplement from this page. If your implementation disagrees with
+        ours, one of us is wrong and you can tell which.</p>
+      <ol class="join-steps">
+        <li><b>Take the account id</b> — the 32-byte public key, i.e. your ss58 payout address decoded.</li>
+        <li><b>Hash it with a versioned domain</b> — <code>blake2b-256("gpn-referral-v1" ‖ account_id)</code>.
+          The domain string means a future scheme can coexist instead of invalidating every code in the wild.</li>
+        <li><b>Encode the first 45 bits as base32</b> — uppercase, no padding, with the ambiguous
+          characters <code>I</code>, <code>O</code>, <code>0</code> and <code>1</code> removed, so a code
+          read from a screenshot still types cleanly. That is the nine payload characters.</li>
+        <li><b>Append a checksum character</b> — <code>blake2b-256("gpn-referral-check-v1" ‖ payload)[0] mod 32</code>
+          in the same alphabet. A single mistyped character changes it, so a typo is caught on your own
+          machine, not by the network.</li>
+      </ol>
+      <p class="small muted">Collisions between two wallets are ~2<sup>-45</sup>. The code carries no
+        information about balances, history or keys — it is a fingerprint, not a key.</p>
+
+      <h2 style="margin-top:34px">Check one yourself</h2>
+      <p class="sub">The site's own example, recomputed in twelve lines of Python with no GPN code
+        involved:</p>
+      <div class="callout">
+        <pre><code>import hashlib, base64
+
+ALPHABET = "23456789ABCDEFGHJKLMNPQRSTUVWXYZ"      # Crockford-style: no 0/1/I/O to mistype
+def payload(account_id: bytes) -&gt; str:
+    d = hashlib.blake2b(b"gpn-referral-v1" + account_id, digest_size=32).digest()
+    n = int.from_bytes(d, "big")                            # 256 bits, MSB first
+    return "".join(ALPHABET[(n &gt;&gt; (256 - 5 * (i + 1))) &amp; 31] for i in range(9))
+
+def checksum(p: str) -&gt; str:
+    d = hashlib.blake2b(b"gpn-referral-check-v1" + p.encode(), digest_size=32).digest()
+    return ALPHABET[d[0] &amp; 31]
+
+# Alice's 32-byte account id, then the code
+acct = bytes.fromhex("d43593c715fdd31c61141abd04a99fd6822c8558854ccde39a5684e7a56da27d")
+p = payload(acct)
+print("GPN" + p + checksum(p))        # -&gt; GPNAX3RYC7CKV  (display: GPN-AX3R-YC7C-KV)</code></pre>
+      </div>
+      <p class="small muted">Within the node, the same check runs the other way: pasting a code next to
+        an address recomputes the code from the address and compares. A typo is refused with the
+        character it should have been.</p>
+
+      <h2 style="margin-top:34px">Find yours</h2>
+      <p class="sub">Four places, all local, none of which needs the network:</p>
+      <ul class="join-steps">
+        <li><b>The dashboard.</b> Start the node with <code>gpn_node --gui</code> and open
+          <code>http://127.0.0.1:8099</code>. There is a <b>Your referral code</b> card with the code and a
+          <b>Copy</b> button. If the machine has no wallet yet, the card says so and names the command
+          that creates one (<code>gpn_node --ensure-wallet</code>) — it never shows a placeholder code.</li>
+        <li><b>One line at startup.</b> Every start prints
+          <code>referral: GPN-XXXX-XXXX-XX · share https://gpncoin.ai/join?ref=…</code>, so the code is in
+          the log you already read.</li>
+        <li><b><code>gpn_node --referral</code></b> — prints the code, the address it belongs to and the
+          share link, then exits. It opens no port, starts nothing, and needs no chain.</li>
+        <li><b>Tooling.</b> The dashboard's API answers <code>GET /api/referral</code> with
+          <code>{code, link, address}</code>, or <code>{wallet:false, error}</code> on a machine with no
+          wallet.</li>
+      </ul>
+
+      <h2 style="margin-top:34px">What a code is for — and what it is not</h2>
+      <div class="table-wrap">
+        <table class="ref-table">
+          <thead><tr><th scope="col">It is</th><th scope="col">It is not</th></tr></thead>
+          <tbody>
+            <tr><td class="ref-check">A record of who introduced a node</td>
+                <td class="ref-no">A discount, a payout split, or a reward of any kind — attribution only,
+                  and nothing is paid out on the testnet</td></tr>
+            <tr><td class="ref-check">Write-once per node: the first code a node records is kept</td>
+                <td class="ref-no">A tracking pixel, a cookie, or anything that follows a visitor around the web</td></tr>
+            <tr><td class="ref-check">Verifiable: a code that does not derive from the presenting node's
+                wallet is recorded as <code>invalid_for_address</code>, not credited</td>
+                <td class="ref-no">Private in the sense of secret — a code points at a public address, so
+                  treat it as public information about which wallet you run</td></tr>
+            <tr><td class="ref-check">Operator-readable: you can see how many nodes came from your code</td>
+                <td class="ref-no">A list of who your referees are, or what they earn</td></tr>
+          </tbody>
+        </table>
+      </div>
+
+      <h2 style="margin-top:34px">Share it as a link</h2>
+      <p class="sub">The canonical form is a <b>join</b> link, not a download link:</p>
+      <div class="callout">
+        <p class="mb-0"><code>https://gpncoin.ai/join?ref=GPN-ZYCU-4W49-6R</code></p>
+        <p class="small muted mb-0" style="margin-top:8px">A download URL reads as “this will install
+          something” before the person has decided to trust you. <code>/join</code> is a landing page
+          instead: what GPN is, what your code means, and the install commands with your code already
+          in them — with the download behind a button they choose to press.</p>
+      </div>
+      <p class="small muted">Pasting a code by hand still works: <code>gpn_node --ref GPN-ZYCU-4W49-6R</code>.
+        Invalid or mistyped codes warn and never block a start.</p>
+
+      <div class="ref-row">
+        <a class="btn" href="download">Download a node &rarr;</a>
+        <a class="btn btn-ghost" href="docs/run-a-node">Run a node</a>
+      </div>
+
+    </div>
+  </section>
+
+</main>
+
+<footer class="site-footer">
+  <div class="wrap">
+    <p class="small muted">GPN — GPU-native network. Referral codes record attribution only; no rewards
+      are live on testnet.</p>
+  </div>
+</footer>
+
+<script src="assets/app.js" defer></script>
+</body>
+</html>

@@ -613,6 +613,15 @@ pub fn display_form(compact: &str) -> String {
     groups.join("-")
 }
 
+/// The public share-link base (row 225: `/join?ref=<code>`, never a download URL).
+pub const SHARE_BASE: &str = "https://gpncoin.ai/join?ref=";
+
+/// The link an operator hands out: the **display** form, so a human who reads
+/// it aloud or retypes it keeps the grouping and `parse_code` still accepts it.
+pub fn share_link(compact: &str) -> String {
+    format!("{SHARE_BASE}{}", display_form(compact))
+}
+
 /// Parse either form and verify the checksum, returning the compact code.
 ///
 /// Returns [`CodeError::NotDerived`] when the string has no `GPN` prefix — that
@@ -972,6 +981,22 @@ mod tests {
         assert_eq!(e.status, STATUS_LEGACY);
         assert_eq!(e.r#ref, "team-alpha");
         assert_eq!(e.first_seen, 1700000000);
+    }
+
+    #[test]
+    fn the_share_link_carries_a_code_that_parses_back() {
+        let compact = derive_code(ALICE).unwrap();
+        let link = share_link(&compact);
+        assert!(
+            link.starts_with("https://gpncoin.ai/join?ref=GPN-"),
+            "{link}"
+        );
+        let tail = link.split("ref=").nth(1).unwrap();
+        assert_eq!(parse_code(tail).unwrap(), compact);
+        assert!(
+            !link.contains("download") && !link.contains("install"),
+            "a referral link must never read as an installer: {link}"
+        );
     }
 
     #[test]

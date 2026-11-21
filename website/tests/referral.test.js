@@ -181,4 +181,27 @@ test("both pages load the referral helper before app.js", () => {
   }
 });
 
+test("the referrals page explains the scheme with a real, checkable example", () => {
+  /* Row 224: gpncoin.ai must explain the scheme, not just link to a download.
+     The example on the page is a real derivation (Alice's dev account), so the
+     page can be audited: recompute it and compare. If the scheme ever changes,
+     this test fails rather than the page quietly lying. */
+  const page = fs.readFileSync(path.join(SITE, "referrals.html"), "utf8");
+  for (const need of ["gpn-referral-v1", "gpn-referral-check-v1", "--referral",
+                      "/api/referral", "/join?ref=", "gpn_node --ensure-wallet"]) {
+    assert.ok(page.includes(need), "referrals.html must mention " + need);
+  }
+  assert.ok(/GPN-AX3R-YC7C-KV/.test(page), "the page must carry the live example code");
+  /* The example is a display-form code, so the site's own validator must accept
+     it — a page that shows something its own installer would reject is a trap. */
+  assert.strictEqual(R.validate("GPN-AX3R-YC7C-KV"), "GPN-AX3R-YC7C-KV");
+  /* And it must be reachable from the rest of the site. */
+  for (const p of ["index.html", "download.html"]) {
+    assert.ok(fs.readFileSync(path.join(SITE, p), "utf8").includes('href="referrals"'),
+      p + " must link to the referrals page");
+  }
+  assert.ok(fs.readFileSync(path.join(SITE, "sitemap.xml"), "utf8")
+    .includes("https://gpncoin.ai/referrals"), "sitemap must list /referrals");
+});
+
 console.log("\n" + passed + " tests passed");

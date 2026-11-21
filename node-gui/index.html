@@ -26,6 +26,12 @@
   button:disabled{opacity:.45;cursor:not-allowed}
   pre.log{background:#0a0e14;border:1px solid var(--line);border-radius:8px;padding:12px;font-size:12px;overflow:auto;max-height:220px;white-space:pre-wrap;word-break:break-word}
   .note{font-size:12px;color:var(--amber);margin-top:8px}
+  .code{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:26px;font-weight:700;letter-spacing:.06em;color:var(--accent);word-break:break-all}
+  .codewrap{display:flex;gap:12px;align-items:center;flex-wrap:wrap}
+  #copyBtn{flex:0 0 auto;padding:10px 16px;background:var(--accent);font-size:13px}
+  .linkline{font-size:12px;color:var(--muted);margin-top:10px;word-break:break-all}
+  .linkline a{color:var(--accent)}
+  .fine{font-size:12px;color:var(--muted);margin-top:10px;line-height:1.5}
 </style>
 </head>
 <body>
@@ -46,6 +52,16 @@
   </div>
 
   <div class="card">
+    <h2>Your referral code</h2>
+    <div class="codewrap">
+      <div class="code" id="refCode">…</div>
+      <button id="copyBtn" disabled>Copy</button>
+    </div>
+    <div class="linkline" id="refLink">—</div>
+    <div class="fine" id="refNote">A code is derived from this node's wallet address, so it needs no server to exist: back up the keystore and the code survives a reinstall.</div>
+  </div>
+
+  <div class="card">
     <h2>Control</h2>
     <div class="btnrow">
       <button id="startBtn" disabled>▶ Start Node</button>
@@ -63,6 +79,56 @@
 <script>
 const $ = id => document.getElementById(id);
 let running = false;
+let refText = "";
+
+async function loadReferral() {
+  try {
+    const r = await fetch("/api/referral");
+    const j = await r.json();
+    if (j && j.wallet && j.code) {
+      refText = j.code;
+      $("refCode").textContent = j.code;
+      $("refLink").innerHTML = "";
+      const a = document.createElement("a");
+      a.href = j.link;            /* built from the code, never the other way round */
+      a.textContent = j.link;
+      a.target = "_blank";
+      a.rel = "noopener";
+      $("refLink").appendChild(a);
+      $("refNote").textContent = "Derived from " + j.address + " (" + (j.source || "wallet") + "). Back up the keystore — the code is the address.";
+      $("copyBtn").disabled = false;
+    } else {
+      refText = "";
+      $("refCode").textContent = "no wallet yet";
+      $("refLink").textContent = "";
+      $("refNote").textContent = (j && j.error ? j.error : "This node has no wallet, so it has no code yet.") +
+        "  Create one with:  gpn_node --ensure-wallet";
+      $("copyBtn").disabled = true;
+    }
+  } catch (e) {
+    $("refCode").textContent = "unavailable";
+    $("refNote").textContent = "Could not read the code: " + e;
+  }
+}
+
+$("copyBtn").onclick = async () => {
+  if (!refText) return;
+  const btn = $("copyBtn");
+  try {
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      await navigator.clipboard.writeText(refText);
+    } else {
+      /* http:// on a LAN address has no clipboard API — fall back to a selection. */
+      const t = document.createElement("textarea");
+      t.value = refText; document.body.appendChild(t); t.select();
+      document.execCommand("copy"); document.body.removeChild(t);
+    }
+    btn.textContent = "Copied ✓";
+  } catch (e) {
+    btn.textContent = "Select it and copy";
+  }
+  setTimeout(() => { btn.textContent = "Copy"; }, 1800);
+};
 
 async function refresh() {
   try {
@@ -96,6 +162,7 @@ $("stopBtn").onclick = async () => {
 };
 
 refresh();
+loadReferral();
 setInterval(refresh, 3000); // poll status + log every 3s
 </script>
 </body>

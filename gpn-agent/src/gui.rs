@@ -7,6 +7,7 @@
 //! |--------|----------------|--------------------------------------------|
 //! | GET    | `/`            | the dashboard (embedded, no CDN, no build) |
 //! | GET    | `/api/status`  | node + idle status as JSON                 |
+//! | GET    | `/api/referral`| this node's own referral code + share link |
 //! | POST   | `/api/idle`    | `{"minutes": n, "reason": "..."}`          |
 //! | POST   | `/api/resume`  | leave idle now                             |
 //!
@@ -51,6 +52,41 @@ where
 {
     fn status(&self) -> Value {
         self()
+    }
+}
+
+/// The `GET /api/referral` body: the operator's code and share link.
+///
+/// No wallet is a **state**, not an error: `{wallet:false, error:"…"}` with the
+/// sentence the card shows, because the dashboard must be honest about a
+/// machine that has not been provisioned yet rather than print a placeholder
+/// code. Derivation lives in [`crate::referral`] — one implementation only.
+fn referral_json(status: &Value) -> Value {
+    let address = status
+        .get("account")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .trim()
+        .to_string();
+    if address.is_empty() {
+        return json!({
+            "wallet": false,
+            "error": "this node has no payout account yet, so it has no referral code — run `gpn_node --ensure-wallet` (or `gpn_node --setup`) to create the wallet"
+        });
+    }
+    match crate::referral::derive_code(&address) {
+        Ok(compact) => json!({
+            "wallet": true,
+            "address": address,
+            "code": crate::referral::display_form(&compact),
+            "compact": compact,
+            "link": crate::referral::share_link(&compact),
+        }),
+        Err(e) => json!({
+            "wallet": true,
+            "address": address,
+            "error": e.to_string(),
+        }),
     }
 }
 
@@ -206,6 +242,11 @@ pub fn handle(
             }
             Reply::json(200, status)
         }
+
+        // GET /api/referral (row 224) — this node's own code, for the card.
+        // Derived from the account the status already reports, so the dashboard
+        // can never advertise a code the node itself would not publish.
+        ("GET", "/api/referral") => Reply::json(200, referral_json(&source.status())),
 
         // POST /api/idle/auto {"enabled": true|false} — the dashboard toggle.
         ("POST", "/api/idle/auto") => {
@@ -458,6 +499,67 @@ mod tests {
         assert!(
             r.body.contains("servingSub"),
             "the card must show the reason"
+        );
+    }
+
+    #[test]
+    fn the_dashboard_shows_the_operators_own_referral_code() {
+        // Row 224, owner point 2026-11-20: the operator has to be able to FIND
+        // and COPY their own code. Both halves are asserted here: the card is
+        // in the page, and the value it shows comes from the payout account.
+        let r = handle("GET", "/", "", &source(Some(1)), &opts("ref"), 1_000);
+        assert!(r.body.contains("Your referral code"), "missing the card");
+        assert!(
+            r.body.contains("id=\"refCode\""),
+            "missing the code element"
+        );
+        assert!(
+            r.body.contains("id=\"refCopy\"") && r.body.contains("navigator.clipboard"),
+            "the card must have a working Copy button"
+        );
+        assert!(
+            r.body.contains("/api/referral"),
+            "the card must read the code from the API, not compute one"
+        );
+    }
+
+    #[test]
+    fn referral_endpoint_derives_the_code_from_the_payout_account() {
+        let src =
+            || json!({"node": "up", "account": "5GrwvaEF5zXb26Fz9rcQpDWS57CtERHpNehXCPcNoHGKutQY"});
+        let r = handle("GET", "/api/referral", "", &src, &opts("refjson"), 1_000);
+        assert_eq!(r.code, 200);
+        let v: Value = serde_json::from_str(&r.body).unwrap();
+        assert_eq!(v["wallet"], true, "{v}");
+        assert_eq!(v["code"], "GPN-AX3R-YC7C-KV", "{v}");
+        assert_eq!(v["compact"], "GPNAX3RYC7CKV", "{v}");
+        assert_eq!(
+            v["link"], "https://gpncoin.ai/join?ref=GPN-AX3R-YC7C-KV",
+            "the link must be /join, never a download URL: {v}"
+        );
+    }
+
+    #[test]
+    fn referral_endpoint_says_so_when_there_is_no_wallet() {
+        // No account: a state, not an error, and never a placeholder code.
+        let r = handle(
+            "GET",
+            "/api/referral",
+            "",
+            &source(Some(1)),
+            &opts("noref"),
+            1_000,
+        );
+        assert_eq!(r.code, 200);
+        let v: Value = serde_json::from_str(&r.body).unwrap();
+        assert_eq!(v["wallet"], false, "{v}");
+        assert!(v.get("code").is_none(), "no code may be invented: {v}");
+        assert!(
+            v["error"]
+                .as_str()
+                .unwrap_or("")
+                .contains("--ensure-wallet"),
+            "the message must name the fix: {v}"
         );
     }
 
@@ -824,6 +926,17 @@ mod tests {
         );
         assert_eq!(code, 200);
         assert!(body.contains("<title>"), "index page body: {body}");
+
+        // Row 224 over a real socket: the code the browser will copy.
+        let (code, body) = get(
+            addr,
+            "GET /api/referral HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
+        );
+        assert_eq!(code, 200, "{body}");
+        assert!(
+            body.contains("\"wallet\":false") && body.contains("--ensure-wallet"),
+            "the socket must answer the wallet state honestly: {body}"
+        );
 
         handle.stop();
         // tiny_http's listener is closed when the accept thread exits; the

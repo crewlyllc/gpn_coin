@@ -7,6 +7,7 @@ gpn-node process and see its status from a browser GUI. No dependencies.
 Endpoints:
   GET  /            -> the control-panel UI (index.html)
   GET  /api/status  -> running?, head block, peers, gpu, node log tail
+  GET  /api/referral -> this node's referral code + share link (row 224)
   POST /api/start   -> launch gpn-node (dev testnet, mining)
   POST /api/stop    -> stop gpn-node gracefully (SIGTERM)
 
@@ -69,6 +70,32 @@ def gpu():
     except Exception:
         return "nvidia-smi unavailable"
 
+def referral():
+    """This node's own referral code (row 224).
+
+    Delegates to `gpn_node --referral --json`: the derivation lives in exactly
+    one place (gpn-agent/src/referral.rs), so the dashboard can never show a
+    code that differs from the one the node publishes to the access point. The
+    call is read-only and exits before the node opens any port.
+    """
+    try:
+        r = subprocess.run([NODE_BIN, "--referral", "--json"],
+                           capture_output=True, text=True, timeout=20)
+        line = (r.stdout or "").strip().splitlines()
+        for ln in reversed(line):
+            ln = ln.strip()
+            if ln.startswith("{"):
+                return json.loads(ln)
+        return {"wallet": False,
+                "error": (r.stderr or r.stdout or "gpn_node printed nothing").strip()[:400]}
+    except FileNotFoundError:
+        return {"wallet": False,
+                "error": "node binary not found at " + NODE_BIN +
+                         " — install the node (or pass --node-path) to see this machine's code"}
+    except Exception as e:
+        return {"wallet": False, "error": "could not read the wallet: " + str(e)}
+
+
 def log_tail(n=12):
     try:
         with open(LOG_FILE, "r") as f:
@@ -104,6 +131,8 @@ class Handler(BaseHTTPRequestHandler):
                 "gpu": gpu(),
                 "log": log_tail(),
             }))
+        if p == "/api/referral":
+            return self._send(200, json.dumps(referral()))
         return self._send(404, json.dumps({"error": "not found"}))
 
     def do_POST(self):
