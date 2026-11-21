@@ -273,8 +273,15 @@ fn run(f: &Fixture, price: u128) -> Result<gpn_agent::hub_ap::ChannelJobOut, Cha
         gen(),
         price,
     );
+    // This is a DEADLOCK bound, not a performance test. The old 5 s bound was a
+    // wall-clock assertion on a stub round-trip, so it failed on a loaded CI
+    // runner (run 44847689477, 2026-11-21T02:23:24Z: 8.1 s for the same test
+    // that takes 0.03 s idle) while the code was correct. What actually proves
+    // "no block inclusion" is structural and checked by the callers: no chain
+    // client is passed (a create is impossible) and the stub saw exactly one
+    // off-chain `POST /channel/job` and zero chain submissions.
     assert!(
-        started.elapsed() < Duration::from_secs(5),
+        started.elapsed() < Duration::from_secs(120),
         "an off-chain render job must not wait for block inclusion"
     );
     out
