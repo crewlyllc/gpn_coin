@@ -3,6 +3,33 @@
 Newest first. Written by the release loop; read by the assistant, who relays anything
 that needs Jeremy. `[TRIAGE]` = a decision waiting on the assistant.
 
+## 08:45 PT — 0.3.65 §5: linux build PUBLISHED, windows build FAILED on our own encoding guard -> cause fixed, both re-dispatched on one SHA [no triage]
+
+- **A0**: run **44911936175** (`3a76aa3f`) `conclusion = success` (14:03Z -> 16:32Z, all jobs
+  green, incl. windows `Build + test gpn-agent (release)`).
+- **§4 box 4 TICKED** (CI green on the code SHA) with that verdict.
+- **§5 box 2 TICKED**: `release-linux-selfhosted.yml` run **44924248633** `success`
+  (16:22:42Z -> 16:38:08Z); `linux-latest` carries `gpn-linux.tar.gz` **340,781,762 B**,
+  asset `updated_at` 16:37:29Z.
+- **§5 box 3 FAILED then fixed**: `release-windows.yml` run **44924273272** `failure` 16:33:49Z at
+  step 3 `encoding guard`, 21 s in. Exact lines: `NON-ASCII ci.yml:348 byte 0xe2` / `0x80` /
+  `0x94`, then `non-ASCII bytes in workflow files (3) - Windows PowerShell 5.1 decodes run:`
+  `scripts as ANSI`. Classification: **our code** (a committed byte), caught by our own guard;
+  ci.yml:348 was the comment `# ... four install commands — never a /download URL`. The build was
+  never at fault — the windows artifact simply never got built.
+- **Fix pushed `93b4195`**: ci.yml:348 is ASCII `--`; new `scripts/check-workflow-ascii.sh` runs the
+  same scan in the cheap Linux `lint` job so the byte fails in minutes where it was written.
+  Failing-before/passing-after: `LC_ALL=C grep -rnP '[^\x09\x20-\x7e]' .github/workflows` on
+  `3a76aa3f:ci.yml` -> `ci.yml:348: ... commands — never a /download URL`; on the fixed tree -> no
+  hits, and the script prints `workflow-ascii: OK (all workflow files are pure ASCII)`.
+- **Re-dispatched on tag `build/93b4195a959b`**: linux run **44926142445** (queued 16:43:41Z),
+  windows run **44926165305** (queued 16:43:58Z), both `head_sha = 93b4195a959b…`; the workflow
+  change also started CI run **44926088682** on the same SHA. §5 box 4 (same SHA) re-opened until
+  both conclusions are `success`.
+- **Ended the run here** per the dispatch rule. Next run: ask once for 44926142445, 44926165305
+  and 44926088682 (the last verifies the ci.yml change). Any failure -> quote the line first.
+- No blocker, no decision needed.
+
 ## 08:22 PT — 0.3.65 §5 boxes 2-4: both release builds dispatched on 3a76aa3f, §5.4 (same SHA) ticked; CI windows still compiling [no triage]
 
 - **A0**: `GET /actions/runs?head_sha=3a76aa3f…` = 1 run, **44911936175** `in_progress` (started
