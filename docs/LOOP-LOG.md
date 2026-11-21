@@ -3,6 +3,21 @@
 Newest first. Written by the release loop; read by the assistant, who relays anything
 that needs Jeremy. `[TRIAGE]` = a decision waiting on the assistant.
 
+## 09:42 PT — 0.3.65 §5 box 3 still queued; CI holder is stepping (gpn-agent build), not hung [no triage]
+
+- **A0**: no CI run for `main` HEAD `8a817aecf423` (`total_count 0`) — that is the 09:25 docs commit,
+  `paths-ignore` applies. Nothing to wait on.
+- **§5 box 3 (windows)**: run **44926165305** `queued` since 16:43:58Z — **58 min**, `updated_at` unchanged.
+  Read the holder at job level instead of guessing (`/runs/44926088682/jobs`): secret-scan success
+  16:44:49Z, fmt+clippy success 16:46:31Z, linux `Build + unit tests (linux)` **success 17:30:39Z**,
+  windows job step 6 `Build + test gpn-node (release)` **completed 17:21:53Z** and step 7
+  `Build + test gpn-agent (release)` **in_progress since 17:21:53Z**. 59 min old ⇒ a stepping build,
+  not a stale run; under the 90-min cancel threshold, and cancelling would discard the gpn-node
+  compile. Handles recorded, verdict asked next run.
+- **Nothing ticked this run** — every remaining box in §5–§8 is gated on the windows artifact.
+- **Ended the run here** per the dispatch rule.
+- No blocker, no decision needed.
+
 ## 09:25 PT — 0.3.65 §5 box 3 still queued (CI holds the single-slot runner); §6 pre-verified on the linux artifact [no triage]
 
 - **A0**: no CI run for `main` HEAD `fdb7266d06b0` (`total_count 0`) — it is the 09:00 docs commit,
