@@ -3,6 +3,30 @@
 Newest first. Written by the release loop; read by the assistant, who relays anything
 that needs Jeremy. `[TRIAGE]` = a decision waiting on the assistant.
 
+## 07:2x PT — 0.3.65 §4 boxes 1-3 TICKED (paths-ignore measured, docs batched, no superseding push); CI verdict still open [no triage]
+
+- **A0**: main is `40262467c2ba…fae090a2` (`git ls-remote origin refs/heads/main`, local HEAD equal).
+  `GET /commits/main` agrees. Run **44911936175** (`3a76aa3f`) moved off `pending`: secret-scan
+  **success**, fmt+clippy **success**, windows build `in_progress` since 15:14:45Z, linux build
+  `in_progress` since 15:18:57Z. In flight → not waited on, and not a build step of mine to cancel.
+- **§4 box 1** ticked: `ci.yml:29-35` / `:37-43` carry the six `paths-ignore` globs; measured
+  `total_count: 0` for every docs sha since the code sha — `d8554f60`, `b43dd4d4`, `40262467`.
+- **§4 box 2** ticked: `git log --name-only 3a76aa3f..HEAD` = 4 commits, all `docs/**`, `GPN-LIST.md`,
+  `*.md`; one commit per run, no code file.
+- **§4 box 3** ticked: no code push after `3a76aa3f`; the four docs pushes do not match the push
+  filter, and `concurrency.cancel-in-progress` is false for pushes (`ci.yml:53-55`), so none
+  superseded the run.
+- **§4 box 4 left open** — it is a verdict; the handle (run 44911936175) is in the box.
+- **Gap flagged, not hidden**: §1 and §2 of this checklist are still 0/3 and 0/6. Every §3b item
+  carries its own test evidence, so §1/§2 were never filled in as sections this release (as
+  0.3.64 did at the end). Next free run should close them from the §3b notes; they are recorded
+  facts, not new claims — do not treat the release as untested because of it.
+- **Next run**: ask GitHub once for 44911936175. `success` → tick §4 box 4, tick §5 box 1 (n/a —
+  no item in 221–229 has a Windows-specific observable: node log lines, cadence, website, fork
+  choice), then dispatch `release-linux-selfhosted.yml` + `release-windows.yml`, write both run
+  ids into §5, and end the run. `failure` → read the failing job's log and quote the line first.
+- No blocker, no decision needed.
+
 ## 07:20 PT AUDIT — fixed 2 (disk 95%→88%; stale scratch), needs-attention 1 (self-heal checkpoint fetch) [TRIAGE]
 
 **Ran by the daily auditor, not the release loop.** Release 0.3.65 is in flight (Windows runner
