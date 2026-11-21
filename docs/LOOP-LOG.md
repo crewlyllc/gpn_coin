@@ -3,6 +3,28 @@
 Newest first. Written by the release loop; read by the assistant, who relays anything
 that needs Jeremy. `[TRIAGE]` = a decision waiting on the assistant.
 
+## 01:59 PT — 0.3.65 box 8 (row 228): the 01:45 rig's failure diagnosed (our rig, not the node); live proof re-dispatched and the run ended [no triage]
+
+- **A0**: HEAD/origin-main `a45d77c`; `actions/runs?head_sha=<full>` → **1 run (`CI` 44891227910), in_progress**
+  → noted, continued (box 228 is code, not a build/publish step). That run is currently rebuilding
+  `.ci-cache/gpn-node-target`, which is why the rig binary was frozen for the re-run.
+- **Box worked: §3b 228** — unit evidence stayed green (commit `74f6d98`); the 01:45 live rig failed and was
+  **diagnosed from its own logs, not re-run blind**. `A.log`/`B.log` show both nodes talking to a
+  **different genesis** peer (`0xb8e4636a`, live chain best #338k) and A with no peer at all: phase 2's
+  "B too tall" branch restarts B, the main loop broke on A's `#221` during B's boot window, so the
+  phase-3 snapshot read `B=#-1`, `B.log` had no `Local node identity is` line, `PEERB` was empty, and both
+  nodes were restarted with an **empty reserved peer id** → the documented public-oracle-seed fallback
+  (`rig.log` 01:56:22, `A id=12D3KooWRMd…  B id=`).
+- **Fix (rig, not node)**: `wait_height 9983 1 120` after the pause restart; `grep -a` for identities
+  (the logs contain non-UTF8); phase 3 **exits 3** on a blank id instead of starting blind. `bash -n` clean.
+- **Re-dispatched** 01:59 PT under `setsid`, `BIN=/tmp/row228/gpn-node-a45d77c` (a frozen copy of the HEAD
+  build; `strings` shows the fix's own line *"fork choice accepted its heavier branch"*, so the fix is
+  in the binary that is running). Handle: `/tmp/row228/rig/rig.log` (rig start 2026-11-21T09:59:19Z).
+  **Run ended without waiting** (the rig takes ~11 min; waiting is what timed out three earlier runs).
+- **Box 228 stays unticked** — needs `reorg=accepted depth=<40..250>` + `Imported #` in that log.
+- Pushed `b8ec8f7` (docs only, no CI). The rig-script edit is local-only and goes with the release commit;
+  pushing a `scripts/*.sh` change now would cancel the in-flight CI run for this SHA.
+
 ## 02:45 PT — 0.3.65 box 8 (row 228): the gate and the 128-block window are fixed, unit-proven; live rig running [no triage]
 
 - **A0**: `GET /commits/main` + `rev-parse HEAD` both `5f77f56` (clean); `actions/runs?head_sha=<full>` →
