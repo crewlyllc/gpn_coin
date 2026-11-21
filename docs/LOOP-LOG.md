@@ -3,6 +3,37 @@
 Newest first. Written by the release loop; read by the assistant, who relays anything
 that needs Jeremy. `[TRIAGE]` = a decision waiting on the assistant.
 
+## 16:5x PT — 0.3.63 PUBLISHED (releases.json 0.3.63, both assets); §5/§7/§7b/§8 ticked, two release-cut defects fixed [no triage]
+
+- **A0**: `GET /actions/runs/44818515439` → `completed / success` on `1bd78d8` (the scripts commit);
+  docs SHA has no run (paths-ignore) — expected.
+- **Published**: `scripts/release-cut.sh --version 0.3.63 --timeout 300` → commit **ccfa687**
+  `release: sign 0.3.63 (linux 340.5MB 461f8b77, windows 247.0MB a7b1793b)`, live manifest 0.3.63,
+  anonymous mirror download verified, exit 0. `releases.json` polled twice 10 s apart → 0.3.63 both
+  times, same `published_at` 00:39:45Z.
+- **§5 (2/2)**: windows run `44840000852` success; asset `gpn-windows.zip` 247,019,226 B sha256
+  `a7b1793b…` + `.bundle` 9,049 B; `cosign verify-blob` with the workflow identity regexp → **Verified OK**
+  on the re-downloaded bytes, *before* the cut.
+- **Defect 1 (mirror provenance)**: step 4 renamed the old zip aside but left the previous `.bundle`,
+  so 0.3.63's mirror served a bundle for 0.3.62's zip — `cosign verify-blob` failed with
+  `bundle="ce0781c6…", payload="a7b1793b…"`. Added step 4b (download source bundle, verify digest,
+  mirror rename-aside, refuse the cut if absent, `a76dd59`), ran it verbatim to repair the mirror:
+  now `Verified OK`, bundle `b187cf60…`.
+- **Defect 2 (lock leak)**: `--dry-run` took `~/.gpn/release-in-flight` and exited without releasing —
+  it blocked this run's first docs commit. Fixed in `a76dd59`: `take` skipped under dry-run, and
+  `cleanup()` drops the lock when this process is the holder (exercised: prints
+  `released the commit lock (0.3.99) on exit 0`, file gone).
+- **§7 (4/4)**: cut done; `network.json:23 latest_version 0.3.63`; manifest polled twice.
+  **§7b (3/4)**: live `gpncoin.ai/download` 0.3.63, `docs/run-a-node` + `docs/downloads`
+  `release 0.3.63 — checked 2026-11-20 at block 336,496`; both repos' latest tags carry
+  `461f8b77…` / `a7b1793b…`; `seeds.json` has no version field (generated per-request, n/a).
+  Nine `website/docs/*.html` stamps were still on 0.3.62 and moved to 0.3.63 in `a76dd59`.
+- **§8 (3/3)**: anonymous GET of both manifest URLs → 200, 247,019,226 B / 340,500,918 B, sha256
+  exactly the manifest's; `docs/downloads.md` was still stamped 0.3.61 and is now 0.3.63.
+- **Next run**: §7b's last box (every capability discoverable from gpncoin.ai — row 202's audio
+  generation is absent from `website/ai.html`), then §9 deploy/confirm (a node updating itself).
+  No decision needed; no [TRIAGE].
+
 ## 16:30 PT — 0.3.63 §6 DONE (2/2) against the published linux asset; windows run still building, handle kept [no triage needed]
 
 - **A0**: `GET /commits/main` → `e571a50` (docs-only commit, `total_count: 0` runs — expected under
