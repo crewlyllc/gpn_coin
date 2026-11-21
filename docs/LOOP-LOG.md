@@ -1,5 +1,34 @@
 # LOOP-LOG
 
+## 12:15 PT — §7b capability boxes ticked; found + fixed the site proxy's missing `/api/v1/jobs` route [no triage]
+
+- **A0**: `origin/main` HEAD at start `5a006e21…` (full 40-char) ⇒ `total_count: 0` for that sha; a run
+  `44942431771` sits `pending` for an earlier sha (`07dee52b`). Not waited on — the boxes worked are
+  docs/site/verification, not builds. The loop checkout was 8 commits stale (`4e77ca1`) and was read via
+  `git show origin/main:` rather than trusted on disk; edits were made in a fresh clone `~/gpn-work-231`.
+- **The box found a real defect — the exact one it was written for.** `website/ai.html` calls
+  `POST /api/v1/jobs` "One runnable call, right now" and renders its whole task table from
+  `/api/v1/tasks`; **neither path was routed in `worker/worker.js`**. Live before the fix:
+  `POST https://gpncoin.ai/api/v1/jobs` ⇒ `404 {"error":{"message":"unknown API route — see
+  https://gpncoin.ai/ai"}}` (0.09 s) and `GET /api/v1/tasks` ⇒ 404, so a stranger copying the documented
+  example got a 404 and the table said "Loading the live vocabulary…" forever. Not a stale deploy: the
+  Worker was current with `main` (`/r/GPN5QYFHFW79M` ⇒ 301 `/join?ref=…`, the row-225 alias shipped the
+  same day, was live).
+- **Fixed** `b32a192`: `/v1/jobs` (POST) + `/v1/tasks` (GET, 60 s cache) routes, `/v1/jobs` added to the
+  OPTIONS preflight, and the POST body guard now accepts a `task` word / `inputs[]` (that payload was
+  rejected as "missing prompt" before the AP saw it). `node worker/worker.test.mjs` ⇒ **65 passed**; the
+  3 new cases **fail (3 failing) on the pre-fix file** — fails before, passes after. Deploy is the
+  Cloudflare git build on push to `main`; verified live after it: `/api/v1/tasks` 200 (3,290 B, 14 words,
+  4 served), `POST /api/v1/jobs` with the page's verbatim body ⇒ 200 + a real answer.
+- **Ticked two capability boxes** (split them per the one-box-per-capability rule, which the generated
+  file had lumped): task dispatcher 221/222, and referrals 223/224/226 — `/referrals` 200, names
+  "your code is your wallet, shortened", `gpn_node --referral` prints `GPN-5QYF-HFW7-9M` + address +
+  share link and exits 0, `?ref=` link 200, unsigned `/api/referrals` 401. Dashboard `GET /api/referral`
+  was **not** observed live (node runs without `--gui`; :8099 not listening) — covered by
+  `cargo test --lib gui::` 17 passed instead, and recorded as such.
+- Remaining unticked in 0.3.65: §8 (3 stranger-download boxes), §10 (3), §10b (2), §0b filing (2), §1 (1).
+- Pushed: worker fix `b32a192`, then this docs+checklist commit.
+
 ## 11:43 PT — §7b box 3 ticked: site == GitHub == binaries on 0.3.65, proven from re-downloaded published bytes [no triage]
 
 - **A0**: `main` HEAD `c30c68c8a1fca03ca76ca2889389f92edb50d26c` ⇒ one run `44941059831`, `status=pending`
