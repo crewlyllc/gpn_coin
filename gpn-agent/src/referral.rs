@@ -668,6 +668,137 @@ pub fn verify_for_address(code: &str, ss58_address: &str) -> Result<String, Code
     Ok(compact)
 }
 
+// ── operator-only counts (row 226, design docs/design-referral-codes.md §4b) ──
+//
+// Attribution is not public. The only way to read a code's count is to prove
+// you own the wallet it derives from: an sr25519 signature over a message that
+// names the code, verified against that address (`verify_count_request`), and a
+// response that contains no address of any referred node.
+
+/// Domain string an operator signs to read their own referral count.
+///
+/// The message is `gpn-referrals-v1|<code>`; both the compact
+/// (`GPNAX3RYC7CKV`) and the displayed (`GPN-AX3R-YC7C-KV`) spelling of the code
+/// are accepted, because an operator copies whichever one they can see.
+pub const COUNT_DOMAIN: &str = "gpn-referrals-v1";
+
+/// The two canonical spellings of the count-request message for `code`.
+pub fn count_messages(code: &str) -> [String; 2] {
+    let compact = parse_code(code).unwrap_or_else(|_| normalize(code));
+    [
+        format!("{COUNT_DOMAIN}|{compact}"),
+        format!("{COUNT_DOMAIN}|{}", display_form(&compact)),
+    ]
+}
+
+/// The compact-spelling message (what tooling signs by default).
+pub fn count_message(code: &str) -> String {
+    count_messages(code)[0].clone()
+}
+
+/// One referred node, as the operator may see it: a timestamp, never an
+/// address.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct CountSeen {
+    /// Unix seconds when this referral was first seen.
+    pub first_seen: u64,
+}
+
+/// The operator-facing answer of `GET /api/referrals`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct CountView {
+    /// The code, in display form.
+    pub r#code: String,
+    /// How many distinct nodes were attributed to it (credited only).
+    pub referred: usize,
+    /// When the first of them was seen, if any.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub first_seen: Option<u64>,
+    /// Newest first, capped by [`COUNT_RECENT_LIMIT`]. Timestamps only.
+    pub recent: Vec<CountSeen>,
+}
+
+/// How many `recent[]` entries a count response carries.
+pub const COUNT_RECENT_LIMIT: usize = 100;
+
+/// Do two written codes name the same code? Derived forms are compared after
+/// parsing (dashes/case insensitive, checksum-checked); anything else falls
+/// back to the case-insensitive comparison the legacy path always used.
+fn same_code(a: &str, b: &str) -> bool {
+    match (parse_code(a), parse_code(b)) {
+        (Ok(x), Ok(y)) => x == y,
+        _ => normalize(a) == normalize(b),
+    }
+}
+
+/// Registry entries attributed to `code`.
+///
+/// `invalid_for_address` entries are deliberately excluded: that status means a
+/// node published this code together with an address that does not produce it
+/// (a replayed code), so the entry is evidence, never a credited referral.
+pub fn entries_for_code<'a>(reg: &'a BTreeMap<String, Entry>, code: &str) -> Vec<&'a Entry> {
+    reg.values()
+        .filter(|e| e.status != STATUS_INVALID_FOR_ADDRESS && same_code(&e.r#ref, code))
+        .collect()
+}
+
+/// Tally a code's credited referrals. Address-free by construction: the struct
+/// has no field an address could be written into.
+pub fn count_for_code(reg: &BTreeMap<String, Entry>, code: &str) -> CountView {
+    let mut seen: Vec<u64> = entries_for_code(reg, code)
+        .into_iter()
+        .map(|e| e.first_seen)
+        .collect();
+    seen.sort_unstable_by(|a, b| b.cmp(a)); // newest first
+    CountView {
+        r#code: display_form(&parse_code(code).unwrap_or_else(|_| normalize(code))),
+        referred: seen.len(),
+        first_seen: seen.last().copied(),
+        recent: seen
+            .into_iter()
+            .take(COUNT_RECENT_LIMIT)
+            .map(|first_seen| CountSeen { first_seen })
+            .collect(),
+    }
+}
+
+/// Candidate wallets that could own `code`, taken from the registry's own
+/// `derived_from` fields. Used only when a caller omits `addr`; never returned
+/// to a caller.
+pub fn addresses_for_code(reg: &BTreeMap<String, Entry>, code: &str) -> Vec<String> {
+    let mut out: Vec<String> = entries_for_code(reg, code)
+        .into_iter()
+        .filter_map(|e| e.derived_from.clone())
+        .collect();
+    out.sort();
+    out.dedup();
+    out
+}
+
+/// Prove that `sig` was made by the wallet `address` over this code's count
+/// message, **and** that `code` actually derives from `address`.
+///
+/// Returns the compact code on success; an operator-facing sentence on refusal
+/// (the route answers `401` to every failure, so the wording must not leak
+/// whether the code exists).
+pub fn verify_count_request(code: &str, address: &str, sig_hex: &str) -> Result<String, String> {
+    let address = address.trim();
+    if address.is_empty() {
+        return Err("no wallet address supplied".into());
+    }
+    let compact = verify_for_address(code, address)
+        .map_err(|_| "that code does not derive from the wallet that signed".to_string())?;
+    let pubkey = crate::provider_heartbeat::ss58_to_pubkey(address)
+        .ok_or_else(|| "wallet address is not a valid ss58 account".to_string())?;
+    let ok = count_messages(&compact)
+        .iter()
+        .any(|m| crate::provider_heartbeat::verify_signature(sig_hex, m, &pubkey));
+    if !ok {
+        return Err("signature does not verify for that wallet".into());
+    }
+    Ok(compact)
+}
+
 /// `$GPN_PREFIX/referral-address` — the REFERRER's ss58 address, written beside
 /// the code when the installer supplied one. Absent for legacy installs.
 pub const REF_ADDRESS_FILE: &str = "referral-address";
@@ -997,6 +1128,98 @@ mod tests {
             !link.contains("download") && !link.contains("install"),
             "a referral link must never read as an installer: {link}"
         );
+    }
+
+    // ── operator-only counts (row 226) ──────────────────────────────────────
+
+    fn sign_with(uri: &str, msg: &str) -> String {
+        use sp_core::crypto::Pair as _;
+        let pair = sp_core::sr25519::Pair::from_string(uri, None).unwrap();
+        hex::encode(pair.sign(msg.as_bytes()).0)
+    }
+
+    #[test]
+    fn the_count_message_names_the_code_in_either_spelling() {
+        let compact = derive_code(ALICE).unwrap();
+        let [a, b] = count_messages(&compact);
+        assert_eq!(a, format!("gpn-referrals-v1|{compact}"));
+        assert_eq!(b, format!("gpn-referrals-v1|{}", display_form(&compact)));
+        // Display form parses back to the same message, so an operator who
+        // copies the dashed code signs the same thing.
+        assert_eq!(count_messages(&display_form(&compact))[0], a);
+    }
+
+    #[test]
+    fn a_count_is_credited_only_and_carries_no_addresses() {
+        let dir = td("count");
+        let p = dir.join(REGISTRY_FILE);
+        let alice = derive_code(ALICE).unwrap();
+        let bob = derive_code(BOB).unwrap();
+        // Two nodes referred by Alice (one verified, one unverified: a node
+        // that upgraded before its installer knew --ref), one replayed code
+        // recorded as evidence, and one node referred by Bob.
+        record_once_checked(&p, "5Node1", &display_form(&alice), Some(ALICE), None, 100).unwrap();
+        record_once_checked(&p, "5Node2", &alice, None, None, 200).unwrap();
+        record_once_checked(&p, "5Replay", &alice, Some(BOB), None, 300).unwrap();
+        record_once_checked(&p, "5Node3", &display_form(&bob), Some(BOB), None, 400).unwrap();
+        let reg = load_registry(&p);
+
+        let view = count_for_code(&reg, &display_form(&alice));
+        assert_eq!(view.referred, 2, "the replayed entry must not be credited");
+        assert_eq!(view.first_seen, Some(100));
+        assert_eq!(view.recent.len(), 2);
+        assert_eq!(view.recent[0].first_seen, 200, "newest first");
+        // The response cannot carry an address: no field for one, and no
+        // address string in the serialized payload.
+        let body = serde_json::to_string(&view).unwrap();
+        for addr in [ALICE, BOB, "5Node1", "5Node2", "5Replay"] {
+            assert!(!body.contains(addr), "{addr} leaked in {body}");
+        }
+        assert_eq!(view.r#code, display_form(&alice));
+    }
+
+    #[test]
+    fn only_the_wallet_that_owns_the_code_can_read_its_count() {
+        let alice = derive_code(ALICE).unwrap();
+        let bob = derive_code(BOB).unwrap();
+        let msg = count_message(&alice);
+        let alice_sig = sign_with("//Alice", &msg);
+
+        // Valid: correct wallet, message over the compact form.
+        assert_eq!(
+            verify_count_request(&display_form(&alice), ALICE, &alice_sig).unwrap(),
+            alice
+        );
+        // Valid: same signature, message spelled with the displayed code.
+        let display_sig = sign_with("//Alice", &count_messages(&alice)[1]);
+        assert!(verify_count_request(&alice, ALICE, &display_sig).is_ok());
+
+        // Wrong signature (Bob signs, Alice's code).
+        let bob_sig = sign_with("//Bob", &msg);
+        assert!(verify_count_request(&alice, ALICE, &bob_sig).is_err());
+        // Someone else's code: Bob's wallet cannot read Alice's count.
+        assert!(verify_count_request(&alice, BOB, &bob_sig).is_err());
+        // Garbage and empty signatures are refusals, not panics.
+        assert!(verify_count_request(&alice, ALICE, "0xdeadbeef").is_err());
+        assert!(verify_count_request(&alice, ALICE, "").is_err());
+        // A legacy typed code has no wallet to prove, so it can never be read
+        // through this path (it stays in the registry for the airdrop export).
+        assert!(verify_count_request("team-alpha", ALICE, &alice_sig).is_err());
+        // A malformed address is a refusal, not a panic.
+        assert!(verify_count_request(&alice, "5NotAnAddress", &alice_sig).is_err());
+        assert!(!bob.is_empty());
+    }
+
+    #[test]
+    fn candidate_wallets_come_from_the_registry_and_only_when_needed() {
+        let dir = td("count-addr");
+        let p = dir.join(REGISTRY_FILE);
+        let alice = derive_code(ALICE).unwrap();
+        record_once_checked(&p, "5Node1", &alice, Some(ALICE), None, 10).unwrap();
+        record_once_checked(&p, "5Node2", &alice, Some(ALICE), None, 11).unwrap();
+        let reg = load_registry(&p);
+        assert_eq!(addresses_for_code(&reg, &alice), vec![ALICE.to_string()]);
+        assert!(addresses_for_code(&reg, "GPN-ZZZZ-ZZZZ-ZZ").is_empty());
     }
 
     #[test]

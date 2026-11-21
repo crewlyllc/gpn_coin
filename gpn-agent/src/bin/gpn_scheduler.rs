@@ -6080,7 +6080,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     "reachable": p.reachable,
                     "peer_id": p.peer_id, "multiaddrs": p.p2p_multiaddrs,
                     "p2p_port": p.p2p_port,
-                    "referral": p.referral,
+                    // Row 226: the referral code is NOT published here. This route is
+                    // public, and "node → code" is exactly the third-party attribution
+                    // the operator-only rule forbids: a scraper could rebuild the whole
+                    // leaderboard from it. The code is internal state; an operator reads
+                    // their own count via the signed `GET /api/referrals`, the admin
+                    // reads the registry with `gpn-referrals --all` on this host.
                     "reachability": p.reachability,
                     "gateway": p.gateway,
                     "healthy": p.last_seen.is_some(),
@@ -6100,6 +6105,62 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     "git_sha": p.git_sha,
                     "source": p.source
                 })).collect::<Vec<_>>() })
+                }
+                // -- GET /api/referrals — an operator's OWN count (row 226) --------------
+                //
+                // Attribution is operator-only (design docs/design-referral-codes.md §4b):
+                // the registry is keyed by referee address, so exposing it would publish
+                // other people's machines. A caller proves ownership of the code with an
+                // sr25519 signature over `gpn-referrals-v1|<code>` made by the wallet the
+                // code derives from; every failure is a plain 401, so a stranger cannot
+                // use this route to probe whether a code exists. The answer carries a
+                // count and timestamps only — never an address. The whole registry is
+                // available to the admin only as `gpn-referrals --all` on this host.
+                (Method::Get, ["api", "referrals"]) => {
+                    let code = query_param(&url, "code")
+                        .map(pct_decode)
+                        .unwrap_or_default();
+                    let sig = query_param(&url, "sig").map(pct_decode).unwrap_or_default();
+                    let supplied = query_param(&url, "addr")
+                        .map(pct_decode)
+                        .unwrap_or_default();
+                    let reg =
+                        gpn_agent::referral::load_registry(&gpn_agent::referral::registry_path());
+                    // `addr` is optional: the registry already knows the REFERRER's
+                    // address (`derived_from`) for every credited entry, so a normal
+                    // operator needs to send only code + sig. A brand-new code with no
+                    // referrals has no such entry, so its owner names the wallet.
+                    let candidates: Vec<String> = if supplied.trim().is_empty() {
+                        gpn_agent::referral::addresses_for_code(&reg, &code)
+                    } else {
+                        vec![supplied]
+                    };
+                    let mut why = String::from("signature does not verify for that wallet");
+                    let mut verified: Option<String> = None;
+                    for a in &candidates {
+                        match gpn_agent::referral::verify_count_request(&code, a, &sig) {
+                            Ok(c) => {
+                                verified = Some(c);
+                                break;
+                            }
+                            Err(e) => why = e,
+                        }
+                    }
+                    match verified {
+                        Some(compact) => {
+                            let view = gpn_agent::referral::count_for_code(&reg, &compact);
+                            println!(
+                                "[referrals] count served for {} ({} referred)",
+                                view.r#code, view.referred
+                            );
+                            json!(view)
+                        }
+                        None => json!({
+                            "error": "unauthorized",
+                            "message": why,
+                            "_status": 401
+                        }),
+                    }
                 }
                 (Method::Get, ["mode"]) => json!({
                     "hot_wallet_enabled": allow_hot_wallet,

@@ -95,14 +95,32 @@ endpoint that answers "who referred this address" to a stranger.
 Concrete shape:
 
 ```
-GET /api/referrals?code=<my code>&sig=<signature over code by my wallet>
+GET /api/referrals?code=<my code>&sig=<signature over the message below>&addr=<optional wallet>
 → { "code": "GPN-7K2X-9QMD-4T", "referred": 7, "first_seen": …, "recent": [ {first_seen} … ] }
 ```
 
+The signed message is `gpn-referrals-v1|<code>` — both spellings of the code are accepted, the
+compact `GPNAX3RYC7CKV` and the displayed `GPN-AX3R-YC7C-KV`. An operator produces it with the
+already-shipped wallet tool:
+
+```
+gpn_wallet sign <wallet|//URI> 'gpn-referrals-v1|GPN-AX3R-YC7C-KV'
+```
+
+`addr` is only needed when the registry holds **no** entry for the code yet (a brand-new code with
+zero referrals gives the access point no address to try): then the caller names the wallet, and the
+code must derive from it. Normally the registry's own `derived_from` values are tried, so an
+operator sends code + sig only.
+
 - Proof is a **wallet signature**, not a password: it must verify against the address the code
-  derives from (row 223), so only the wallet owner can read their own referrals.
+  derives from (row 223), so only the wallet owner can read their own referrals. Every failure is
+  the same `401`, so the route cannot be used to probe whether a code exists.
 - The response **omits addresses** of referees by default; a count and timestamps are enough to know
-  your referrals landed, and not enough to build a map of other people's machines.
+  your referrals landed, and not enough to build a map of other people's machines. Entries recorded
+  as `invalid_for_address` (a replayed code) are evidence and are never counted.
+- **The public `/providers` route no longer publishes `referral`.** It used to, and "node → code"
+  is precisely the third-party attribution this section forbids: a scraper could rebuild the whole
+  leaderboard from it. The code stays internal state.
 - The admin view is `gpn-referrals --all` run on the AP host (reads
   `~/.gpn/referral-registry.json` directly). No route, no token to leak.
 - Rationale to record alongside: referral counts are useful to the operator who earned them and to

@@ -3,6 +3,41 @@
 Newest first. Written by the release loop; read by the assistant, who relays anything
 that needs Jeremy. `[TRIAGE]` = a decision waiting on the assistant.
 
+## 00:10 PT — 0.3.65 box 6 (row 226) DONE: referrals are operator-only, read with a wallet signature [no triage]
+
+- **A0**: `GET /commits/main` → **`151072c`** (loop-log) → `actions/runs?head_sha=151072c` → **0 runs**
+  (docs-only, `paths-ignore`), expected. **Checkout was 5 commits behind** again — `git status -sb`
+  said `behind 5` and HEAD was a duplicate local `5595a78`. Fast-forwarded to `151072c` *before*
+  reading the checklist, per the TOOLS.md lesson from 23:55; no duplicate work this time.
+- **Box ticked — §3b 226** (operator-only referral visibility, design `docs/design-referral-codes.md`
+  §4b, now carrying the exact signed message).
+  - `GET /api/referrals?code=&sig=[&addr=]` on the AP: sr25519 signature over
+    `gpn-referrals-v1|<code>` (compact or displayed spelling), verified against the wallet the code
+    derives from; **same 401 for every failure** so the route cannot probe for a code's existence;
+    response is `{code, referred, first_seen, recent[{first_seen}]}` and has **no address field**.
+  - `addr` is optional (registry `derived_from` candidates are tried first); needed only for a code
+    with zero referrals, where no registry entry names its owner.
+  - New admin binary `gpn-referrals` (`--all`, `--code`, `--json`, `--registry`) reads the registry
+    off disk on the AP host. No HTTP route for the admin view.
+  - **`GET /providers` no longer publishes `"referral"`** — that public node → code map *was* the
+    third-party attribution this row forbids. It was the only surface doing so; nothing consumed it.
+- **Evidence**: `--lib referral::` **23 passed** (4 new), `--bin gpn-referrals` **3**, `--bin gpn_scheduler`
+  **103**; fmt clean; clippy with CI's `CLIPPY_ALLOWS -D warnings` exit 0.
+- **Evidence, live** (real binaries, AP :8196, temp `GPN_PREFIX`, registry with 2 credited Alice
+  entries + 1 replayed + 1 Bob): Alice's code+sig → **200** `referred 2` (the replayed entry is not
+  counted) in both code spellings; Bob's sig → 401; Alice's sig on Bob's code → 401; no sig → 401;
+  legacy code → 401; wrong `addr` → 401 with the derivation sentence; `/providers` → **0**
+  `"referral"`; `/referrals`, `/api/referrals/all`, `/referrers` → 404.
+- **Wrong binary first**: the first live run answered 404 for every path. Cause: I ran
+  `~/.ci-cache/gpn-agent-target/debug/gpn_scheduler` (a 23:35 copy from another worktree) instead of
+  this checkout's `gpn-agent/target/debug/` build. `cargo test --bin` builds the test harness, not
+  the binary — `cargo build --bin …` is required. After rebuilding, the same requests answered as above.
+- **Mistake, fixed**: I ran `pkill -x gpn_scheduler` to stop the test AP and **killed the production
+  access point on :8092** (same process name). systemd (`gpn-accesspoint.service`) auto-restarted it;
+  verified `active` + `/health` **200** afterwards. Written into TOOLS.md: never kill by process name
+  on this host — kill the pid whose `/proc/<pid>/cmdline` contains the test port.- **Next run**: box 7 = **227** (`gpn-referrals --export` deterministic airdrop input, schema-versioned).
+  No decision needed; no [TRIAGE].
+
 ## 23:55 PT — no box worked: my checkout was one commit stale and the box was already live [no triage]
 
 - **A0**: `GET /commits/main` → **`8e6a2b5`**; `actions/runs?head_sha=8e6a2b5` → **0 runs** (docs-only).
