@@ -1,6 +1,6 @@
 # Provider address publication, VRAM gating and the public model catalogue
 
-*Verified against: chain spec 52 / release 0.3.61 — checked 2026-11-20 at block 331,873.*
+*Verified against: chain spec 52 / release 0.3.64 — checked 2026-11-20 at block 337,469.*
 
 Operator-facing reference for three things a provider publishes:
 

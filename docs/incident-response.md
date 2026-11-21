@@ -1,6 +1,6 @@
 # GPN Incident Response Plan
 
-*Verified against: chain spec 52 / release 0.3.61 — checked 2026-11-20 at block 331,873.*
+*Verified against: chain spec 52 / release 0.3.64 — checked 2026-11-20 at block 337,469.*
 
 **Audience:** the on-call operator(s) of GPN mainnet / testnet. **Status:** active.
 

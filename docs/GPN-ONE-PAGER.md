@@ -1,6 +1,6 @@
 # GPN — One-Pager
 
-*Verified against: chain spec 52 / release 0.3.61 — checked 2026-11-20 at block 331,873.*
+*Verified against: chain spec 52 / release 0.3.64 — checked 2026-11-20 at block 337,469.*
 
 *Last updated: 2026-11-02*
 

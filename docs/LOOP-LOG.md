@@ -295,7 +295,7 @@ that needs Jeremy. `[TRIAGE]` = a decision waiting on the assistant.
   `released the commit lock (0.3.99) on exit 0`, file gone).
 - **§7 (4/4)**: cut done; `network.json:23 latest_version 0.3.63`; manifest polled twice.
   **§7b (3/4)**: live `gpncoin.ai/download` 0.3.63, `docs/run-a-node` + `docs/downloads`
-  `release 0.3.63 — checked 2026-11-20 at block 336,496`; both repos' latest tags carry
+  `release 0.3.64 — checked 2026-11-20 at block 337,469`; both repos' latest tags carry
   `461f8b77…` / `a7b1793b…`; `seeds.json` has no version field (generated per-request, n/a).
   Nine `website/docs/*.html` stamps were still on 0.3.62 and moved to 0.3.63 in `a76dd59`.
 - **§8 (3/3)**: anonymous GET of both manifest URLs → 200, 247,019,226 B / 340,500,918 B, sha256

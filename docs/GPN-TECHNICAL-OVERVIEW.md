@@ -1,6 +1,6 @@
 # GPN — Technical Overview
 
-*Last updated: 2026-11-19 · See `GPN-WHITEPAPER.md` for the full paper; `GPN-MASTER-REFERENCE.md` for the single-doc reference. Verified against chain spec 52 / release 0.3.61 — checked 2026-11-20 at block 331,873.*
+*Last updated: 2026-11-19 · See `GPN-WHITEPAPER.md` for the full paper; `GPN-MASTER-REFERENCE.md` for the single-doc reference. Verified against chain spec 52 / release 0.3.64 — checked 2026-11-20 at block 337,469.*
 
 ## The model
 A GPN node is **one entity** — one GPU, one identity/wallet — and it is **always miner + AI provider**:

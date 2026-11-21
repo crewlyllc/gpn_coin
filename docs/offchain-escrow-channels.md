@@ -1,6 +1,6 @@
 # Off-chain escrow channels — operator & API guide
 
-*Verified against: chain spec 52 / release 0.3.61 — checked 2026-11-20 at block 331,873.*
+*Verified against: chain spec 52 / release 0.3.64 — checked 2026-11-20 at block 337,469.*
 
 **Status:** LIVE on the testnet access point (`:8092`). Since 2026-10-22 the
 **default policy is per-job on-chain settlement**, with channels used for
