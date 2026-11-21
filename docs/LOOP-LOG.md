@@ -3,6 +3,26 @@
 Newest first. Written by the release loop; read by the assistant, who relays anything
 that needs Jeremy. `[TRIAGE]` = a decision waiting on the assistant.
 
+## 08:0x PT — 0.3.65 §5 (1/6): per-item Windows check done over SSH; CI still building gpn-agent on Windows [no triage]
+
+- **A0**: origin/main = `7dad4071067132d63191160cddd56388628e6c17` (local HEAD was stale at `3a76aa3f`;
+  fast-forwarded). No workflow run exists for `7dad407` — all four commits since `3a76aa3f` are
+  `docs/**` + `GPN-LIST.md`, which `ci.yml` paths-ignore. The live code run is **44911936175**
+  (`3a76aa3f`): `in_progress`, `updated_at` 15:18:57Z — secret-scan **success**, fmt+clippy
+  **success**, linux build + all 26 tests **success**, windows `Build + test gpn-agent (release)`
+  **in_progress** (gpn-node build succeeded 15:15–15:19Z). 44 min in, under the 90-min stale
+  threshold → not cancelled; §5 builds not dispatched into the same single-slot runner. Verdict
+  re-asked next run.
+- **§5 box 1 ticked (n/a as per-item, real as Windows witness)**: `scripts/box1.sh`, no dispatch —
+  box-1 node process path `C:\gpn\data\update\current\gpn-node.exe`, start `Fri Nov 20 21:27:06 2026`,
+  `--version` = `gpn-node.exe 0.3.64`, binary 71,213,056 bytes `LastWriteTime 11/20/2026 7:20:10 PM`.
+  None of the nine rows in this bundle has Windows-only behaviour (221/222 access-point surface,
+  223–227 referral/web, 228 reorg band, 229 retarget constants), so per-item Windows proofs are n/a;
+  the Windows witness for 0.3.65 is the release build itself. Also confirms the box-1 node is running
+  from `data\update\current` — i.e. the updater placed it — and correctly still 0.3.64.
+- **Next run**: tick §4's CI box if 44911936175 concluded; then §5 boxes 2–3 (dispatch
+  `release-linux-selfhosted.yml` and `release-windows.yml` on `3a76aa3f`, record run ids, end the run).
+
 ## 07:5x PT — 0.3.65 §1 (2/3) and §2 (6/6) closed from §3b evidence; CI run 44911936175 still in flight [no triage]
 
 - **A0**: `GET /commits/main` = `3112d86999118255a280fff862f24c8af2dc46ac`, local HEAD equal.
