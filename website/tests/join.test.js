@@ -106,15 +106,19 @@ test("the page script writes a good code and names a bad one (no markup)", () =>
 /* ---------- the alias and the canonical path ---------- */
 
 test("/r/CODE 301s to /join?ref=CODE, preserving the code", () => {
-  /* The site runs in Cloudflare Pages advanced mode (worker/worker.js in front
-     of the asset binding), where `_redirects` is not applied — so the alias has
-     to live in the Worker. Its behaviour is asserted in worker/worker.test.mjs;
-     here we only require that the rule exists rather than a dead _redirects. */
+  /* The site runs in Cloudflare advanced mode (worker/worker.js in front of the
+     asset binding), where `_redirects` is not applied — so the alias has to
+     live in the Worker, AND the path has to be in `assets.run_worker_first` or
+     the asset layer answers 404 before the Worker is consulted. */
   const src = fs.readFileSync(path.join(SITE, "..", "worker", "worker.js"), "utf8");
   assert.ok(src.includes("/^\\/r\\/([^/]+)$/"), "worker.js must match the /r/<code> route");
   assert.ok(src.includes("/join?ref="), "worker.js must redirect to /join?ref=");
   assert.ok(!fs.existsSync(path.join(SITE, "_redirects")),
     "_redirects is dead config in advanced mode — the Worker owns the route");
+
+  const cfg = fs.readFileSync(path.join(SITE, "..", "wrangler.jsonc"), "utf8");
+  const first = cfg.slice(cfg.indexOf("run_worker_first"), cfg.indexOf("]", cfg.indexOf("run_worker_first")));
+  assert.ok(first.includes('"/r/*"'), "wrangler run_worker_first must list /r/* or the asset layer 404s");
 });
 
 test("sitemap lists /join and /referrals, not a download URL", () => {
