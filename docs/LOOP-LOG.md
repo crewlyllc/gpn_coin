@@ -20,6 +20,38 @@
   gated on §10). Next run starts at §10.
 # LOOP-LOG
 
+## 13:05 PT — 0.3.65 finished: §10 proved live (3/3), §10b recorded, checklist filed [no triage]
+
+- **A0**: `GET /commits/main` ⇒ `23e2024b0f190889f0fab6e56175b5b2ae80ffce` (full 40), a docs-only
+  commit; `?head_sha=` ⇒ `total_count: 0` — expected under `ci.yml` paths-ignore. Nothing waited on.
+- **§10 box 1 — the change observed on a real machine, 12:53:49–12:54 PT.** `system_version` ⇒
+  `0.3.65` (the process, head 341,231). `POST :8092/v1/jobs {"task":"chat","model":"qwen2.5:0.5b"}`
+  ⇒ **200** in 0.079 s, `job_id 1795294430247`, answer `"update"`, and the AP's own journal line
+  `12:53:50 [v1/jobs] task=chat model=qwen2.5:0.5b -> /v1/chat/completions`. `{"task":"teleport"}`
+  ⇒ **400** in 0.0005 s with `valid_tasks[]`. `GET /v1/tasks` ⇒ 14 tasks, `served:true` for exactly
+  chat/generate-image/speak/finetune; `GET /providers` carries `tasks` / `task_models` / `limits`.
+  `/r/GPN-ZYCU-4W49-6R` ⇒ `301 -> /join?ref=…`; `/api/referrals` unsigned ⇒ **401** on the AP and
+  **404** on the public site (operator-only, as designed); `releases.json` ⇒ `0.3.65`, the same
+  bytes §8 verified.
+- **§10 box 2 — peers hold.** 3 peers at 12:54:00 and 3 at 12:59:25 (head 341,231 → 341,247,
+  `isSyncing:false`); ban/isolation grep over the last 30 min of `gpn-fleet`, `gpn-provider`,
+  `gpn-accesspoint` ⇒ 0 / 0 / 0.
+- **§10 box 3 / rule B** — `GPN-LIST.md` rows **221–229** flipped `IN-PROGRESS` → `COMPLETE 0.3.65`
+  with version + §3b evidence + the live observation, plus the archive pointer.
+- **§10b** — timing recorded: `docs/releases/timing/0.3.65.{json,md}`, **14h42m** total, slowest step
+  **5h57m = §3b item 228**, and named honestly: it waited on the public testnet and was re-done
+  against a fresh-genesis rig instead of the on-chain spec-52 runtime. Shortening it means craft the
+  fork on the row-194 rig, not wait faster.
+- **Filing (§0b, both boxes)** — `git mv` to `docs/releases/archive/0.3.65.md` + INDEX row
+  (`0.3.65 | 2026-11-20 | 221–229`). Commits `6bafe73`, `87abf06`, `ac005c0`; one push.
+- **Found and recorded a tooling bug, not papered over:** `scripts/release-timing.py` follows a
+  single path, so run against the archive path after a rename every tick resolves to the rename
+  commit and it printed `total 0s`. The committed snapshot is read at `6bafe73` (pre-move) and the
+  header says so; fixing the script to use `git log --follow` is follow-up work, not a 0.3.65 box.
+- **Remaining in 0.3.65, deliberate:** §1's "write the test that fails now" box stays unticked —
+  no pre-fix failing run was archived for rows 221–227 (gap recorded 07:5x PT, not papered over).
+- **Next run goes to C:** rows **230/231/232** are `NEW` — bundle them, bump, generate the checklist.
+
 ## 12:15 PT — §7b capability boxes ticked; found + fixed the site proxy's missing `/api/v1/jobs` route [no triage]
 
 - **A0**: `origin/main` HEAD at start `5a006e21…` (full 40-char) ⇒ `total_count: 0` for that sha; a run
