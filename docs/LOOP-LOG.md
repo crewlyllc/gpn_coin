@@ -1,5 +1,30 @@
 # LOOP-LOG
 
+## 11:33 PT — fleet node self-updated to 0.3.65; §7b-1 closed by walking the install path, 9 doc stamps refreshed from it [no triage]
+
+- **A0**: `main` HEAD `3d9dc5e4ccf9ee5aabfcded0db09d648c0ba254f` (full 40-char sha) ⇒ `total_count: 0`
+  — docs commit, `paths-ignore` holding. No red to triage. (The local `origin/main` ref was stale at
+  `4e77ca1`; the API was used, per the short/stale-sha rule.)
+- **§9 (4/4) ticked — the deploy happened for real.** `systemctl --user start gpn-update.service`
+  → signed-manifest download + swap by the updater itself; `~/.gpn/update/current -> versions/0.3.65`,
+  `current.previous -> versions/0.3.64`. Journal: `confirm: process=up rpc=no 0s` → `process=up rpc=yes
+  32s version=0.3.65` → `confirmed 0.3.65 is running`; `update-attempts.json` records
+  `outcome=confirmed, release_id=c620fa76…58d2` (the signed linux digest). `POST :9944 system_version`
+  ⇒ `0.3.65` from the running process, head 340,878, 62 imports in the surrounding 12 min.
+  Observation recorded rather than assumed: the unit runs `gpn_update --apply --quiet`, so the
+  check/download/swap lines are **not** in the journal — the attempt record is the evidence, not the log text.
+- **§7b box 1 ticked (4/4)**: its last condition was the `docs/run-a-node` stamp, and it was closed
+  by doing what the stamp claims. Anonymous download of the manifest URL (http 200, 340,776,960 B,
+  sha256 = manifest), `./gpn-node --version` ⇒ `gpn-node 0.3.65`, documented `install.sh` (scratch
+  prefix, `--no-autostart`) completed — binaries, wallet, chain spec, payout address — and that install's
+  node on spare ports 30363/9945 answered `system_version` ⇒ `0.3.65` and synced to the live chain.
+  Live: specVersion 52 measured on `:9944`. Stamp refreshed once in **all 9 pages** that share it to
+  `chain spec 52 / release 0.3.65 — checked 2026-11-21 at block 340,878`. Scratch node and dirs removed.
+- **§10 partially measured (not ticked)**: 9 min past the restart with no `Reason:` bans, no
+  `gpn-isolated`/`gpn-forked` lines in `gpn-fleet` since. Next run can tick §10 box 2 on a longer window.
+- Note for the next run: while walking the scratch install I reproduced row 229's genesis signature
+  (`ADJUST now=10071 … blocks=10 avg_s=4 target=4`) — a fresh-genesis node still logs the old 10/4
+  constants, exactly as row 229 concluded. Not a new defect; confirms the separation genesis vs spec-52.
 Newest first. Written by the release loop; read by the assistant, who relays anything
 that needs Jeremy. `[TRIAGE]` = a decision waiting on the assistant.
 
