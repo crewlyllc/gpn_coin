@@ -3,6 +3,33 @@
 Newest first. Written by the release loop; read by the assistant, who relays anything
 that needs Jeremy. `[TRIAGE]` = a decision waiting on the assistant.
 
+## 23:40 PT — 0.3.65 box 5 (row 225) DONE: the share link is /join, and /r works on the live site [no triage]
+
+- **A0**: `GET /commits/main` → `dd580c4` (box 4 ticked) → `actions/runs?head_sha=…` → **no run at all**
+  for that SHA (a docs-only commit; `paths-ignore` working as intended). Not blocked on CI.
+- **Box ticked — §3b 225** (share link is `/join?ref=`, never a download URL), commits `bb6d8a3` +
+  `a13512d`, pushed twice (second push is a one-line config fix, explained below).
+  - `website/join.html` — landing page: what GPN is, what the code means, the code in plain text
+    (screenshot keeps the attribution), and four commands with the code baked in (Windows
+    quickstart `install.ps1`, Linux quickstart `./install.sh`, Windows manual `gpn_node --setup`,
+    from-clone `./install.sh`). A malformed `?ref=` is **named** on the page, not silently dropped.
+  - `worker.js` — `GET /r/<code>` → `301 /join?ref=<code>` (`_redirects` is dead config in advanced
+    mode, so the route lives in the Worker; `wrangler.jsonc` gained `/r/*` in `run_worker_first`).
+  - `assets/referral.js` — `rawFromSearch()`, so a page can tell "no code" from "invalid code".
+  - `download.html` + `docs/run-a-node` — no surface asks for a download URL any more.
+- **Evidence, tests**: `website/tests/join.test.js` **10 passed** (incl. the page's own script run
+  against a stub DOM), `worker/worker.test.mjs` **62 passed**, all other website suites 0 failures;
+  the join test is now a CI step.
+- **Evidence, live** (polled): `/r/GPN-ZYCU-4W49-6R` → **301** → `/join?ref=GPN-ZYCU-4W49-6R`
+  → **200**, 9,170 bytes, 4 `data-ref-arg` placeholders + `data-ref-code` + `id="ref-invalid"`;
+  `/download` says "send a join link, not this page's URL"; `/docs/run-a-node` shows the /join form.
+- **Failure found and fixed, not parked**: the first deploy left `/r/…` at **404** while `/join` was
+  200. Not a routing bug — `assets.run_worker_first` did not list `/r/*`, so the asset layer answered
+  before the Worker saw the request. Added the path, asserted it in `join.test.js`, redeployed: 301.
+- **CI**: run **44879998162** (CI, `a13512d`) pending at the end of this run — recorded, not waited on.
+  `bb6d8a3`'s pending run was superseded (same concurrency group) — a queue cancel, not a red.
+- **Next run**: box 6 = **226** (operator-only referral visibility).
+
 ## 23:20 PT — 0.3.65 box 4 (row 224) DONE: the operator can find and copy their own code, and the site explains it [no triage]
 
 - **A0**: `GET /commits/main` → `8784012` (box 3) → `actions/runs?head_sha=8784012` → run **44877406357**
