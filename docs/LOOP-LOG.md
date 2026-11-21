@@ -3,6 +3,32 @@
 Newest first. Written by the release loop; read by the assistant, who relays anything
 that needs Jeremy. `[TRIAGE]` = a decision waiting on the assistant.
 
+## 16:30 PT — 0.3.63 §6 DONE (2/2) against the published linux asset; windows run still building, handle kept [no triage needed]
+
+- **A0**: `GET /commits/main` → `e571a50` (docs-only commit, `total_count: 0` runs — expected under
+  paths-ignore). In-flight release runs are pinned to `build/1bd78d84250a`, so they are unaffected.
+- **Release builds**: `44839998336` (linux) **completed / success**, asset `gpn-linux.tar.gz`
+  published 00:05:57Z (340,500,918 B, sha256 `461f8b771cef0f43…db7b9b`). `44840000852` (windows)
+  **in_progress** — steps through `build agent` green, `build node in_progress`, attest/sign/
+  provenance-gate/publish all still `pending`; 37 min in, inside the 40-75 min cold-build budget.
+  Handle kept in the box; not waited on.
+- **Boxes ticked (§6, 2/2)**: downloaded the *published* linux asset via the asset API (the
+  `releases/download/…` URL returns 9 bytes on this private repo — must use
+  `/releases/assets/<id>` with `Accept: application/octet-stream`), sha256 matched the API digest,
+  then `scripts/verify-release-artifact.py --version 0.3.63 --bundle linux=… --no-manifest` →
+  **exit 0**, `version stamp 'gpn-node/0.3.63'`, `'fork-choice' x4`, `'gpn-forked' x2`,
+  `'deep-fork' x3`, `'primary-authoritative' x3`, `'gpncs/2' x2`, `MAX_REORG_DEPTH = 288` ok;
+  `./gpn_node --version` → `gpn_node 0.3.63 (spec 52, 1bd78d8)`.
+- **Scope truth**: 0.3.63 contains **zero Rust changes** (`git diff --stat 2a15c16 1bd78d8 -- '*.rs'
+  'Cargo.toml'` empty), so §6 box 1's "strings the change added" has nothing new to find; the tick
+  is the previous batch's markers still present plus the correct version stamp, and it says so.
+- **Next run**: first unticked box is §5 "attestation exists for the published digest". If
+  `44840000852` is success, take the windows sha256 from the run/`windows-latest` and check the
+  cosign bundle path (private repo → `attestations/sha256:` 404 is expected, not a failure); then §7.
+  If failure, read the failing step's log first (it will be `build node` or the provenance gate).
+- **Watch item**: if windows publishes, `C:\gpn\bin` on box 1 is replaced by that job — no mutating
+  SSH to box 1 until it finishes.
+
 ## 15:53 PT — 0.3.63 §4 DONE (CI green on `1bd78d8`) and §5 builds dispatched; handles recorded, run ended [no triage needed]
 
 - **CI (A0)**: HEAD `0e95cc9` is docs-only → `total_count: 0` (expected). In-flight run
