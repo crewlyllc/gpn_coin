@@ -35,7 +35,16 @@ that needs Jeremy. `[TRIAGE]` = a decision waiting on the assistant.
 - **Mistake, fixed**: I ran `pkill -x gpn_scheduler` to stop the test AP and **killed the production
   access point on :8092** (same process name). systemd (`gpn-accesspoint.service`) auto-restarted it;
   verified `active` + `/health` **200** afterwards. Written into TOOLS.md: never kill by process name
-  on this host — kill the pid whose `/proc/<pid>/cmdline` contains the test port.- **Next run**: box 7 = **227** (`gpn-referrals --export` deterministic airdrop input, schema-versioned).
+  on this host — kill the pid whose `/proc/<pid>/cmdline` contains the test port.- **A0 tooling defect found**: `GET /actions/runs?head_sha=<short sha>` returns **`total_count: 0`** —
+  it only matches a **full 40-char** sha. Run `cf706e7` (this push) reads `0` short and **1 (`CI`,
+  pending)** full. Every earlier "no run for this SHA (docs-only), expected" entry in this log used a
+  short sha, so those conclusions were reached by an unsound check (they happened to be right:
+  `151072c`/`8e6a2b5` are docs-only). Recorded in TOOLS.md; the next run should add a tiny
+  `scripts/ci-status.sh <ref>` that resolves the full sha and prints status+conclusion, so the loop
+  stops hand-rolling this query.
+- **CI handle**: `CI` run **pending** for `cf706e7` (full sha `cf706e70fdceb09278036977d03ee7b92cdccaf6`).
+  Not waited on.
+- **Next run**: box 7 = **227** (`gpn-referrals --export` deterministic airdrop input, schema-versioned).
   No decision needed; no [TRIAGE].
 
 ## 23:55 PT — no box worked: my checkout was one commit stale and the box was already live [no triage]
