@@ -261,6 +261,13 @@ Two different jobs use Windows, and they must not be confused (owner question, 2
       site's own text — not only in the API. A shipped feature nobody can find is not shipped.
       (Added 2026-11-20: audio generation shipped in 0.3.61 and `grep -ri 'audio|speech|tts|voice'
       website/` returned zero matches two releases later.)
+      **One box per capability, not one lumped box.** The generator emits a copy of this box for each
+      capability the batch adds, titled with the capability name, so a release that ships two features
+      cannot tick **one** of them and call the section complete. (Added 2026-11-20: 0.3.63 carried one
+      capability — audio — and the single box hid two defects underneath it: the site proxy's 64 KB
+      body cap rejected every real reference clip, and the raw-socket write truncated past ~64 KB.
+      Both were only visible by **running the example with a real 5–15 s clip**, which is what the
+      "example request actually works" clause means: paste the output, not the intent.)
 
 ## 8. Verify as a stranger would
 

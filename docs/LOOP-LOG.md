@@ -3,6 +3,35 @@
 Newest first. Written by the release loop; read by the assistant, who relays anything
 that needs Jeremy. `[TRIAGE]` = a decision waiting on the assistant.
 
+## 17:05 PT — §7b capability box ticked: audio is now callable from gpncoin.ai (two Worker defects fixed) [no triage]
+
+- **A0**: CI on main HEAD `4f3b803` = `pending` (run 44846236695, queued 00:48Z) — noted, not waited on,
+  because the box worked was docs + Worker, not a build step.
+- **Box worked**: §7b "Every capability added in a bundle is discoverable from gpncoin.ai" — the last
+  unticked box before §9. Row 202's audio shipped in 0.3.61 and `website/ai.html` had zero mentions.
+- **Defect 1 — the site could not submit a clip at all.** `worker.js` used `AP_PROXY_MAX_BODY` (64 KB)
+  for every proxied POST. A 5 s/22 kHz reference clip is 220 KB raw → ~294 KB base64. Live probe:
+  `70 KB`, `100 KB`, `200 KB` → `"the access point sent a malformed response"`; `400 KB` →
+  `"could not complete the request"`. The AP itself answers the same bodies `202` over loopback and
+  over a raw TCP socket, so the fault was ours. Fix: `AUDIO_MAX_BODY = 12 MB` on `/v1/audio/speech`
+  only (AP refuses >8 MB decoded, base64 inflates 4/3) — `dfd36e1`.
+- **Defect 2 — truncated socket writes.** After the cap was raised, 200 KB still failed while 60 KB
+  worked, i.e. the boundary moved to exactly 64 KB again. `socketHttpRequest` wrote the whole body in
+  one `writer.write()`; the Workers runtime truncates past ~64 KB. Now 16 KB chunks — `f5ed974`.
+- **Proof (live, through the site)**: POST `https://gpncoin.ai/api/v1/audio/speech` with the 9.66 s
+  `ref.wav` (568 KB body) → `202` → `completed` in ~21 s → `67,536 B, audio/mpeg, seconds 9.228`,
+  `payment: channel`, `channel_id 7`; `GET /api/v1/audio/<id>` → `content-type: audio/mpeg`,
+  `sha256 a9eeb92b…` == `data[0].sha256`; `file` → `MPEG ADTS, layer III, v2, 64 kbps, 24 kHz, Monaural`.
+- **Docs**: `website/ai.html` gains a live "🔊 Audio / speech" tab (Linux / macOS / Python) covering the
+  5–15 s window, `consent:true`, MP3-only, measured-seconds billing with refund, no retention +
+  `voice_sha256`, poll-then-download, and the `503 payment: not_charged` out-of-window case;
+  `AudioGeneration` named beside the other capabilities; meta description updated.
+- **Tests**: `node --test worker/worker.test.mjs` → **61 passed, 0 failed**, including a new case that a
+  300 KB clip body is forwarded whole where the chat cap would have 413'd.
+- **Rows**: 219 and 220 marked COMPLETE with this evidence. Template §7b now says **one box per
+  capability**, and that "example request actually works" means paste the output.
+- **Next box**: §9 (one node updates itself and reports the new version). Nothing needs Jeremy.
+
 ## 16:5x PT — 0.3.63 PUBLISHED (releases.json 0.3.63, both assets); §5/§7/§7b/§8 ticked, two release-cut defects fixed [no triage]
 
 - **A0**: `GET /actions/runs/44818515439` → `completed / success` on `1bd78d8` (the scripts commit);
