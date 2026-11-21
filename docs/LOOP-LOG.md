@@ -3,6 +3,39 @@
 Newest first. Written by the release loop; read by the assistant, who relays anything
 that needs Jeremy. `[TRIAGE]` = a decision waiting on the assistant.
 
+## 21:05 PT — 0.3.64 IS RELEASED and the fleet runs it: cut, publish, site stamp, self-update all done; only the 218 behaviour proof waits on a clean 100-block window [no triage]
+
+- **A0**: origin/main HEAD was `d6c0e37` → `total_count: 0` (docs-only, paths-ignore, expected).
+  The release commit's CI run **44853610678** (`9df5341`) was polled with a bounded watcher and
+  reached **`completed success` at 2026-11-21T04:42Z**: secret-scan ✅, fmt+clippy ✅, linux
+  build+tests ✅ (02:59:29→03:30:45Z), windows self-hosted build+tests ✅ (03:23:56→04:42Z; its last
+  step, gpn-agent, ran 04:02:37→04:42Z after the gpn-node step's 38 min — a cold build, not a hang,
+  which is why it was not cancelled). No failure existed to diagnose this run.
+- **Box ticked (§4, now 4/4 DONE)** — the CI-green gate, with the run id and per-job times.
+- **§7 DONE — the release is cut.** `bash scripts/release-cut.sh --version 0.3.64 --timeout 300 --yes`,
+  exit 0, `released 0.3.64 — https://gpncoin.ai/releases.json`. Content gate: `OK: 0.3.64 artifacts
+  verified on linux, windows — 5 marker(s) present in each`. Manifest commit `75a3460`. Mirror digests
+  re-checked by API: linux 340,489,746 B `e768dd45…`, windows 247,027,527 B `4d5b9f4e…` on both repos;
+  `network.json latest_version` 0.3.64; `releases.json` served 0.3.64 twice, 11 s apart.
+- **§7b DONE — the docs drift was real and is fixed.** The site's stamp said **0.3.61 in the md sources
+  and 0.3.63 in the generated HTML** — i.e. the HTML had been edited without the sources. All 16
+  `docs/*.md` stamps and 9 generated pages now read `release 0.3.64 — checked 2026-11-20 at block
+  337,469` (block read from the live node), `download.html` says `Current signed release: 0.3.64`, and
+  the live URLs were polled after the Cloudflare deploy, not read from the tree. Commit `07ba323`.
+  Note: `build-site-docs.py` was run and then **reverted** — it rewrites every nav link to `.html`,
+  which is a template change this release has no business making; the stamps were edited in place
+  (28 files, 29+/29-).
+- **§8 DONE** — anonymous download of both assets from `gpncoin.ai` (release-cut step 7) matched the
+  signed manifest by digest AND size; live docs pages polled at 0.3.64.
+- **§9 DONE — a node updated itself and is running 0.3.64.** `systemctl --user start gpn-update.service`
+  → `confirm: process=up rpc=yes 24s version=0.3.64` → `confirmed 0.3.64 is running`; `POST :9944
+  system_version` → `0.3.64`; rollback retained (`versions/0.3.63`, `current.previous` → it).
+- **Still open (§3b 217/218, §10)**: the behaviour proof needs a 100-block window authored entirely by
+  the new binary (deploy was 20:50:58 at #337466). The 21:02 gate run still covered two pre-deploy gaps
+  (`#337367→#337368` 67.90 s, `#337449→#337450` 63.27 s), unattributable by construction. The timer runs
+  every 30 min and writes `~/.gpn/cadence-gate.state`; **next run should read that file plus
+  `journalctl --user -u gpn-fleet | grep 'sealer:'` and tick 217/218, §10, §10b and the filing boxes**.
+
 ## 20:05 PT — 0.3.64: §5 closed (7/7); §4 CI gate still unanswered, one Windows job in flight [no triage]
 
 - **A0**: origin/main HEAD `ebf2943` is docs-only (`total_count: 0` runs — paths-ignore, expected).
