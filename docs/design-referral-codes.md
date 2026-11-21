@@ -184,3 +184,49 @@ typed string that cannot be checked.
 
 **Amounts are still undecided** and no promise is made here; this section defines the *record*, so
 that when the decision is made the data is complete, deduplicated and auditable.
+
+## 7c. The export command (row 227, implemented 0.3.65)
+
+```
+gpn-referrals --export [<file>]        # run on the AP host; omit <file> for stdout
+```
+
+Reads `referral-registry.json` (or `--registry <p>`) plus the self-referral sidecar
+`referral-self-referrals.json` in the same directory, and emits a schema-versioned JSON document:
+
+```
+{ "schema": "gpn-airdrop-input-v1",
+  "registry_file": "referral-registry.json", "registry_present": true,
+  "registry_sha256": "<sha256 of the registry bytes>",
+  "totals": { "participants": 4, "credited": 3, "excluded_invalid_for_address": 1,
+              "self_referrals": 1, "referrers": 3 },
+  "participants": [ { "address": "5…", "referred_by": "GPN-7K2X-9QMD-4T",
+                      "referred_by_address": "5…"|null, "status": "verified",
+                      "derivation_verified": true, "credited": true,
+                      "first_seen": 1764000000, "last_seen": 1764600000 } ],
+  "referrers": [ { "address": "5…"|null, "code": "GPN-7K2X-9QMD-4T",
+                   "referred": 7, "verified_referrals": 7 } ],
+  "self_referrals": [ { "address": "5…", "referred_by": "GPN-…", "first_seen": …,
+                        "last_seen": …, "attempts": 2, "credited": false } ] }
+```
+
+Rules the document itself encodes:
+
+- **Every registry entry is a participant row**, including `invalid_for_address`; `credited` is the
+  only field a payout script may sum. A replay is therefore *in the file as evidence* and *absent
+  from the total* — the same property `totals.excluded_invalid_for_address` states numerically.
+- **`derivation_verified`** is `true` only for `status: "verified"` (the code recomputed from
+  `referred_by_address`). `unverified` and `legacy` are attributed but not provable.
+- **De-duplication is structural**: the registry is keyed by ss58 address and first write wins, so an
+  operator who reinstalled five times is one row. `first_seen` never moves; `last_seen` does (row 227
+  added the field, and an older registry without it reads `last_seen == first_seen`).
+- **Self-referrals live in a sidecar**, not in the registry: a self-referral must not consume the
+  address's one attribution slot, or an operator who pasted their own code by mistake could never be
+  credited for a real one. The sidecar is evidence only: `credited: false`, never a participant.
+- **No wall clock and no absolute path** in the document, every collection ordered by address/code,
+  so re-running `--export` on the same registry produces a byte-identical file. `registry_sha256`
+  is the fidelity check: hash the registry you archived, compare it to the manifest you shipped.
+- An absent registry is not an error: `registry_present: false`, empty arrays, all totals zero.
+
+The file is written stage-then-rename, like the registry itself, so an interrupted export cannot
+leave a half-written manifest that later looks like a complete one.

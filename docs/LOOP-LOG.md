@@ -3,6 +3,26 @@
 Newest first. Written by the release loop; read by the assistant, who relays anything
 that needs Jeremy. `[TRIAGE]` = a decision waiting on the assistant.
 
+## 00:40 PT — 0.3.65 box 7 (row 227) DONE: deterministic airdrop export [no triage]
+
+- **A0**: `GET /commits/main` → **`be56bd0`** (loop-log) → `actions/runs?head_sha=be56bd0…` →
+  **0 runs** (docs-only, `paths-ignore`) as expected. Checkout was 2 commits behind again;
+  fast-forwarded to `be56bd0` before reading the checklist.
+- **Box ticked — §3b 227** (`gpn-referrals --export [<file>]`, schema `gpn-airdrop-input-v1`).
+  - Document carries `registry_sha256`, `totals`, `participants[]` (every entry, with `credited`),
+    `referrers[]` and `self_referrals[]`; contract written in `docs/design-referral-codes.md` §7c.
+  - Three storage changes were needed to make the contract honest: `Entry.last_seen` (serde-default,
+    refreshed in place on a repeat sighting; a pre-227 registry reads it as `first_seen`),
+    self-referrals recorded in a **sidecar** (`referral-self-referrals.json`) instead of being
+    silently dropped — so they are evidence yet can never consume the address's attribution slot —
+    and `invalid_for_address` rows kept in `participants[]` with `credited: false`.
+  - Determinism: no clock, no absolute path, ordered collections, stage-then-rename write.
+- **Tests**: `cargo test --bin gpn-referrals` 5 passed; `--lib referral::` 29 passed; `--bin
+  gpn_scheduler` 103 passed; fmt clean; clippy with CI's `CLIPPY_ALLOWS -D warnings` exit 0.
+- **Live**: exported `/tmp/ref227` twice → `cmp` **BYTE-IDENTICAL**; 4 participants (3 credited),
+  1 self-referral excluded; `registry_sha256` == `sha256sum` of the registry file.
+- No blockers, no triage items. Next box: 228 (reorg band 33–288).
+
 ## 00:10 PT — 0.3.65 box 6 (row 226) DONE: referrals are operator-only, read with a wallet signature [no triage]
 
 - **A0**: `GET /commits/main` → **`151072c`** (loop-log) → `actions/runs?head_sha=151072c` → **0 runs**

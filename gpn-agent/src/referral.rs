@@ -52,17 +52,24 @@
 //!
 //! ```json
 //! { "5Grw…": { "ref": "GPN-7K2X-9QMD-4T", "first_seen": 1764000000,
-//!              "code": "GPN7K2X9QMD4T", "derived_from": "5Fhn…", "status": "verified" } }
+//!              "last_seen": 1764600000, "code": "GPN7K2X9QMD4T",
+//!              "derived_from": "5Fhn…", "status": "verified" } }
 //! ```
 //!
 //! `status` is one of [`STATUS_VERIFIED`], [`STATUS_UNVERIFIED`],
 //! [`STATUS_LEGACY`] or [`STATUS_INVALID_FOR_ADDRESS`] — see
 //! [`record_once_checked`]. An old registry file (pre-0.3.65) loads unchanged
-//! and every entry reads as `legacy`.
+//! and every entry reads as `legacy`; one written before row 227 has no
+//! `last_seen` and reads it as `first_seen` ([`last_seen_of`]).
 //!
-//! First write wins — a provider that later publishes a different code does not
-//! change the recorded attribution (that would make referrals retroactively
-//! rewritable, exactly what write-once storage prevents on the node side).
+//! First write wins for the CODE — a provider that later publishes a different
+//! code does not change the recorded attribution (that would make referrals
+//! retroactively rewritable, exactly what write-once storage prevents on the
+//! node side). Only `last_seen` moves on a repeat sighting.
+//!
+//! A self-referral is never written here: it goes to the sidecar
+//! `referral-self-referrals.json` ([`SELF_REFERRALS_FILE`]) as evidence, so it
+//! can neither be credited nor block that address's later real attribution.
 
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -297,6 +304,11 @@ pub struct Entry {
     pub r#ref: String,
     /// Unix seconds when the AP first saw this address with that code.
     pub first_seen: u64,
+    /// Unix seconds when this address last presented any code. `0` in a
+    /// registry written before row 227 — read it through [`last_seen_of`],
+    /// which falls back to `first_seen` rather than claiming "seen at 1970".
+    #[serde(default)]
+    pub last_seen: u64,
     /// Canonical compact form, set only for a derived code that parsed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub code: Option<String>,
@@ -317,6 +329,48 @@ fn status_legacy() -> String {
     "legacy".to_string()
 }
 
+/// When this entry was last seen, tolerating a pre-row-227 registry that has
+/// no `last_seen` field at all.
+pub fn last_seen_of(e: &Entry) -> u64 {
+    if e.last_seen == 0 {
+        e.first_seen
+    } else {
+        e.last_seen
+    }
+}
+
+/// File holding self-referral attempts — evidence for the airdrop export,
+/// never a payout input. Kept beside the registry, separate from it, so a
+/// self-referral can never take (or block) the address's real attribution:
+/// the registry is keyed by address and first write wins.
+pub const SELF_REFERRALS_FILE: &str = "referral-self-referrals.json";
+
+/// One recorded self-referral attempt.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SelfReferralEntry {
+    /// The code the node presented, in display form.
+    pub r#ref: String,
+    /// Unix seconds of the first attempt from this address.
+    pub first_seen: u64,
+    /// Unix seconds of the most recent attempt.
+    pub last_seen: u64,
+    /// How many attempts this address made.
+    pub attempts: u64,
+}
+
+/// The self-referral sidecar path for a registry file (same directory).
+pub fn self_referrals_path(registry: &Path) -> std::path::PathBuf {
+    registry.with_file_name(SELF_REFERRALS_FILE)
+}
+
+/// Load the self-referral sidecar (`{}` when absent — the normal case).
+pub fn load_self_referrals(path: &Path) -> BTreeMap<String, SelfReferralEntry> {
+    std::fs::read_to_string(path)
+        .ok()
+        .and_then(|s| serde_json::from_str(&s).ok())
+        .unwrap_or_default()
+}
+
 /// `Entry::status` for a derived code whose address was published and checked.
 pub const STATUS_VERIFIED: &str = "verified";
 /// `Entry::status` for a derived code published with no address to check.
@@ -327,6 +381,10 @@ pub const STATUS_LEGACY: &str = "legacy";
 /// `Entry::status` for a code that does not match the address the node itself
 /// published. Replayed someone else's code: kept, never credited.
 pub const STATUS_INVALID_FOR_ADDRESS: &str = "invalid_for_address";
+/// A code that named the presenting node itself. Never stored in the registry
+/// (it would block that address's real attribution); recorded in the
+/// self-referral sidecar as evidence and excluded from every payout total.
+pub const STATUS_SELF_REFERRAL: &str = "self_referral";
 
 /// Outcome of [`record_once`].
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -412,43 +470,56 @@ pub fn record_once_checked(
         Err(e) => return Ok(RecordOutcome::MalformedCode(e.to_string())),
     };
 
+    let mut self_ref = false;
     let (stored, status, derived_from) = match derived {
         Some(ref code) => {
             // Self-referral: the code computed from THIS node's own address.
             if let Ok(own) = derive_code(address) {
                 if &own == code {
-                    return Ok(RecordOutcome::SelfReferral(display_form(&code)));
+                    self_ref = true;
+                    (display_form(&code), STATUS_SELF_REFERRAL, None)
+                } else {
+                    classify_against(code, ref_address)
                 }
-            }
-            let check = ref_address.map(str::trim).filter(|a| !a.is_empty());
-            match check {
-                Some(a) => match derive_code(a) {
-                    Ok(expect) if &expect == code => {
-                        (display_form(&code), STATUS_VERIFIED, Some(a.to_string()))
-                    }
-                    Ok(_) | Err(_) => (
-                        display_form(&code),
-                        STATUS_INVALID_FOR_ADDRESS,
-                        Some(a.to_string()),
-                    ),
-                },
-                None => (display_form(&code), STATUS_UNVERIFIED, None),
+            } else {
+                classify_against(code, ref_address)
             }
         }
         None => match validate(raw) {
-            Ok(c) => (c, STATUS_LEGACY, None),
+            Ok(c) => {
+                if is_self_referral(&c, Some(address), peer_id) {
+                    self_ref = true;
+                    (c, STATUS_SELF_REFERRAL, None)
+                } else {
+                    (c, STATUS_LEGACY, None)
+                }
+            }
             Err(e) => return Ok(RecordOutcome::Invalid(e)),
         },
     };
 
-    if status == STATUS_LEGACY && is_self_referral(&stored, Some(address), peer_id) {
+    let _lock = crate::llm::StoreLock::acquire(path)?;
+
+    // A self-referral is evidence, not an attribution: it goes to the sidecar
+    // and never into the address-keyed registry, so it can neither be credited
+    // nor block that address's later, real referral.
+    if self_ref {
+        record_self_referral(path, address, &stored, now)?;
         return Ok(RecordOutcome::SelfReferral(stored));
     }
 
-    let _lock = crate::llm::StoreLock::acquire(path)?;
     let mut map = load_registry(path);
-    if let Some(have) = map.get(address) {
-        return Ok(RecordOutcome::Existing(have.r#ref.clone()));
+    if let Some(have) = map.get_mut(address) {
+        // Reinstalls and re-announcements are the same operator: refresh
+        // `last_seen` in place and never write a second row.
+        let seen = last_seen_of(have).max(now);
+        let refresh = seen != last_seen_of(have) || have.last_seen == 0;
+        let code = have.r#ref.clone();
+        if refresh {
+            have.last_seen = seen;
+            persist_entries(path, &map)?;
+        }
+        return Ok(RecordOutcome::Existing(code));
     }
     let canonical = derived.clone();
     map.insert(
@@ -456,25 +527,89 @@ pub fn record_once_checked(
         Entry {
             r#ref: stored.clone(),
             first_seen: now,
+            last_seen: now,
             code: canonical,
             derived_from,
             status: status.to_string(),
         },
     );
-    if let Some(dir) = path.parent() {
-        let _ = std::fs::create_dir_all(dir);
-    }
-    // Stage then rename: a truncated registry would silently lose every
-    // attribution collected so far, and this file is the only copy.
-    let tmp = path.with_extension("json.tmp");
-    std::fs::write(&tmp, serde_json::to_string_pretty(&map)?)?;
-    std::fs::rename(&tmp, path)?;
+    persist_entries(path, &map)?;
     if status == STATUS_INVALID_FOR_ADDRESS {
         // Written above: the entry is evidence. Report it so the AP log names
         // the address rather than silently treating it as attributed.
         return Ok(RecordOutcome::InvalidForAddress(stored));
     }
     Ok(RecordOutcome::New(stored))
+}
+
+/// Classify a parsed `GPN` code against the referrer address the node published.
+fn classify_against(
+    code: &str,
+    ref_address: Option<&str>,
+) -> (String, &'static str, Option<String>) {
+    let check = ref_address.map(str::trim).filter(|a| !a.is_empty());
+    match check {
+        Some(a) => match derive_code(a) {
+            Ok(expect) if expect == code => {
+                (display_form(code), STATUS_VERIFIED, Some(a.to_string()))
+            }
+            Ok(_) | Err(_) => (
+                display_form(code),
+                STATUS_INVALID_FOR_ADDRESS,
+                Some(a.to_string()),
+            ),
+        },
+        None => (display_form(code), STATUS_UNVERIFIED, None),
+    }
+}
+
+/// Stage-then-rename write of the registry map (shared with the sidecar writer).
+fn persist_entries(path: &Path, map: &BTreeMap<String, Entry>) -> std::io::Result<()> {
+    if let Some(dir) = path.parent() {
+        let _ = std::fs::create_dir_all(dir);
+    }
+    // A truncated registry would silently lose every attribution collected so
+    // far, and this file is the only copy.
+    let tmp = path.with_extension("json.tmp");
+    std::fs::write(&tmp, serde_json::to_string_pretty(map)?)?;
+    std::fs::rename(&tmp, path)?;
+    Ok(())
+}
+
+/// Record (or refresh) a self-referral attempt in the sidecar beside `registry`.
+/// The caller holds the store lock for `registry`.
+fn record_self_referral(
+    registry: &Path,
+    address: &str,
+    code: &str,
+    now: u64,
+) -> std::io::Result<()> {
+    let path = self_referrals_path(registry);
+    let mut map = load_self_referrals(&path);
+    match map.get_mut(address) {
+        Some(e) => {
+            e.last_seen = e.last_seen.max(now);
+            e.attempts += 1;
+        }
+        None => {
+            map.insert(
+                address.to_string(),
+                SelfReferralEntry {
+                    r#ref: code.to_string(),
+                    first_seen: now,
+                    last_seen: now,
+                    attempts: 1,
+                },
+            );
+        }
+    }
+    if let Some(dir) = path.parent() {
+        let _ = std::fs::create_dir_all(dir);
+    }
+    let tmp = path.with_extension("json.tmp");
+    std::fs::write(&tmp, serde_json::to_string_pretty(&map)?)?;
+    std::fs::rename(&tmp, &path)?;
+    Ok(())
 }
 
 // ── derived codes (row 223, design docs/design-referral-codes.md) ───────────
@@ -1233,5 +1368,89 @@ mod tests {
         assert_eq!(reg.len(), 3);
         assert_eq!(reg["5AAA"].r#ref, "team-alpha");
         assert_eq!(reg["5BBB"].r#ref, "team-beta");
+    }
+
+    // ── row 227: last_seen + self-referral evidence ──────────────────────────
+
+    #[test]
+    fn a_reinstall_refreshes_last_seen_and_never_adds_a_row() {
+        let dir = td("last-seen");
+        let p = dir.join(REGISTRY_FILE);
+        let alice = derive_code(ALICE).unwrap();
+        record_once_checked(&p, "5Node1", &alice, Some(ALICE), None, 100).unwrap();
+        let first = load_registry(&p);
+        assert_eq!(first["5Node1"].first_seen, 100);
+        assert_eq!(last_seen_of(&first["5Node1"]), 100);
+
+        // Four more sightings of the same wallet: still one row, last_seen moves.
+        for t in 101..105u64 {
+            assert!(matches!(
+                record_once_checked(&p, "5Node1", &alice, Some(ALICE), None, t).unwrap(),
+                RecordOutcome::Existing(_)
+            ));
+        }
+        let reg = load_registry(&p);
+        assert_eq!(reg.len(), 1, "five sightings must stay one attribution");
+        assert_eq!(reg["5Node1"].first_seen, 100);
+        assert_eq!(reg["5Node1"].last_seen, 104);
+        assert_eq!(reg["5Node1"].r#ref, display_form(&alice));
+    }
+
+    #[test]
+    fn a_pre_row_227_registry_reads_last_seen_as_first_seen() {
+        let dir = td("old-registry");
+        let p = dir.join(REGISTRY_FILE);
+        // Exactly the shape 0.3.62 wrote: no `last_seen` key at all.
+        std::fs::write(
+            &p,
+            r#"{"5Old":{"ref":"team-alpha","first_seen":1700000000,"status":"legacy"}}"#,
+        )
+        .unwrap();
+        let reg = load_registry(&p);
+        assert_eq!(reg["5Old"].last_seen, 0);
+        assert_eq!(last_seen_of(&reg["5Old"]), 1700000000);
+        // A later sighting fills the field in rather than losing the row.
+        record_once(&p, "5Old", "team-alpha", None, 1700000500).unwrap();
+        let reg = load_registry(&p);
+        assert_eq!(reg.len(), 1);
+        assert_eq!(reg["5Old"].first_seen, 1700000000);
+        assert_eq!(reg["5Old"].last_seen, 1700000500);
+    }
+
+    #[test]
+    fn a_self_referral_is_evidence_in_the_sidecar_and_never_blocks_the_real_code() {
+        let dir = td("self-sidecar");
+        let p = dir.join(REGISTRY_FILE);
+        let own = derive_code(ALICE).unwrap();
+        let bob = derive_code(BOB).unwrap();
+
+        // Alice presents her own code: rejected, but recorded as evidence.
+        assert_eq!(
+            record_once_checked(&p, ALICE, &display_form(&own), Some(ALICE), None, 10).unwrap(),
+            RecordOutcome::SelfReferral(display_form(&own))
+        );
+        assert!(load_registry(&p).is_empty(), "never an attribution");
+        let side = load_self_referrals(&self_referrals_path(&p));
+        assert_eq!(side.len(), 1);
+        assert_eq!(side[ALICE].attempts, 1);
+        assert_eq!(side[ALICE].first_seen, 10);
+
+        // Repeated attempts add evidence, not rows.
+        record_once_checked(&p, ALICE, &own, Some(ALICE), None, 20).unwrap();
+        let side = load_self_referrals(&self_referrals_path(&p));
+        assert_eq!(side[ALICE].attempts, 2);
+        assert_eq!(side[ALICE].last_seen, 20);
+        assert_eq!(side[ALICE].first_seen, 10);
+        assert!(load_registry(&p).is_empty());
+
+        // Alice later presents Bob's real code: it lands, the sidecar is untouched.
+        assert_eq!(
+            record_once_checked(&p, ALICE, &bob, Some(BOB), None, 30).unwrap(),
+            RecordOutcome::New(display_form(&bob))
+        );
+        let reg = load_registry(&p);
+        assert_eq!(reg[ALICE].r#ref, display_form(&bob));
+        assert_eq!(reg[ALICE].status, STATUS_VERIFIED);
+        assert_eq!(load_self_referrals(&self_referrals_path(&p)).len(), 1);
     }
 }
