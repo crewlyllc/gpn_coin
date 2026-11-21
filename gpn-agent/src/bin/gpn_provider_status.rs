@@ -1350,16 +1350,33 @@ fn p2p_info_from_rpc_evidence(
 /// identity right now", which a consumer can act on (skip this provider); an
 /// omitted key is indistinguishable from an old heartbeat that never had the
 /// feature, and a cached id is the bug this replaced.
-/// Attach the referral code to a `/status` body — **only when one is set**.
+/// Classify a stored referral value for publication: a `GPN…` code is checked
+/// and published in canonical display form, anything else must pass the legacy
+/// 4–32 char rule. An unusable value is dropped with a warning — the heartbeat
+/// must never fail because of it.
+pub fn publishable_referral(raw: &str) -> Result<String, String> {
+    match gpn_agent::referral::parse_code(raw) {
+        Ok(compact) => Ok(gpn_agent::referral::display_form(&compact)),
+        Err(gpn_agent::referral::CodeError::NotDerived) => {
+            gpn_agent::referral::validate(raw).map_err(|e| e.to_string())
+        }
+        Err(e) => Err(e.to_string()),
+    }
+}
+
+/// Attach the referral code (and the referrer's address, when known) to a
+/// `/status` body — **only when one is set**.
 ///
-/// Deliberately omitted rather than `null`: nodes that never set a code must
-/// produce exactly the JSON they produced before referral capture existed
-/// (there is a regression test for that), and "absent" is unambiguous for the
-/// access point (nothing to record) while `null` invites a distinction nobody
-/// needs.
-fn attach_referral(body: &mut Value, code: Option<&str>) {
+/// `ref_address` is what makes the code checkable on the AP side: the AP
+/// recomputes the code from it and records `invalid_for_address` when it does
+/// not match. It is the REFERRER's address, so it is published only when the
+/// install supplied one.
+fn attach_referral(body: &mut Value, code: Option<&str>, ref_address: Option<&str>) {
     if let Some(c) = code.map(str::trim).filter(|c| !c.is_empty()) {
         body["ref"] = json!(c);
+    }
+    if let Some(a) = ref_address.map(str::trim).filter(|a| !a.is_empty()) {
+        body["ref_address"] = json!(a);
     }
 }
 
@@ -2531,7 +2548,7 @@ fn run_main() -> Result<(), Box<dyn std::error::Error>> {
     // heartbeat must never fail because of it.
     let referral_path = gpn_agent::referral::default_path();
     let referral_code = match gpn_agent::referral::read(&referral_path) {
-        Some(code) => match gpn_agent::referral::validate(&code) {
+        Some(code) => match publishable_referral(&code) {
             Ok(c) => Some(c),
             Err(e) => {
                 eprintln!(
@@ -2541,18 +2558,27 @@ fn run_main() -> Result<(), Box<dyn std::error::Error>> {
                 None
             }
         },
-        None => std::env::var("GPN_REF").ok().and_then(|raw| {
-            match gpn_agent::referral::validate(&raw) {
+        None => std::env::var("GPN_REF")
+            .ok()
+            .and_then(|raw| match publishable_referral(&raw) {
                 Ok(c) => Some(c),
                 Err(e) => {
                     eprintln!("[referral] ignoring GPN_REF: {e}");
                     None
                 }
-            }
-        }),
+            }),
     };
+    // The REFERRER's address, written beside the code by the installer. Only a
+    // derived code can be checked against it, and only when it parses as an
+    // account; a legacy code publishes the code alone.
+    let referral_address =
+        gpn_agent::referral::read(&gpn_agent::referral::address_path(&referral_path))
+            .filter(|a| gpn_agent::firstrun::ss58_to_public(a).is_ok());
     if let Some(c) = referral_code.as_deref() {
-        println!("[referral] publishing ref={c}");
+        match referral_address.as_deref() {
+            Some(a) => println!("[referral] publishing ref={c} ref_address={a}"),
+            None => println!("[referral] publishing ref={c}"),
+        }
     }
     // Job-type capabilities this node serves. A GPN node serves EVERY job type
     // by design ("one GPU, one job" = one job *at a time*, mutual exclusion —
@@ -2978,7 +3004,11 @@ fn run_main() -> Result<(), Box<dyn std::error::Error>> {
                 // Read from the ledger `gpn_snapshot heal` writes; `null` (never
                 // `false`) when that ledger cannot be read.
                 attach_fork_recovery(&mut body, &read_fork_recovery(&recovery_state_path()));
-                attach_referral(&mut body, referral_code.as_deref());
+                attach_referral(
+                    &mut body,
+                    referral_code.as_deref(),
+                    referral_address.as_deref(),
+                );
                 // #W49: "not serving" must stop looking identical to "broken".
                 // Omitted when the push lane is healthy (byte-identical JSON).
                 let blocked = push_state.lock().ok().and_then(|g| g.clone());
@@ -4634,15 +4664,36 @@ mod tests {
     #[test]
     fn referral_field_is_published_when_set() {
         let mut body = full_status_body();
-        attach_referral(&mut body, Some("team-alpha"));
+        attach_referral(&mut body, Some("team-alpha"), None);
         assert_eq!(body["ref"], json!("team-alpha"));
+    }
+
+    #[test]
+    fn a_derived_code_is_published_in_display_form_with_its_address() {
+        use gpn_agent::referral::{derive_code, display_form};
+        const ALICE: &str = "5GrwvaEF5zXb26Fz9rcQpDWS57CtERHpNehXCPcNoHGKutQY";
+        let compact = derive_code(ALICE).unwrap();
+        let shown = display_form(&compact);
+        assert_eq!(publishable_referral(&compact).unwrap(), shown);
+        assert_eq!(publishable_referral(&shown).unwrap(), shown);
+        let mut body = full_status_body();
+        attach_referral(&mut body, Some(&shown), Some(ALICE));
+        assert_eq!(body["ref"], json!(shown));
+        assert_eq!(body["ref_address"], json!(ALICE));
+        // A typo'd checksum is refused with the reason, not published.
+        let mut typo: Vec<char> = compact.chars().collect();
+        let last = *typo.last().unwrap();
+        *typo.last_mut().unwrap() = if last == '2' { '3' } else { '2' };
+        let typo: String = typo.into_iter().collect();
+        let err = publishable_referral(&typo).unwrap_err();
+        assert!(err.contains("checksum"), "{err}");
     }
 
     #[test]
     fn referral_field_is_absent_when_unset_or_blank() {
         for none in [None, Some(""), Some("   ")] {
             let mut body = full_status_body();
-            attach_referral(&mut body, none);
+            attach_referral(&mut body, none, none);
             assert!(
                 body.get("ref").is_none(),
                 "`ref` must be OMITTED (not null) when there is no code: {none:?}"
@@ -4662,7 +4713,7 @@ mod tests {
         let before = full_status_body();
         let before_text = serde_json::to_string(&before).unwrap();
         let mut after = before.clone();
-        attach_referral(&mut after, None);
+        attach_referral(&mut after, None, None);
         let after_text = serde_json::to_string(&after).unwrap();
         assert_eq!(before_text, after_text);
         assert!(!after_text.contains("\"ref\""), "{after_text}");

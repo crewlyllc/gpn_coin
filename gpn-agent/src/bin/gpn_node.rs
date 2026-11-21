@@ -3970,11 +3970,68 @@ fn apply_ref_arg(argv: &[String], path: &std::path::Path) {
         RefArg::Code(c) => c,
         RefArg::MissingValue => {
             asciieprintln!(
-                "[referral] --ref needs a code (4-32 chars, [A-Za-z0-9_-]) — continuing without a referral"
+                "[referral] --ref needs a code (GPN… or 4-32 chars [A-Za-z0-9_-]) — continuing without a referral"
             );
             return;
         }
     };
+    // `--ref CODE@ADDRESS` (row 223): the address is the REFERRER's, and it is
+    // what lets the access point recompute the code instead of trusting it.
+    // Stored beside the code, also write-once, so a later flag cannot re-point
+    // the attribution at a different wallet.
+    let (raw, ref_address) = match raw.split_once('@') {
+        Some((code, addr)) => (code.to_string(), Some(addr.trim().to_string())),
+        None => (raw, None),
+    };
+    // A `GPN…` code must parse (including its checksum) before it is stored:
+    // a typo that got past it would attribute the install to a wallet that
+    // does not exist, and the checksum exists precisely to catch that here.
+    if let Err(
+        e @ (gpn_agent::referral::CodeError::BadLength(_)
+        | gpn_agent::referral::CodeError::BadChar(_)
+        | gpn_agent::referral::CodeError::Checksum { .. }),
+    ) = gpn_agent::referral::parse_code(&raw)
+    {
+        asciieprintln!("[referral] invalid code '{raw}': {e} — continuing WITHOUT a referral");
+        return;
+    }
+
+    if let Some(addr) = ref_address.as_deref() {
+        let valid_address = gpn_agent::firstrun::ss58_to_public(addr).is_ok();
+        let derived_ok = match gpn_agent::referral::derive_code(addr) {
+            Ok(expect) => gpn_agent::referral::parse_code(&raw)
+                .map(|c| c == expect)
+                .unwrap_or(false),
+            Err(_) => false,
+        };
+        if !valid_address {
+            asciieprintln!(
+                "[referral] --ref address '{addr}' is not an ss58 account — storing the code only"
+            );
+        } else if !derived_ok {
+            // Not fatal: a legacy typed code has no derivation to check. Say so
+            // rather than silently recording an unverifiable pair.
+            asciieprintln!(
+                "[referral] code '{raw}' does not derive from {addr}; storing both, the access point will mark it invalid_for_address"
+            );
+        }
+        if valid_address {
+            let addr_path = gpn_agent::referral::address_path(path);
+            match gpn_agent::referral::store_once(&addr_path, addr) {
+                Ok(WriteOutcome::Written(a)) => asciiprintln!(
+                    "[referral] recorded referrer address '{a}' -> {}",
+                    addr_path.display()
+                ),
+                Ok(WriteOutcome::AlreadySet(a)) => asciiprintln!(
+                    "[referral] referrer address already set to '{a}'; ignoring '{addr}'"
+                ),
+                Ok(WriteOutcome::Invalid(e)) => {
+                    asciieprintln!("[referral] unusable referrer address: {e}")
+                }
+                Err(e) => asciieprintln!("[referral] could not write {}: {e}", addr_path.display()),
+            }
+        }
+    }
     match write_once(path, &raw) {
         Ok(WriteOutcome::Written(code)) => asciiprintln!(
             "[referral] recorded '{code}' -> {} (write-once; used for the mainnet testnet-participation allocation)",
@@ -5289,6 +5346,38 @@ mod tests {
         // A different code later changes nothing (log line only, no panic).
         apply_ref_arg(&args(&["gpn_node", "--ref=other-team"]), &p);
         assert_eq!(std::fs::read_to_string(&p).unwrap(), "team-alpha\n");
+    }
+
+    #[test]
+    fn apply_ref_arg_records_the_referrer_address_beside_a_derived_code() {
+        use gpn_agent::referral::{address_path, derive_code, display_form, read};
+        const ALICE: &str = "5GrwvaEF5zXb26Fz9rcQpDWS57CtERHpNehXCPcNoHGKutQY";
+        let dir = td("ref-derived");
+        let p = dir.join("referral");
+        let code = display_form(&derive_code(ALICE).unwrap());
+
+        // The operator copies `--ref GPN-…@<referrer address>` from /join.
+        apply_ref_arg(
+            &args(&["gpn_node", "--ref", &format!("{code}@{ALICE}")]),
+            &p,
+        );
+        assert_eq!(read(&p).as_deref(), Some(code.as_str()));
+        assert_eq!(read(&address_path(&p)).as_deref(), Some(ALICE));
+
+        // Reinstalling the same wallet reproduces the same code: derivation is
+        // a pure function of the address, so re-running it changes nothing.
+        let again = display_form(&derive_code(ALICE).unwrap());
+        assert_eq!(again, code);
+        apply_ref_arg(
+            &args(&["gpn_node", "--ref", &format!("{again}@{ALICE}")]),
+            &p,
+        );
+        assert_eq!(read(&p).as_deref(), Some(code.as_str()));
+
+        // A later, different referrer cannot re-point the attribution.
+        apply_ref_arg(&args(&["gpn_node", "--ref", "other-team"]), &p);
+        assert_eq!(read(&p).as_deref(), Some(code.as_str()));
+        assert_eq!(read(&address_path(&p)).as_deref(), Some(ALICE));
     }
 
     #[test]

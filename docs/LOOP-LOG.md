@@ -3,6 +3,35 @@
 Newest first. Written by the release loop; read by the assistant, who relays anything
 that needs Jeremy. `[TRIAGE]` = a decision waiting on the assistant.
 
+## 22:55 PT — 0.3.65 box 3 (row 223) DONE: referral codes derive from the wallet and the AP checks them [no triage]
+
+- **A0**: `GET /commits/main` → `e883ac6` (loop-log docs commit) → `actions/runs?head_sha=e883ac6` →
+  **`total_count: 0`** (docs-only, `paths-ignore`), expected. The two earlier code SHAs:
+  `c03600a` run 44874120688 **cancelled** (superseded by the next push, not a failure of our code),
+  `7924b35` run 44876315200 **pending** at start of this run — not waited on (this box is code+tests).
+- **Box ticked — §3b 223** (wallet-derived referral codes, design `docs/design-referral-codes.md`).
+  `GPN` + 9 base32 chars (45 bits of `blake2_256("gpn-referral-v1" || account id)`) + a checksum char
+  = 13 chars, displayed `GPN-7K2X-9QMD-4T`; `parse_code`/`verify_for_address` accept both forms and
+  name the expected checksum char on a typo. Registry entries gain `code`/`derived_from`/`status`
+  (`verified`|`unverified`|`legacy`|`invalid_for_address`) with serde defaults, so a pre-0.3.65
+  registry still loads, as `legacy`. Node: `--ref CODE@ADDRESS` stores the referrer address
+  write-once; the heartbeat publishes `ref` (display form) + `ref_address`; the AP's
+  `record_once_checked` recomputes and classifies.
+- **Evidence**: `--lib referral::` **18 passed**; `--bin gpn_node` **32**; `--bin gpn_provider_status`
+  **69**; `--bin gpn_scheduler` **103**; fmt clean; clippy `-D warnings` clean.
+- **Live**: real binary in isolated prefixes — same wallet → same code on "reinstall", Bob's wallet →
+  a different code, checksum typo → `checksum is 'T' but this code's checksum is 'V'` and **no files
+  written**. Independent Python implementation produced the identical two codes. Real scheduler on
+  :8096 + two fake providers publishing the same code with different addresses →
+  `referral-registry.json`: `5VerifiedNode status: "verified"`, `5ReplayNode status:
+  "invalid_for_address"` (recorded, not dropped), AP log names the replay. Both stayed routable.
+- **Design conflict resolved, not escalated**: the doc says "11 characters" in one place and
+  "~2⁻⁴⁸ at 12" in another while its own example is `GPN-7K2X-9QMD-4T`; the example won
+  (9 payload + checksum, ~2⁻⁴⁵ collisions). Noted in the box.
+- **Next run**: box 4 = **224** (show the code to the operator: dashboard card + Copy, startup
+  summary, `gpn_node --referral`) — UI/CLI work, no CI gate. Ask GitHub once for 44876315200 (and
+  this commit's own run) first.
+
 ## 23:05 PT — 0.3.65 box 2 (row 222) DONE: provider advertisement is a task matrix, and the AP holds boxes to it [no triage]
 
 - **A0**: `GET /commits/main` → `0a7e7fb` (loop-log docs commit) → `actions/runs?head_sha=0a7e7fb` →

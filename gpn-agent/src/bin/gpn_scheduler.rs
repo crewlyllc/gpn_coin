@@ -920,6 +920,10 @@ struct Provider {
     /// secret (a code is not an identity), it is never used for routing, and it
     /// never changes once recorded — see [`apply_referrals`].
     referral: Option<String>,
+    /// The REFERRER's ss58 address, published beside the code (`ref_address`)
+    /// so `apply_referrals` can recompute the code and prove it belongs to that
+    /// wallet. Absent for legacy installs and for unverifiable codes.
+    ref_address: Option<String>,
     /// SPEC 47 tier: `"backbone"` | `"leaf"`. A leaf is never published with
     /// a dialable multiaddr.
     reachability: String,
@@ -1185,6 +1189,12 @@ fn provider_from_caps(addr: &str, v: &Value, status_url: String, latency_ms: u64
         // `apply_referrals` (which also knows the peer id, for self-referral).
         referral: v
             .get("ref")
+            .and_then(|x| x.as_str())
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(String::from),
+        ref_address: v
+            .get("ref_address")
             .and_then(|x| x.as_str())
             .map(str::trim)
             .filter(|s| !s.is_empty())
@@ -1459,6 +1469,7 @@ fn apply_push_heartbeats(
                     p2p_multiaddrs: p.multiaddrs.clone(),
                     p2p_port: None,
                     referral: None,
+                    ref_address: None,
                     reachability: p.reachability.clone(),
                     gateway: p.gateway,
                     active: p.active_jobs,
@@ -1567,7 +1578,15 @@ fn apply_referrals_at(out: &mut [Provider], path: &std::path::Path) {
         let Some(raw) = p.referral.take() else {
             continue;
         };
-        match gpn_agent::referral::record_once(path, &addr, &raw, p.peer_id.as_deref(), now) {
+        let ref_addr = p.ref_address.clone();
+        match gpn_agent::referral::record_once_checked(
+            path,
+            &addr,
+            &raw,
+            ref_addr.as_deref(),
+            p.peer_id.as_deref(),
+            now,
+        ) {
             Ok(gpn_agent::referral::RecordOutcome::New(code)) => {
                 println!("[referral] {addr} attributed to {code}");
             }
@@ -1583,6 +1602,15 @@ fn apply_referrals_at(out: &mut [Provider], path: &std::path::Path) {
             }
             Ok(gpn_agent::referral::RecordOutcome::Invalid(e)) => {
                 eprintln!("[referral] {addr} published an unusable code ({e}); not recorded");
+            }
+            Ok(gpn_agent::referral::RecordOutcome::MalformedCode(e)) => {
+                eprintln!("[referral] {addr} published an unusable code ({e}); not recorded");
+            }
+            Ok(gpn_agent::referral::RecordOutcome::InvalidForAddress(code)) => {
+                eprintln!(
+                    "[referral] {addr} published {code} with an address that does not produce it; \
+recorded as invalid_for_address (not credited)"
+                );
             }
             Ok(gpn_agent::referral::RecordOutcome::Skipped) => {}
             Err(e) => eprintln!("[referral] could not record {addr}: {e}"),
@@ -1628,6 +1656,7 @@ fn unreachable_placeholder(status_url: String) -> Provider {
         p2p_multiaddrs: vec![],
         p2p_port: None,
         referral: None,
+        ref_address: None,
         reachability: "leaf".to_string(),
         gateway: false,
         active: 0,
@@ -9731,6 +9760,7 @@ mod tests {
             p2p_multiaddrs: vec![],
             p2p_port: None,
             referral: None,
+            ref_address: None,
             reachability: "backbone".to_string(),
             gateway: false,
             active: 0,
@@ -11897,6 +11927,61 @@ mod tests {
         // Stored as given (case preserved), compared case-insensitively.
         assert_eq!(out[3].referral.as_deref(), Some("Team_Alpha-1"));
         assert_eq!(gpn_agent::referral::load_registry(&reg).len(), 1);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// Row 223 end to end at the AP's ingress: a derived code is checked against
+    /// the address the node published, and a code that does not recompute from
+    /// that address is recorded as evidence (`invalid_for_address`) rather than
+    /// credited or silently dropped.
+    #[test]
+    fn ap_verifies_a_derived_code_against_the_published_address() {
+        use gpn_agent::referral::{derive_code, display_form, load_registry};
+        const ALICE: &str = "5GrwvaEF5zXb26Fz9rcQpDWS57CtERHpNehXCPcNoHGKutQY";
+        const BOB: &str = "5FHneW46xGXgs5mUiveU4sbTyGBzmstUspZC92UhjJM694ty";
+        let (dir, reg) = ref_tmp("derived");
+        let code = display_form(&derive_code(ALICE).unwrap());
+
+        let mut out = vec![
+            provider_from_caps(
+                "5VerifiedNode",
+                &json!({"address": "5VerifiedNode", "ref": code, "ref_address": ALICE}),
+                "http://v".into(),
+                5,
+            ),
+            // Same code replayed with the wrong address: recorded, not credited.
+            provider_from_caps(
+                "5ReplayNode",
+                &json!({"address": "5ReplayNode", "ref": code, "ref_address": BOB}),
+                "http://r".into(),
+                5,
+            ),
+            // Legacy typed code: still works, labelled legacy.
+            provider_from_caps(
+                "5LegacyNode",
+                &json!({"address": "5LegacyNode", "ref": "team-alpha"}),
+                "http://l".into(),
+                5,
+            ),
+        ];
+        apply_referrals_at(&mut out, &reg);
+        assert_eq!(out.len(), 3, "attribution never drops a provider");
+        let stored = load_registry(&reg);
+        assert_eq!(
+            stored["5VerifiedNode"].status,
+            gpn_agent::referral::STATUS_VERIFIED
+        );
+        assert_eq!(stored["5VerifiedNode"].derived_from.as_deref(), Some(ALICE));
+        assert_eq!(
+            stored["5ReplayNode"].status,
+            gpn_agent::referral::STATUS_INVALID_FOR_ADDRESS
+        );
+        assert_eq!(
+            stored["5LegacyNode"].status,
+            gpn_agent::referral::STATUS_LEGACY
+        );
+        // A replayed code is still routable: attribution is not a gate.
+        assert_eq!(out[1].referral.as_deref(), Some(code.as_str()));
         let _ = std::fs::remove_dir_all(dir);
     }
 
