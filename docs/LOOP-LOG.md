@@ -3,6 +3,32 @@
 Newest first. Written by the release loop; read by the assistant, who relays anything
 that needs Jeremy. `[TRIAGE]` = a decision waiting on the assistant.
 
+## 07:5x PT — 0.3.65 §1 (2/3) and §2 (6/6) closed from §3b evidence; CI run 44911936175 still in flight [no triage]
+
+- **A0**: `GET /commits/main` = `3112d86999118255a280fff862f24c8af2dc46ac`, local HEAD equal.
+  Run **44911936175** (`3a76aa3f`) = `in_progress`, `updated_at` 15:18:57Z: secret-scan + fmt/clippy
+  **success**, windows `Build + test gpn-node (release)` since 15:15:02Z, linux walking its 26 test
+  steps (step 8 at 15:39:43Z). Genuinely progressing, not stale, and §4 is not a build/publish box
+  → not waited on, not cancelled; verdict re-asked next run.
+- **§2 Implement 6/6 ticked**: test counts (tasks 15, gpn_scheduler 103, referral 29, gpn_node 32,
+  provider_status 69, gpn-referrals 5, gui 17, site 13/10/45, worker 62); fmt/clippy clean per item
+  **and** independently by CI's `fmt + clippy` job on `3a76aa3f` (success 15:16–15:18Z); call sites
+  grepped (`adapt_v1_jobs` ← `gpn_scheduler.rs:5477`, `record_once_checked` ← `:1582`,
+  `derive_code` ← `gui.rs:77`/`gpn_node.rs:795`, `may_ask_for_blocks_anchored` ←
+  `block_serving.rs:1191`); no env-gated default; changes present in the tree (`tasks.rs` ←
+  `7924b35`/`c03600a`, `service.rs` ← `3a76aa3`/`7da7d42`/`4d6d0c7`).
+- **§1 Test first 2/3**: behaviour + machine-observable named per item 221–229; the third box
+  (**a failing test pasted before the fix**) is left **UNTICKED on purpose** — only row 228 has a
+  recorded pre-fix failure (`Run 01:45 PT failed and was diagnosed, not parked`), and its inverted
+  `force_branch_best` test was fixed by `3a76aa3`; rows 221–227 name their tests but archived no
+  failing-first output. Recorded as a process gap rather than ticking seven claims that do not exist.
+- **§4 box 4 (CI green)** still open with its handle; §0b filing boxes wait on publication.
+- **Next run**: ask 44911936175 once. `success` → tick §4 box 4 and §5 box 1 (n/a — no item in
+  221–229 has a Windows-specific observable) → dispatch `release-linux-selfhosted.yml` +
+  `release-windows.yml` on `3a76aa3f`, write both run ids into §5, end the run. `failure` → quote the
+  failing line first, then fix.
+- No blocker, no decision needed.
+
 ## 07:2x PT — 0.3.65 §4 boxes 1-3 TICKED (paths-ignore measured, docs batched, no superseding push); CI verdict still open [no triage]
 
 - **A0**: main is `40262467c2ba…fae090a2` (`git ls-remote origin refs/heads/main`, local HEAD equal).
