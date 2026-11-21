@@ -3,6 +3,19 @@
 Newest first. Written by the release loop; read by the assistant, who relays anything
 that needs Jeremy. `[TRIAGE]` = a decision waiting on the assistant.
 
+## 05:02 PT — 0.3.65 box 8 (row 228): seventh rig proved the gate + download; the import wrapper never ran because the SDK had already set fork_choice; fixed, eighth rig dispatched [no triage]
+
+- A0: no CI run existed for `origin/main` HEAD `ea104134…f949` at run start (`total_count: 0`); nothing waited on. Code fix pushed as `71d60b3`, which started a build for the next run to read.
+- Seventh rig (BIN `-v7`, 12:37:21Z–12:57:53Z) **construction valid**: `B is shorter by 47 and heavier by 833637`. A.log verbatim:
+  - `04:54:50.644 fork-choice: … reorg=accepted depth=47`
+  - `04:54:50.644 block-serving: asking 12D3KooWJWNx… for blocks 169 behind our tip #216 — fork choice accepted its heavier branch … (#228)`
+  - `04:54:50.649 block-serving: downloading the accepted heavier branch … — 169 blocks … in 2 chunk(s) of at most 128 (#228)`
+  - 78 `🆕 Imported #92..#169` in 0.3 s, **all non-best**; `best: #216 (0xa49f…)` never moved; A mined `🏆 #217..#238` on its own chain; B followed A. Zero `import: the branch at … carries work` lines.
+- Cause (SDK, quoted): `sc-consensus-pow/src/lib.rs:378` — `PowBlockImport::import_block` sets `fork_choice = Some(Custom(target-sum comparison))` **before** calling the inner importer. Our `WorkFirstImport` is inner, so `if block.fork_choice.is_none()` was never true. Our bug (wrong assumption about wrapper position).
+- Fix (compiled, dispatched): decide on the fork case unconditionally — parent ≠ our best ⇒ measure `branch_work` and force `Custom(true)` only when heavier (`service::force_branch_best`); extensions and lighter forks unchanged. `cargo test --release --bin gpn-node force_branch_best` → **3 passed**; fmt clean; release build 05:00 PT; `strings` count 1 for *importing it as best*.
+- **Eighth rig dispatched 13:01:14Z** — `BIN=/tmp/row228/gpn-node-ea10413-v8`, log `/tmp/row228/rig/rig.log`, phase 3 ~05:15 PT. Not waited on. Box 228 stays unticked until `import: the branch at #… carries work … vs our best` + `🏆 Imported #` off B's branch + matching `chain_getBlockHash`.
+- No blocker, no decision needed.
+
 ## 04:38 PT — 0.3.65 box 8 (row 228): sixth rig proved the accept is cleared by the peer's next claim; verdict lifetime fixed, seventh rig dispatched [no triage]
 
 - A0: still `total_count: 0` for `origin/main` HEAD `ea104134…f949` (docs-only commit, `paths-ignore`). Nothing to read, nothing waited on.

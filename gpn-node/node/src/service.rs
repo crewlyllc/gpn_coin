@@ -212,6 +212,16 @@ fn branch_work(client: &FullClient, tip: <Block as BlockT>::Hash) -> Option<u128
     Some(work)
 }
 
+/// Row 228: is this import the point where a heavier fork becomes our best?
+///
+/// Only a *true fork* (`parent_is_our_best == false`) is a candidate — a normal
+/// extension is left to the SDK, and a branch whose own work is not greater is
+/// left as a side block. This is the decision the SDK cannot make: it compares
+/// the sum of `PowAlgorithm::Difficulty`, and our difficulty is a target.
+fn force_branch_best(parent_is_our_best: bool, theirs: u128, ours: u128) -> bool {
+    !parent_is_our_best && theirs > ours
+}
+
 /// Row 228, gate lifetime: when does an accepted-fork verdict stop applying?
 ///
 /// `reorg` is *this* claim's verdict; `peer_tip_held` says the peer's announced
@@ -275,7 +285,15 @@ impl BlockImport<Block> for WorkFirstImport {
         &self,
         mut block: sc_consensus::BlockImportParams<Block>,
     ) -> Result<sc_consensus::ImportResult, Self::Error> {
-        if block.fork_choice.is_none() {
+        // Run 7 (04:54:50) showed this wrapper never fired: the SDK's
+        // `PowBlockImport::import_block` (sc-consensus-pow lib.rs:378) sets
+        // `fork_choice = Some(Custom(target-sum comparison))` itself *before*
+        // calling us, so `is_none()` was false for every block of the branch
+        // and the branch landed 🆕 while best stayed #216. Decide on the fork
+        // case unconditionally instead: a true fork (parent is not our best)
+        // gets its work measured by us and is imported as best only when our
+        // accounting says heavier. Extensions and lighter forks are untouched.
+        {
             let info = self.client.info();
             let parent = *block.header.parent_hash();
             if parent != info.best_hash {
@@ -283,7 +301,7 @@ impl BlockImport<Block> for WorkFirstImport {
                 let number = u64::from(*block.header.number());
                 let ours = chain_work(&self.client, u64::from(info.best_number));
                 if let (Some(theirs), Some(ours)) = (branch_work(&self.client, hash), ours) {
-                    if theirs > ours {
+                    if force_branch_best(parent != info.best_hash, theirs, ours) {
                         log::info!(
                             "import: the branch at #{number} ({hash:?}) carries work {theirs} vs \
                              our best #{best} {ours} — importing it as best, not as a side block \
@@ -4097,5 +4115,31 @@ mod accepted_fork_tests {
     fn an_ordinary_claim_starts_and_stays_closed() {
         assert!(!next_accepted_fork(false, false, false));
         assert!(!next_accepted_fork(false, false, true));
+    }
+}
+
+#[cfg(test)]
+mod force_branch_best_tests {
+    use super::force_branch_best;
+
+    /// Run 7 (04:54:50): the SDK set `Custom(false)` on every block of a branch
+    /// whose measured work is 10.7M against our 281k. That is the case this
+    /// decision exists for.
+    #[test]
+    fn a_heavier_fork_is_forced_to_best() {
+        assert!(force_branch_best(false, 10_768_460, 281_429));
+    }
+
+    /// A normal extension (parent is our best) is never touched.
+    #[test]
+    fn an_extension_is_left_to_the_sdk() {
+        assert!(!force_branch_best(true, 10_768_460, 281_429));
+    }
+
+    /// A fork that is not heavier stays a side block.
+    #[test]
+    fn a_lighter_fork_stays_a_side_block() {
+        assert!(!force_branch_best(false, 281_429, 10_768_460));
+        assert!(!force_branch_best(false, 5, 5));
     }
 }
