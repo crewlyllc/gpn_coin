@@ -3,6 +3,33 @@
 Newest first. Written by the release loop; read by the assistant, who relays anything
 that needs Jeremy. `[TRIAGE]` = a decision waiting on the assistant.
 
+## 23:05 PT — 0.3.65 box 2 (row 222) DONE: provider advertisement is a task matrix, and the AP holds boxes to it [no triage]
+
+- **A0**: `GET /commits/main` → `0a7e7fb` (loop-log docs commit) → `actions/runs?head_sha=0a7e7fb` →
+  **`total_count: 0`** (docs-only, `paths-ignore`), expected; not waited on. Run **44874120688** on
+  `c03600a` was still in flight — per the rule, not blocked on: this box is code+tests.
+- **Box ticked — §3b 222** (task matrix), commit `7924b35`, pushed once. `tasks::TaskMatrix` parses both
+  the new shape (`tasks`/`task_models`/`limits`) and the legacy one (`capabilities` + flat `models[]`);
+  the provider heartbeat now emits the matrix (derived from the live model list via `jobkind::model_kind`);
+  `/providers` publishes it and `POST /v1/jobs` enforces it.
+- **Evidence**: `cargo test --lib tasks::` **15 passed**; `cargo test --bin gpn_scheduler` **102 passed**;
+  fmt clean; clippy with CI's `-D warnings` + `CLIPPY_ALLOWS` clean.
+- **Live** (new scheduler on :8096, fake provider on :8097 declaring `chat`+`generate-image`):
+  `chat`+`sd-turbo` → **400** `model 'sd-turbo' serves task=generate-image, not task=chat`;
+  `chat`+`llama3.2:1b` → **503** `provider does not list model … for task=chat`; `speak` → **503**
+  `no provider advertises task=speak`; `caption` → **501**; `chat`+`qwen2.5:0.5b` passed the gate and
+  logged `[v1/jobs] task=chat model=qwen2.5:0.5b -> /v1/chat/completions` (then 403 "hot-wallet
+  inference is disabled" — the test AP had no signer; that is the gate working, not routing failing).
+  Legacy compat seen live: the 0.3.64 box on :8093 (no `tasks` field) parsed as a legacy matrix and
+  stayed routable.
+- **Method note for future runs**: work happens in `~/gpn-work-222` (a fresh clone), NOT in the
+  runner checkout — that directory is the linux runner's work dir and a dispatched build wipes it.
+- **Site gap found, not fixed here**: `website/ai.html` renders its word table from `/api/v1/tasks`,
+  which is fine, but the *provider matrix* (`tasks`/`task_models`/`limits`) is not documented anywhere on
+  the site yet. That belongs with the release notes (§7b), not this row.
+- **Next run**: box 3 = **223** (wallet-derived referral codes, design `docs/design-referral-codes.md`) —
+  code only, no CI gate. Ask GitHub once for 44874120688 (and 7924b35's own run) first.
+
 ## 22:10 PT — 0.3.65 box 1 (row 221) DONE: task vocabulary + `POST /v1/jobs` live on :8092, proven end to end [no triage]
 
 - **A0**: `GET /commits/main` → HEAD `97b257c` (the 21:37 checklist commit) → `GET /actions/runs?head_sha=97b257c`
