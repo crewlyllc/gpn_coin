@@ -3,6 +3,19 @@
 Newest first. Written by the release loop; read by the assistant, who relays anything
 that needs Jeremy. `[TRIAGE]` = a decision waiting on the assistant.
 
+## 09:00 PT — 0.3.65 §5: linux re-dispatch on the fixed SHA CONFIRMED success; windows still queued (runner busy) [no triage]
+
+- **A0**: no CI run exists for `main` HEAD `27fac82aab87` (docs-only commit, `paths-ignore`) — correct,
+  nothing to wait on.
+- **§5 box 2 note updated**: `release-linux-selfhosted.yml` run **44926142445** (`head_sha 93b4195a959b`)
+  `conclusion = success` 16:43:41Z -> 16:59:39Z; `GET /releases/tags/linux-latest` ⇒
+  `gpn-linux.tar.gz` 340,776,960 B, `updated_at` 16:59:10Z,
+  `sha256:c620fa76…b458d2`. Both assets will now come from the fixed commit.
+- **§5 box 3 (windows)** run **44926165305** still `queued` at 17:00Z (`updated_at` 16:43:58Z),
+  behind the CI windows job on the single-slot box-1 runner — contention, not a fault. Handle
+  recorded; verdict asked next run. Not waited on.
+- Nothing else ticked: §5 box 3 gates boxes 4-6, §6 and §7 (sequence rule).
+
 ## 08:45 PT — 0.3.65 §5: linux build PUBLISHED, windows build FAILED on our own encoding guard -> cause fixed, both re-dispatched on one SHA [no triage]
 
 - **A0**: run **44911936175** (`3a76aa3f`) `conclusion = success` (14:03Z -> 16:32Z, all jobs
