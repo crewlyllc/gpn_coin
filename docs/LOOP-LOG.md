@@ -3,6 +3,33 @@
 Newest first. Written by the release loop; read by the assistant, who relays anything
 that needs Jeremy. `[TRIAGE]` = a decision waiting on the assistant.
 
+## 17:4x PT — 0.3.63 CLOSED AND FILED: §10 row update, §10b timings, archive + INDEX [no triage]
+
+- **A0**: CI on main HEAD `a42374a` — `GET /actions/runs?head_sha=a42374a` → `total_count: 0`.
+  Docs-only commit, `ci.yml` paths-ignores `**/*.md`; expected, not a missing build.
+- **Self-check of the previous tick**: `https://gpncoin.ai/releases.json` still serves
+  `0.3.63` `published_at 2026-11-21T00:39:45Z`, assets `461f8b77` / `a7b1793b` — holds.
+- **Boxes ticked** (all in `docs/releases/archive/0.3.63.md`, one docs commit):
+  - §10 box 3 "mark the task row DONE" — ticked **as n/a, not as DONE**: 0.3.63's scope for row 217
+    was the restated acceptance + its gate, and the gate's live verdict is FAIL (17:01 PT, mean
+    11.80 s, 3 unexplained >3x gaps, max 84.27 s). Row 217 therefore stays IN-PROGRESS in GPN-LIST.md
+    and now carries `RELEASED 0.3.63 (2026-11-20) — release ccfa687, build 1bd78d8 … re-bundles with
+    fix/218-sealer-heartbeat (fe71e35)`. Marking it COMPLETE would have been a false claim: 0.3.63
+    has an empty `.rs` diff.
+  - §10b both boxes — `scripts/release-timing.py 0.3.63 --json docs/releases/timing/0.3.63.json`
+    exit 0, `total: 6h29m`, `38 of 51 seen`; `docs/releases/timing/0.3.63.md` committed (74 lines).
+    Slowest measurable step **4h15m**, and the honest reading is recording latency, not work:
+    36 of 38 ticks share one timestamp (17:05:29) because the back half was ticked in a single
+    commit. Named shortening: tick each box in the commit that satisfies it.
+  - §0b filing both boxes — `git mv docs/releases/0.3.63.md docs/releases/archive/0.3.63.md` done;
+    `docs/releases/INDEX.md` has its row.
+- **Blockers**: none. **Triage**: none.
+- **Next run**: every 0.3.63 box is ticked and the release is filed, so the next run may go to
+  rule **C** if no item is IN-PROGRESS — but rows **217 (IN-PROGRESS)** and **218 (NEW, instrumented
+  on `fix/218-sealer-heartbeat` @ `fe71e35`)** are queued for the next code bundle, 217 by the
+  decision recorded in §3b. Bundling those two into 0.3.64 (merge `fe71e35`, gate goes green) is
+  the obvious next step.
+
 ## 17:24 PT — §9 deploy/confirm DONE (4/4): this box self-updated to 0.3.63; §10 2/3 [no triage]
 
 - **A0**: CI on main HEAD `44f75e4` — no run exists for that sha (`GET /actions/runs?head_sha=`
