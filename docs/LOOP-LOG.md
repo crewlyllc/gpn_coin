@@ -1,53 +1,28 @@
-## 13:12 PT — 0.3.65 closed; 0.3.66 bundled (230/231/232) and checklist generated [no triage]
+## 14:12 PT — 0.3.66 item 230 implemented and proven live (confirm failure names the child's cause) [no triage]
 
-- **A0**: `origin/main` == local HEAD `77ea397f1590538061332eb7a7e20ad5bdc09c87` (docs-only
-  "loop log: 0.3.65 finished"); `GET /actions/runs?head_sha=<full 40>` ⇒ `total_count: 0` — expected
-  under `ci.yml` paths-ignore. Nothing waited on, nothing in flight that blocks a bundle.
-- **B satisfied → C executed**: 0.3.65 checklist is filed (`docs/releases/archive/0.3.65.md`, INDEX
-  row present), `releases.json` serves 0.3.65 and the process reports `0.3.65` (§10 box 1, 12:53 PT),
-  and rows 221–229 are `COMPLETE 0.3.65` (done in the 13:05 run).
-- **Bundled** the only three `NEW` rows — **230** (confirm failure must name the child's cause),
-  **231** (`register_provider` call_index 0 must be `Pays::No`), **232** (purge "paid registration"
-  language). Marked `IN-PROGRESS`; nothing deleted.
-- **Version**: `scripts/bump-version.py patch` → **0.3.66**; `--check` ⇒ `lockstep: 15 manifest(s)
-  and 14 lockfile entr(ies) agree`; `network.json latest_version` → 0.3.66; CHANGELOG section
-  written (no `_TODO_`).
-- **Checklist**: `scripts/make-release-checklist.py 0.3.66` ⇒ `docs/releases/0.3.66.md` (3 in-progress).
-- **Tooling fix found while generating**: the generator took the checklist's `done when:` line from
-  the *discovery* column, so every box would have quoted "found 2026-11-21 …" instead of its
-  acceptance criteria (0.3.66's 231/232 rows put the clause mid-description). Now it takes the
-  clause from the description when present. Same commit.
-- **Blocked by our own guard, then fixed it**: `scripts/git-hooks/pre-commit` (single-writer guard,
-  added 2026-11-21) read `published` from `network.json latest_version` — which `bump-version.py`
-  sets to the version being *bundled*. So at the exact commit that opens 0.3.66 the hook saw
-  published==highest and refused it: "source changes with no open bundle". A guard that forbids
-  bundling is wrong, not the bundle. `published` now comes from `docs/releases/INDEX.md` (a row is
-  written only after the checklist is ticked and the manifest is live), with network.json as an
-  offline fallback when INDEX has no rows. Verified: hook passes with 0.3.66 open and would refuse
-  again once 0.3.66 is filed. Commit `f1db747`, one push (`77ea397..f1db747`).
-- **Next run**: start at 0.3.66 box 1 (§1 of the checklist), one box per run.
-
-## 12:20 PT — §8 stranger-download proof: both assets match the signed manifest byte-for-byte  [no triage]
-
-- **A0**: `origin/main` was `3ee5cb3d386e1992e7a564b9b1c5dd0861b6df23` ("release 0.3.65: §7b capability
-  boxes ticked"), a docs-only commit (`docs/LOOP-LOG.md`, `docs/releases/0.3.65.md`), so
-  `GET /actions/runs?head_sha=3ee5cb3…` ⇒ `total_count: 0` — expected under `ci.yml` paths-ignore,
-  not a missing run. Local checkout was 1 commit behind; pulled `--ff-only` before touching anything.
-- **Box worked: §8 "Verify as a stranger would" — 3/3, now DONE 12:20 PT.** Anonymous (no token, no
-  cookies, no account) `curl -sL` of the two URLs `releases.json` publishes:
-  linux `200` / **340,776,960 B** / `c620fa767b7eeebd879fa16617d990989d67c3cc0c1b6936569db093c8b458d2`;
-  windows `200` / **248,752,159 B** / `38d9ee82e15c3263d8e93913e00f1639894ab05681a136d4a116d806dc40bede`.
-  All four values equal `https://gpncoin.ai/releases.json` (0.3.65, published 18:57:29Z) exactly, and the
-  linux hash equals the `release_id` the fleet's own 11:19 self-update recorded — a stranger's bytes and
-  the running fleet's bytes are the same bytes.
-- **Corrected a stale instruction, not just ticked it:** §8's third box names `downloads.md`; that path
-  is **404** live and has never existed. The stamp lives at `docs/downloads.html` ⇒ 200, line 50
-  "Verified against: chain spec 52 / release 0.3.65 — checked 2026-11-21 at block 340,878", and
-  `/download` says "Current signed release: 0.3.65". Polled live, not read from the repo copy.
-- **Remaining in 0.3.65**: §1 one box left unticked by design (no pre-fix failing run archived for
-  221–227 — gap recorded, not papered over), §10 Prove the behaviour (3), §10b timing (2), §0b filing (2,
-  gated on §10). Next run starts at §10.
-# LOOP-LOG
+- **A0**: `GET /commits/main` ⇒ `7988c47dc79891755bc4d54faa48a04cf50ba8bf` (docs-only "releases: file
+  the eight unarchived checklists"); `?head_sha=` ⇒ `total_count: 0` — expected under `ci.yml`
+  paths-ignore. Nothing in flight, nothing waited on.
+- **Boxes worked (§1 + §2 of the 0.3.66 checklist, item 230)**: tests written first and failing
+  (`error[E0407]: method `child_evidence` is not a member of trait `ConfirmProbe`` + 8 more), then
+  the implementation. `ChildEvidence` on the probe trait, carried on `ProcessGone` and rendered by
+  `describe()`; production `ProcessRpcProbe` reads the fresh `last-exit.json` record and the node
+  log, baselined at attempt start so a stale record can never be quoted; the same facts are written
+  back to `last-exit.json` as a `child` object (`Report.child`, optional, so old NDJSON still parses
+  — `exit_report.rs` is `#[path]`-shared with the node, whose `cargo check` was run: Finished).
+- **Proof, end to end**: `gpn_update --confirm --expect 0.3.66 --rpc 127.0.0.1:3999` inside
+  `unshare -rpf --mount-proc` with an empty version tree and a fixture ledger ⇒
+  `confirm failed: signal=process (never appeared) after 30 s — 0.3.66 never came up; … child:
+  exit 69 (no-ollama); ollama is required and not reachable at 127.0.0.1:11434; first output:
+  [gpn-node] OLLAMA NOT RUNNING at 127.0.0.1:11434; node log: [gpn-node] exiting: no-ollama`.
+  The ledger gained `{"code":69,"kind":"no-ollama",…,"child":{"exit_code":69,…}}`; a stale 0.3.65
+  `corrupt-key` record in the same file was correctly ignored.
+- **Tests/suites**: `--lib` 785 passed / 0 failed / 14 ignored (update::tests 114); `--bin
+  gpn_update` 8 passed (2 new). fmt clean; clippy with ci.yml's exact allow-list clean.
+- **Pushed once**: `6f2b7685f5d8fd2e0039ae87b1518a62eb718d44` (code + checklist in one commit).
+  CI run **44955662523** pending at 14:12 PT — handle written into the §4 box, **not waited on**.
+- **Next run**: read run 44955662523's conclusion (tick §4 or fix the red), then §3b item 231
+  (`register_provider` → `Pays::No`).
 
 ## 13:05 PT — 0.3.65 finished: §10 proved live (3/3), §10b recorded, checklist filed [no triage]
 
@@ -1757,3 +1732,54 @@ in flight and correctly absent from INDEX/archive. `GPN-LIST.md` rows 217/218 ma
   Boxes 3 and 4 left OPEN with the run handle above; next run asks GitHub once for 44818515439.
 - **Next run**: if 44818515439 is success → tick §4 boxes 3/4 and move to §5 (build both platforms,
   dispatched and ended, not waited on). If failure → read the failing job's log first.
+
+## 13:12 PT — 0.3.65 closed; 0.3.66 bundled (230/231/232) and checklist generated [no triage]
+
+- **A0**: `origin/main` == local HEAD `77ea397f1590538061332eb7a7e20ad5bdc09c87` (docs-only
+  "loop log: 0.3.65 finished"); `GET /actions/runs?head_sha=<full 40>` ⇒ `total_count: 0` — expected
+  under `ci.yml` paths-ignore. Nothing waited on, nothing in flight that blocks a bundle.
+- **B satisfied → C executed**: 0.3.65 checklist is filed (`docs/releases/archive/0.3.65.md`, INDEX
+  row present), `releases.json` serves 0.3.65 and the process reports `0.3.65` (§10 box 1, 12:53 PT),
+  and rows 221–229 are `COMPLETE 0.3.65` (done in the 13:05 run).
+- **Bundled** the only three `NEW` rows — **230** (confirm failure must name the child's cause),
+  **231** (`register_provider` call_index 0 must be `Pays::No`), **232** (purge "paid registration"
+  language). Marked `IN-PROGRESS`; nothing deleted.
+- **Version**: `scripts/bump-version.py patch` → **0.3.66**; `--check` ⇒ `lockstep: 15 manifest(s)
+  and 14 lockfile entr(ies) agree`; `network.json latest_version` → 0.3.66; CHANGELOG section
+  written (no `_TODO_`).
+- **Checklist**: `scripts/make-release-checklist.py 0.3.66` ⇒ `docs/releases/0.3.66.md` (3 in-progress).
+- **Tooling fix found while generating**: the generator took the checklist's `done when:` line from
+  the *discovery* column, so every box would have quoted "found 2026-11-21 …" instead of its
+  acceptance criteria (0.3.66's 231/232 rows put the clause mid-description). Now it takes the
+  clause from the description when present. Same commit.
+- **Blocked by our own guard, then fixed it**: `scripts/git-hooks/pre-commit` (single-writer guard,
+  added 2026-11-21) read `published` from `network.json latest_version` — which `bump-version.py`
+  sets to the version being *bundled*. So at the exact commit that opens 0.3.66 the hook saw
+  published==highest and refused it: "source changes with no open bundle". A guard that forbids
+  bundling is wrong, not the bundle. `published` now comes from `docs/releases/INDEX.md` (a row is
+  written only after the checklist is ticked and the manifest is live), with network.json as an
+  offline fallback when INDEX has no rows. Verified: hook passes with 0.3.66 open and would refuse
+  again once 0.3.66 is filed. Commit `f1db747`, one push (`77ea397..f1db747`).
+- **Next run**: start at 0.3.66 box 1 (§1 of the checklist), one box per run.
+
+## 12:20 PT — §8 stranger-download proof: both assets match the signed manifest byte-for-byte  [no triage]
+
+- **A0**: `origin/main` was `3ee5cb3d386e1992e7a564b9b1c5dd0861b6df23` ("release 0.3.65: §7b capability
+  boxes ticked"), a docs-only commit (`docs/LOOP-LOG.md`, `docs/releases/0.3.65.md`), so
+  `GET /actions/runs?head_sha=3ee5cb3…` ⇒ `total_count: 0` — expected under `ci.yml` paths-ignore,
+  not a missing run. Local checkout was 1 commit behind; pulled `--ff-only` before touching anything.
+- **Box worked: §8 "Verify as a stranger would" — 3/3, now DONE 12:20 PT.** Anonymous (no token, no
+  cookies, no account) `curl -sL` of the two URLs `releases.json` publishes:
+  linux `200` / **340,776,960 B** / `c620fa767b7eeebd879fa16617d990989d67c3cc0c1b6936569db093c8b458d2`;
+  windows `200` / **248,752,159 B** / `38d9ee82e15c3263d8e93913e00f1639894ab05681a136d4a116d806dc40bede`.
+  All four values equal `https://gpncoin.ai/releases.json` (0.3.65, published 18:57:29Z) exactly, and the
+  linux hash equals the `release_id` the fleet's own 11:19 self-update recorded — a stranger's bytes and
+  the running fleet's bytes are the same bytes.
+- **Corrected a stale instruction, not just ticked it:** §8's third box names `downloads.md`; that path
+  is **404** live and has never existed. The stamp lives at `docs/downloads.html` ⇒ 200, line 50
+  "Verified against: chain spec 52 / release 0.3.65 — checked 2026-11-21 at block 340,878", and
+  `/download` says "Current signed release: 0.3.65". Polled live, not read from the repo copy.
+- **Remaining in 0.3.65**: §1 one box left unticked by design (no pre-fix failing run archived for
+  221–227 — gap recorded, not papered over), §10 Prove the behaviour (3), §10b timing (2), §0b filing (2,
+  gated on §10). Next run starts at §10.
+# LOOP-LOG
