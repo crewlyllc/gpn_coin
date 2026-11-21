@@ -3,6 +3,114 @@
 Newest first. Written by the release loop; read by the assistant, who relays anything
 that needs Jeremy. `[TRIAGE]` = a decision waiting on the assistant.
 
+## 07:20 PT AUDIT — fixed 2 (disk 95%→88%; stale scratch), needs-attention 1 (self-heal checkpoint fetch) [TRIAGE]
+
+**Ran by the daily auditor, not the release loop.** Release 0.3.65 is in flight (Windows runner
+`busy: true`, run 44911936175 `pending`), so **no service was restarted** and nothing touching
+`docs/releases/*` was edited.
+
+### What is running (command: `systemctl --user list-units 'gpn*' --all`, `list-unit-files | grep gpn`)
+
+11 enabled GPN units, **all active**: gpn-accesspoint, gpn-diffusion, gpn-explorer, gpn-faucet,
+gpn-finetune, gpn-fleet, gpn-fleet-directive, gpn-oracle, gpn-provider, gpn-provider-heartbeat,
+plus the 4 timers (ap-topup, cadence-gate, ci-cache-prune, deploy-drift, prune-ci-cache, update).
+`gpn-node.service` is `disabled`+dead **by design** (gpn-fleet runs the node — `run-fleet.sh[3436525]`
+is the live process). **No enabled-but-dead unit.** No restart needed, so none was done.
+
+Ports: 9944 RPC 405 (JSON-RPC needs POST), 8092 404 (root), 8093 404 (root), 8099 200, 11434 200.
+Chain: `system_chain` = "GPN Public Testnet", `system_version` = **0.3.64**, `system_peers` = **3**
+(all AUTHORITY), best #339883 at check time → #339890+ now (blocks importing ~3 s apart).
+Box 1 over SSH: `(Get-Process gpn-node).Path` = `C:\gpn\data\update\current\gpn-node.exe`,
+`system_version` = **0.3.64**.
+
+### Logs read
+
+`journalctl --user -u gpn-fleet -n 400` (400 lines): **0** `panic`, **0** `Reason: … ban`, **0**
+`Incompatible pruning modes`, **0** `taskkill`, 0 restart loops. Only non-INFO line — see the fault
+below (`self-heal: divergence check: no verdict — cannot fetch the signed checkpoint (GET
+https://github.com/crewlyllc/gpn_coin/releases/download/snapshot-latest/snapshot.json: error sending
+request for url …)`, twice in the window, every ~5 min).
+
+`~/.gpn/update/update-attempts.json` (note: it lives under `update/`, not `~/.gpn/`; there is no
+`~/.gpn/update.log`): last four attempts all `"outcome": "confirmed"` — 0.3.60 (3 attempts),
+0.3.62, 0.3.63, **0.3.64 `release_id` `e768dd45…60cb`** which equals the linux `sha256` in
+`website/releases.json`. `~/.gpn/update/current` → `versions/0.3.64`. No `signal=security`,
+no failed attempt. `gpn-update.service` exits 0 (last 06:22:38, 2 s).
+
+`openclaw cron runs --id feff1358…`: last entry `status: ok`, 602 s, 07:08 PT (the 0.3.65 §3 run
+above). No repeated timeouts.
+
+### Fault — self-heal divergence check is blind (ESCALATED, not mine to fix)
+
+Evidence, same turn:
+
+- fleet log: `cannot fetch the signed checkpoint (GET https://github.com/crewlyllc/gpn_coin/releases/download/snapshot-latest/snapshot.json: error sending request for url …)` — every ~5 min.
+- `curl -4 -s -o /dev/null -w '%{http_code}' -L <that URL>` → **200**. The URL and repo are fine.
+- `curl <same URL>` (no `-4`) → **000**, `curl: (28) Resolving timed out after 10000 ms`;
+same for `https://api.github.com/`, `https://github.com/`, `https://objects.githubusercontent.com/`.
+`curl -6` → the same 10 s timeout.
+- `getent hosts objects.githubusercontent.com` and `resolvectl query` both answer AAAA
+(185.199.11x.x); `ip -6 addr show enp42s0` shows **only `fe80::/64` link-local**, and `ip -6 route`
+has no default — i.e. IPv6 is advertised by DNS but not routable on this host.
+- `git ls-remote origin` works and `curl -4` works, so it is a *fallback* failure in the HTTP
+client, not a dead uplink.
+
+Consequence: the node cannot verify chain divergence against the signed checkpoint — that guard has
+been effectively off. Fix is resolver/IPv6-preference config (`/etc/gai.conf` precedence, or stop
+advertising AAAA) and the standing rules forbid me changing DNS/firewall. Written up in
+`docs/NEEDS-TRIAGE.md`.
+
+### Disk — was a FAULT, cleaned (owner request 2026-11-20)
+
+`df -h /` **before: 439G total, 395G used, 22G avail, 95%, 5.0% free** → **after: 365G used,
+52G avail, 88%, 11.8% free**. Freed ~30 G. No `cargo`/`rustc` was running (`pgrep -x` empty, checked
+before every deletion); nothing was removed from `releases/`, `~/.ci-cache`, `~/.cache/huggingface`,
+`~/ollama`, `~/.gpn` or `shared/`.
+
+| what | size |
+|---|---|
+| `/tmp/p8c26xx` 41 scratch dirs (Alibaba scrape, Nov 14, `lsof +D` empty) | 7.4 G |
+| `/tmp/artcheck`, `/tmp/nc`, `/tmp/p8bb` (release-verify scratch) | 392 M |
+| `/tmp/gpn-node.{new,prev,running-old}*` 20 stale binary copies | ~2.1 G |
+| `/tmp` dirs >3 d (`ps1test`, `w48check`, `t1`, `snaptest`, …) + `*.log` >7 d | 57 M |
+| `projectmanager07/gpn-agent/target/debug` | 6.4 G |
+| `gpn-work-223/gpn-agent/target/debug` (3rd worktree) | 8.4 G |
+| `~/.cache/gpn-release-cut`, `~/.cache/gpn-artifact-verify` | 561 M |
+
+**Left deliberately:** `/tmp` still 12 G — the biggest items (`v061` 1.3 G, `rel061` 1.3 G,
+`gpn064` 1.3 G, `gpnlx` 960 M, `row228` 860 M, `dlcheck`/`anon063`/`rel060` ~560 M each) are
+**Nov 19–21**, inside the >3-day rule's exclusion; they fall due on the next run.
+`/tmp/gpn-testnet-snapshot-20261114-123709.tar.gz` (293 M) left — it is a chain snapshot, not
+scratch. `*/target/release` untouched (6.8 G agent + 6.9 G node) — release artefacts.
+
+**Top five consumers after cleanup** (hidden paths included): `~/.ci-cache` **85 G**
+(`gpn-agent-target` 61 G + `gpn-node-target` 24 G; **owner decision: stays**), `~/.cache/huggingface`
+**53 G** (XTTS-v2 + sd/sdxl/LTX — used by audio/diffusion; **stays**), `~/.openclaw/workspace`
+**30 G** (projectmanager07 15 G, `shared/` 14 G, gpn-work-223 43 M after the sweep),
+`~/.gpn` **24 G** (chain data, never delete), `/tmp` **12 G**, `~/ollama/models` **8.1 G**. Sessions
+369 M, `cron/runs` 33 M, `plugin-runtime-deps` 1.5 G — all normal, nothing over 30 d worth flagging.
+
+Minor leak worth naming, not fixed: `/tmp/gpn-ap-token-it-corrupt-*` — **40 dirs, 12 K each**, new
+one every access-point run (test fixture not cleaned up). Cosmetic today; will be ~1000 dirs in a
+month.
+
+Resources: Mem 31 Gi total, **26 Gi available** (fault threshold <4 GiB — fine), but **swap fully
+used 2.0 G/2.0 G**; load 2.37/5.66/4.96; GPU 1445 MiB / 8188 MiB.
+
+### Release record consistency
+
+`INDEX.md` rows 0.3.60–0.3.64 each have a file in `docs/releases/archive/` (0.3.60…0.3.64.md, 5/5).
+Version triple: **running node 0.3.64 == `website/releases.json` 0.3.64 == box 1 0.3.64**. 0.3.65 is
+in flight and correctly absent from INDEX/archive. `GPN-LIST.md` rows 217/218 marked
+`COMPLETE 0.3.64`, 219 `COMPLETE` (no version — audio doc, no code). No inconsistency found.
+
+### Remaining
+
+1. **[TRIAGE]** self-heal checkpoint fetch (IPv6 fallback) — see above + NEEDS-TRIAGE.
+2. `/tmp` 12 G of 2-day-old release-verify scratch — eligible next audit.
+3. Swap at 100 % — watch, no action taken.
+4. `/tmp/gpn-ap-token-it-corrupt-*` fixture leak.
+
 ## 07:08 PT — 0.3.65 §3 (bump and record) TICKED 4/4; §4 CI box left open with its run handle [no triage]
 
 - **A0**: full-sha query for main `d8554f60` → `total_count: 0` (docs-only, `paths-ignore` working).
