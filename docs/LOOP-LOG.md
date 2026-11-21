@@ -1,3 +1,24 @@
+## 14:58 PT — 0.3.66 §3 (bump/CHANGELOG/lockstep/seeds) ticked with evidence; CI noted, not waited [no triage]
+
+- **A0**: HEAD = `0a7f2e5ba5c588e3796ee8cc6da94e9b9bc9b170`. One run for it,
+  **44958227352** (`CI`), `in_progress` (created 22:43:40Z). No conclusion to act on ⇒ **not waited
+  on**, per the dispatch rule. (The older `6f2b7685` dispatch is superseded; the §4 box now carries
+  the new handle.)
+- **Boxes worked — §3, four for four, each re-derived this run:**
+  - bump: `gpn-agent/Cargo.toml` = `0.3.66`, HEAD subject `0.3.66 item 232: …`. Not re-run — a
+    second `bump-version.py patch` would have produced 0.3.67.
+  - CHANGELOG: `## [0.3.66] - 2026-11-21` with Added/Changed/Fixed, `grep -ciE '_TODO_|TODO'` ⇒ 0.
+  - lockstep: `lockstep: 15 manifest(s) and 14 lockfile entr(ies) agree` · `gpn version: 0.3.66`.
+  - seeds parity: `cargo test --test shipped_bootnodes --test launcher_bootnodes` (gpn-agent) ⇒
+    **8 passed, 0 failed** in 6m03s of build + 0.1s of test.
+- **Item 231 stays AWAITING-OWNER, unticked.** The source half is proven (Pays::No + spec 53 +
+  73/73 pallet tests, spec-53 WASM built and hash-checked) but the live chain still answers
+  `specVersion 52`, so the row's own claim is false on the network. Question sits in
+  `docs/NEEDS-TRIAGE.md` §231 — if there is no answer by the next run it gets re-announced, not
+  silently dropped.
+- **Next run**: read run 44958227352's conclusion for `0a7f2e5b…`. `success` ⇒ tick §4's CI box and
+  move to §5 (build both platforms, dispatched not waited). `failure` ⇒ quote the failing line and
+  fix it before anything else.
 ## 14:43 PT — 0.3.66 item 232 done: "paid registration" purged from code, docs and binaries [no triage]
 
 - **A0**: `GET /commits/main` ⇒ `b7087825d7cc1bf2f7110f02a17de800daae65d3`; one run for it
