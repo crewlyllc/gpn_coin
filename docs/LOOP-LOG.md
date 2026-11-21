@@ -3,6 +3,102 @@
 Newest first. Written by the release loop; read by the assistant, who relays anything
 that needs Jeremy. `[TRIAGE]` = a decision waiting on the assistant.
 
+## 04:38 PT — 0.3.65 box 8 (row 228): sixth rig proved the accept is cleared by the peer's next claim; verdict lifetime fixed, seventh rig dispatched [no triage]
+
+- A0: still `total_count: 0` for `origin/main` HEAD `ea104134…f949` (docs-only commit, `paths-ignore`). Nothing to read, nothing waited on.
+- Sixth rig (BIN `-v6`, 12:13:03Z, ended 12:32:00Z) **construction valid**: `A #218 work=342,490 vs B #169 work=9,184,522` (depth 49). A.log verbatim:
+  - `04:28:57.790 block-serving: not asking … its claim (tip #169) is not on our canonical chain … it is a fork and never a source of truth (#158)`
+  - `04:28:57.791 fork-choice: work ours=342490 theirs=9184522 …; reorg=accepted depth=49`
+  - then **no** `asking … fork choice accepted its heavier branch` and **no** `downloading the accepted heavier branch`; A stayed `best: #218 (0xd7d1…)`.
+- Cause (read from the code, not guessed): `set_accepted_fork(peer, matches!(decision, Reorg))` cleared the verdict on B's *next* claim. B runs `GPN_STANDBY=1` so it never mines, but it still announces; once it synced A's `#218` its claim evaluated to `using as sync source` at 04:29:26, closing the gate before the sync engine's next request. The 03:17 race was lifetime, not a one-tick ordering bug.
+- Fix (compiled, dispatched): `service::next_accepted_fork(current, reorg, peer_tip_held)` — opens on Reorg, stays open while the peer's announced tip is not a block we hold, closes only when that tip is ours (imported) or the link closes. `cargo test --release --bin gpn-node accepted_fork` → **4 passed**; `cargo fmt --all -- --check` clean; release build 12:37Z; `strings` count 1 for *downloading the accepted heavier branch*.
+- **Seventh rig dispatched 12:37:21Z** — `BIN=/tmp/row228/gpn-node-ea10413-v7`, log `/tmp/row228/rig/rig.log`, phase 3 ~12:50Z. Not waited on. Box 228 stays unticked until A.log shows `downloading the accepted heavier branch` + `🏆 Imported #` off B's branch + matching `chain_getBlockHash`.
+- No blocker, no decision needed.
+
+## 04:13 PT — 0.3.65 box 8 (row 228): fifth rig proved the download and exposed the real remaining bug — the SDK's target-sum fork choice imports a heavier branch as non-best; fixed, sixth rig dispatched [no triage]
+
+- A0: no CI run for `origin/main` HEAD `ea104134…f949` (`total_count: 0` — docs-only, `paths-ignore`). Nothing read, nothing waited on.
+- Fifth rig (BIN `-v5`, 11:45:22Z) **construction valid**: `--- CONSTRUCTION OK: B is shorter by 55 and heavier by 782849` (A #224 work=348,877 vs B #169 work=1,171,326, depth 55). A.log, verbatim:
+  - `04:01:21.269 fork-choice: work ours=371112 theirs=10785120 peer=12D3KooWMVsz…; reorg=accepted depth=55`
+  - `04:01:21.274 block-serving: downloading the accepted heavier branch from 12D3KooWMVsz… — 169 blocks from the branch tip in 2 chunk(s) of at most 128 (#228)`
+  - `04:01:22.510 … 🆕 Imported #91 (0x183c…cb35 → 0xa243…4e9c)` … `04:01:22.884 … 🆕 Imported #169 (… → 0x6f6c…2ae3)`
+- **The download half is proven** (79 new blocks in 0.4 s, exactly the paginated walk). **The import half fails**: every block landed 🆕 (non-best), A kept `best #224 (0x4026…e352)` and mined its own `🏆 #225` on top of it, then B (standby, never mined) followed A — `chain-state: peer … is ahead at #224 (ours #169, same genesis) — syncing from it`. Both tips SAME at #256 on **A's** chain. No reorg; the lighter chain won. Box 228 stays unticked.
+- Cause, read in the SDK (`client/consensus/pow/src/lib.rs:376-390`): `PowBlockImport` sets `fork_choice = Custom(aux.total_difficulty > best_aux.total_difficulty)`, where `total_difficulty` is the **sum of `PowAlgorithm::Difficulty`**. Our `GPNPowAlgorithm::Difficulty` is the pallet **target**, and a target is an inverse difficulty — B's harder branch sums *lower* (10.7M vs 371k here is the pallet target, and the SDK's own sum inverts), so the SDK says “not heavier”. Our choice of `Difficulty` meaning, so our bug.
+- Fix (local, compiled, not pushed): `service::branch_work` — cumulative work over an arbitrary branch's last `WORK_WINDOW`=512 blocks walking parent hashes (same accounting as `chain_work`; 288 `MAX_REORG_DEPTH` inside the window); `service::WorkFirstImport` — wraps the PoW importer and, only when `fork_choice.is_none()` and the block's parent is not our best (a true fork), sets `Custom(true)` when our work accounting says the branch is heavier. Normal extensions and lighter forks untouched.
+- Build: `cargo fmt --all --check` clean; `cargo build --release --bin gpn-node` → `Finished … in 55.82s`, binary copied to `/tmp/row228/gpn-node-ea10413-v6`, `strings` count 1 for *"importing it as best, not as a side block"*.
+- **Sixth rig dispatched 12:13:03Z** (`/tmp/row228/rig/rig.log`), not waited on. Next run: phase-3 verdict is `import: the branch at #… carries work … vs our best` + `🏆 Imported #` rows descending from B's tip + matching `chain_getBlockHash`. Only then is 228 ticked.
+- No blocker, no decision needed.
+
+## 03:47 PT — 0.3.65 box 8 (row 228): fifth rig run dispatched with B in standby, debug gate logging and a 5-minute window [no triage]
+
+- A0: no CI run exists for `origin/main` HEAD `ea1041340912ce3bd250628d4155e2f47fc0f949`
+  (`total_count 0` — docs-only HEAD, `paths-ignore` working). Nothing to read, nothing waited on.
+- Two causes were eliminated by reading the code, not by guessing:
+  - the fourth run's accept verdict was overwritten 29 s later because **B kept mining after the
+    phase-3 restart** (`03:18:04 ahead at #271 → using as sync source`) which clears
+    `accepted_fork`. The plan recorded in the box (SIGSTOP B through phase 3) was wrong: a stopped
+    node cannot serve the branch it is the only source for. B now starts with `GPN_STANDBY=1`
+    (`service::standby_requested` → full node: serves + syncs, never mines), so the branch is fixed.
+  - the log could not have shown the download even if it happened: `should_ask` logged once per
+    peer per **process**, so a peer refused a tick before the accept never printed the accepted
+    line (exactly the 03:17:35 pair). `explained` now holds the last `Verdict` per peer and logs
+    every transition, and `download_accepted_fork` logs the paginated walk it starts.
+- Evidence for the change: `cargo test --release --bin gpn-node block_serving::tests` → **21
+  passed** (20 before; +`the_verdict_names_the_accepted_branch_first`), `cargo fmt --all -- --check`
+  clean; release binary rebuilt into `/tmp/row228/gpn-node-ea10413-v5`, `strings` confirms both
+  lines are in it.
+- Rig dispatched 11:45:22Z, 300 s observation window, phase 3 expected ~04:03 PT. **Not waited on.**
+  Next run reads `/tmp/row228/rig/rig.log` for `downloading the accepted heavier branch` + `Imported
+  #` rows descending from B's tip + matching `chain_getBlockHash`.
+- Box 228 stays unticked. Script + checklist edits local-only until the release commit.
+
+## 03:28 PT — 0.3.65 box 8 (row 228): construction now valid (depth 47, B 3x heavier), `reorg=accepted depth=47` logged, but the branch is still never imported — box NOT ticked [no triage]
+
+- Root cause of the three invalid rig runs, found and fixed: **the node mines on the GPU**, so
+  `taskset` never changed either branch's hashrate. A is now forced onto the CPU light-cache miner
+  (`OCL_ICD_VENDORS=/tmp/row228/no-icd`), B keeps the RTX 4060, and B is frozen with `SIGSTOP` after
+  74 blocks past the split.
+- `--- CONSTRUCTION OK: B is shorter by 47 and heavier by 761832` (A #217 work=381,100;
+  B #170 work=1,142,932). Depth 47 is inside the 33–288 band the box is about.
+- A.log 03:17:35.486, verbatim:
+  `fork-choice: work ours=387832 theirs=11543559 peer=12D3KooWJ5i…; reorg=accepted depth=47`
+  and `fork-choice: requesting heavier branch from 12D3KooWJ5i… at #170 (provable depth 47)`.
+- **The verdict is logged; the download is not.** A's next 21 imports (#218..#238) all descend from
+  A's own #217 `0x299a…22ff`; the rig's hashtable shows #232..#238 **DIFF** at every height. No
+  `block-serving: asking … fork choice accepted its heavier branch` line exists; the *same
+  millisecond* carries the old `not asking … it is a fork and never a source of truth` refusal.
+- Two mechanical suspects: (1) `should_ask` reads `accepted_fork` before the chain-state task
+  publishes the Reorg verdict, and its one-explanation-per-peer latch then hides every later ask;
+  (2) verdict churn — B kept mining through phase 3 and by 03:18:04 was `ahead at #271 … using as
+  sync source`, which clears `accepted_fork`.
+- Next run: hold B stopped through phase 3 (stable branch, no churn), `block_serving=debug` on A,
+  observe 5+ minutes. If the refusal still precedes the accept within one tick, the fix belongs in
+  `block_serving::should_ask` (read the verdict after it is published / clear the latch when
+  `accepted_fork` flips) — code, not rig.
+- Rig script carried the same fix to `scripts/row228-fork-rig.sh` (local only, not pushed).
+- Box 228 unticked. No blocker, no decision needed.
+
+## 02:29 PT — 0.3.65 box 8 (row 228): rig rebuilt (SIGSTOP freeze, disjoint cores) and re-dispatched; run ends, log is the state [no triage]
+
+- A0: no CI run exists for main's HEAD `ea104134…f949` — that commit is docs-only (`paths-ignore`), so
+  nothing to read and nothing to wait on. Confirmed with the runs API (`total_count: 0`, full sha).
+- Root cause of the 01:59 invalid test is in the rig, and it is mechanical: the "pause B until A pulls
+  ahead" branch **killed and restarted** B, and every restart gave B a window of slow blocks that the
+  retarget read as *too slow* and eased — so B could never end heavier. Fixed: `SIGSTOP`/`SIGCONT`
+  (chain and difficulty frozen exactly), A on cores 0-1 and B on 2-11 (disjoint, 12-core box), and a
+  hard validity gate (`CONSTRUCTION FAILED`, exit 3) so an invalid test can no longer be staged as
+  evidence. Script edit is local only (not pushed while 0.3.65 is in flight).
+- Handle: `BIN=/tmp/row228/gpn-node-a45d77c` (fix string present, `strings` count 1), log
+  `/tmp/row228/rig/rig.log`, started 10:21:32Z, expected phase 3 ~10:55Z. **Not waited on.**
+- Rig env note for row 229: `/tmp/row228/raw.json` embeds an old runtime wasm — `ADJUST` lines say
+  `blocks=10 target=4`, not the repo's `45`/`15`. Node-code fix is unaffected; future rigs wanting the
+  shipping constants must `build-spec --raw` from the released binary.
+- Known cosmetic rig bug (next run): `jid` is sampled 10 s after launch, before RPC is up, so the
+  witness connect fails with `invalid multihash` and phase 1 logs `NO PEER on A`. Mining is unaffected
+  (A reached #45 with 0 peers); phase 3 reads ids from the logs and is unaffected. Fix = poll
+  `system_localPeerId` until non-empty.
+- Box 228 still unticked. No blocker, no decision needed.
+
 ## 02:20 PT — 0.3.65 box 8 (row 228): rig finished, its own numbers say the test was INVALID; box not ticked [no triage]
 
 - The 01:59 rig completed (09:59Z–10:11Z). Connection snapshot:

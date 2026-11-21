@@ -1109,8 +1109,14 @@ pub struct PoliteDownloader<Block: BlockT> {
     inner: Arc<dyn BlockDownloader<Block>>,
     source: Arc<dyn PeerTipSource>,
     seen: Mutex<LruMap<(PeerId, Vec<u8>), SentRecord>>,
-    /// Peers we have already explained the "cannot answer" rule for.
-    explained: Mutex<HashMap<PeerId, ()>>,
+    /// The last verdict this peer's gate produced, so a *transition* is logged
+    /// once and a steady state is quiet. Once-per-process was wrong: the first
+    /// request to a peer usually arrives before fork choice has decided
+    /// anything, so the refusal latch swallowed the one line that would prove
+    /// the accepted branch was actually asked for (2026-11-21 03:17:35 — the
+    /// refusal and the `reorg=accepted` verdict share a millisecond, and the
+    /// accept line never appears).
+    explained: Mutex<HashMap<PeerId, Verdict>>,
 }
 
 impl<Block: BlockT> fmt::Debug for PoliteDownloader<Block> {
@@ -1182,59 +1188,46 @@ impl<Block: BlockT> PoliteDownloader<Block> {
         let tip_known = self.source.peer_tip_known(who);
         let mismatch = self.source.anchor_mismatch(who);
         let accepted = self.source.accepted_fork(who);
-        if may_ask_for_blocks_anchored(our_best, height, tip_known, mismatch, accepted) {
-            // One line per peer per process, with the facts the decision used:
-            // without it there is no way to tell "we asked because we had to"
-            // from "we asked because the gate did not fire".
-            let first = self
-                .explained
-                .lock()
-                .map(|mut m| m.insert(*who, ()).is_none())
-                .unwrap_or(false);
-            if first {
-                if accepted {
-                    info!(
-                        "block-serving: asking {who} for blocks {height} behind our tip \
-                         #{our_best} — fork choice accepted its heavier branch, so it is a \
-                         source for exactly as long as that verdict stands (#228)"
-                    );
-                } else {
-                    info!(
-                        "block-serving: asking {who} for blocks (claim #{height}, our tip \
-                         #{our_best}, their tip known to us: {tip_known:?})"
-                    );
-                }
-            }
-            return true;
-        }
-
-        let first = self
+        let allowed = may_ask_for_blocks_anchored(our_best, height, tip_known, mismatch, accepted);
+        // Which of the four states are we in? Logging on the *transition* is
+        // what makes the accepted branch visible: a peer is normally refused
+        // first (its fork is unknown to us), then accepted a millisecond later.
+        let verdict = gate_verdict(allowed, accepted, mismatch);
+        let changed = self
             .explained
             .lock()
-            .map(|mut m| m.insert(*who, ()).is_none())
+            .map(|mut m| m.insert(*who, verdict) != Some(verdict))
             .unwrap_or(false);
-        if first {
-            if mismatch {
-                info!(
+        if changed {
+            match verdict {
+                Verdict::AcceptedFork => info!(
+                    "block-serving: asking {who} for blocks {height} behind our tip \
+                     #{our_best} — fork choice accepted its heavier branch, so it is a \
+                     source for exactly as long as that verdict stands (#228)"
+                ),
+                Verdict::Asked => info!(
+                    "block-serving: asking {who} for blocks (claim #{height}, our tip \
+                     #{our_best}, their tip known to us: {tip_known:?})"
+                ),
+                Verdict::RefusedFork => info!(
                     "block-serving: not asking {who} for blocks — its claim (tip #{height}) \
                      is not on our canonical chain (a signed anchor or a block we hold says \
                      otherwise), so it is a fork and never a source of truth. The link stays \
                      up so it can be served canonical blocks (#158)."
-                );
-                return false;
+                ),
+                Verdict::RefusedBehind => info!(
+                    "block-serving: not asking {who} for blocks — its tip #{height} is not on our \
+                     chain and it is {} blocks behind our #{our_best}. Nothing it holds can extend \
+                     our chain, and the ancestor search we would send is exactly the request its \
+                     handler counts as spam. The link stays up and we keep serving it canonical \
+                     blocks (#158).",
+                    our_best.saturating_sub(height)
+                ),
             }
-            info!(
-                "block-serving: not asking {who} for blocks — its tip #{height} is not on our \
-                 chain and it is {} blocks behind our #{our_best}. Nothing it holds can extend \
-                 our chain, and the ancestor search we would send is exactly the request its \
-                 handler counts as spam. The link stays up and we keep serving it canonical \
-                 blocks (#158).",
-                our_best.saturating_sub(height)
-            );
-        } else {
+        } else if !allowed {
             debug!("block-serving: still not asking {who} for blocks (tip #{height})");
         }
-        false
+        allowed
     }
 
     /// Fetch a whole accepted heavier branch, `MAX_BLOCKS_IN_RESPONSE` blocks
@@ -1265,6 +1258,11 @@ impl<Block: BlockT> PoliteDownloader<Block> {
             // Without headers there is no parent hash to walk down with.
             return Ok(None);
         }
+        info!(
+            "block-serving: downloading the accepted heavier branch from {who} — {total} blocks \
+             from the branch tip in {} chunk(s) of at most {MAX_BLOCKS_IN_RESPONSE} (#228)",
+            total.div_ceil(MAX_BLOCKS_IN_RESPONSE).max(1)
+        );
 
         let mut blocks: Vec<BlockData> = Vec::with_capacity(total.min(512));
         let mut from = FromBlock::Hash(tip);
@@ -1519,6 +1517,35 @@ where
 
     fn accepted_fork(&self, who: &PeerId) -> bool {
         self.tips.accepted_fork(who)
+    }
+}
+
+/// The four outcomes of the download gate, as one value per peer (so a change
+/// can be logged exactly once).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Verdict {
+    /// Allowed because fork choice accepted this peer's heavier branch (#228).
+    AcceptedFork,
+    /// Allowed for the ordinary reasons (on our chain, or close to our tip).
+    Asked,
+    /// Refused: its claim contradicts a signed anchor / a block we hold.
+    RefusedFork,
+    /// Refused: behind us on a branch we do not hold.
+    RefusedBehind,
+}
+
+/// Name the gate's outcome for one peer. Pure, so the classification that the
+/// operator reads in the log can be tested without a network.
+///
+/// `allowed` comes from `may_ask_for_blocks_anchored`, which is where the real
+/// policy lives; `accepted` is checked *first* among the allowed cases because
+/// that is the one an operator is looking for when a reorg is being diagnosed.
+fn gate_verdict(allowed: bool, accepted: bool, mismatch: bool) -> Verdict {
+    match (allowed, accepted, mismatch) {
+        (true, true, _) => Verdict::AcceptedFork,
+        (true, false, _) => Verdict::Asked,
+        (false, _, true) => Verdict::RefusedFork,
+        (false, _, false) => Verdict::RefusedBehind,
     }
 }
 
@@ -2033,6 +2060,31 @@ mod tests {
         assert_eq!(calls[0].1.max, Some(128));
         assert_eq!(calls[1].1.max, Some(72));
         assert_eq!(calls[1].1.from, FromBlock::Hash(hash_of(72)));
+    }
+
+    /// The gate's name for what it just decided: the accepted branch must be
+    /// labelled as such even when the same peer was refused a moment earlier —
+    /// the refusal is what set the old once-per-process latch and hid the
+    /// accepted line in the 03:17:35 run (row 228).
+    ///
+    /// The classification is pure, so it is tested directly; the observable
+    /// behaviour it feeds is exercised live by `scripts/row228-fork-rig.sh`,
+    /// whose log must carry "downloading the accepted heavier branch".
+    #[test]
+    fn the_verdict_names_the_accepted_branch_first() {
+        // accepted overrides a fork refusal — the whole point of row 228.
+        assert_eq!(gate_verdict(true, true, true), Verdict::AcceptedFork);
+        assert_eq!(gate_verdict(true, true, false), Verdict::AcceptedFork);
+        // ordinary allowed request.
+        assert_eq!(gate_verdict(true, false, true), Verdict::Asked);
+        // refusals keep their two distinct explanations.
+        assert_eq!(gate_verdict(false, false, true), Verdict::RefusedFork);
+        assert_eq!(gate_verdict(false, false, false), Verdict::RefusedBehind);
+        // and a transition is a change of value, which is what should_ask logs.
+        assert_ne!(
+            gate_verdict(false, false, true),
+            gate_verdict(true, true, true)
+        );
     }
 
     /// The same request to a peer whose branch fork choice did NOT accept is

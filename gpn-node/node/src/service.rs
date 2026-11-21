@@ -25,6 +25,7 @@ use sp_core::U256;
 use sp_io::hashing::twox_128;
 use sp_runtime::generic::BlockId;
 use sp_runtime::traits::Block as BlockT;
+use sp_runtime::traits::Header as HeaderT;
 use std::{sync::Arc, sync::Mutex, sync::OnceLock, time::Duration};
 
 use crate::gpu_miner::EthashGpuMiner;
@@ -168,6 +169,134 @@ fn chain_work(client: &FullClient, best_height: u64) -> Option<u128> {
         p = boundary - 1;
     }
     Some(work)
+}
+
+/// Cumulative work over the last [`WORK_WINDOW`] blocks of an **arbitrary**
+/// branch, ending at `tip` (#228, second half).
+///
+/// Identical accounting to [`chain_work`] — the same spans, the same
+/// [`crate::fork_choice::block_work`] per target — but a side branch has no
+/// canonical numbers to look up with `client.hash`, so the walk goes by parent
+/// hash from the tip. A fork deeper than [`WORK_WINDOW`] is compared on its own
+/// last-WORK_WINDOW work against ours, which is exact on the region that
+/// decides for every depth this node will ever accept
+/// ([`crate::fork_choice::MAX_REORG_DEPTH`] is 288).
+fn branch_work(client: &FullClient, tip: <Block as BlockT>::Hash) -> Option<u128> {
+    let tip_header = client.header(tip).ok().flatten()?;
+    let tip_number = u64::from(*tip_header.number());
+    let base = tip_number.saturating_sub(WORK_WINDOW);
+    let mut p = tip_number.checked_sub(1)?;
+    let mut hash_p = *tip_header.parent_hash();
+    let mut work = 0u128;
+    loop {
+        let target_p = difficulty_target_at(client, hash_p)?;
+        let boundary = last_adjustment_at(client, hash_p).unwrap_or(0);
+        let lo = boundary.max(base);
+        let count = p - lo + 1;
+        work = work
+            .saturating_add(crate::fork_choice::block_work(target_p).saturating_mul(count as u128));
+        if boundary <= base || boundary == 0 {
+            break;
+        }
+        // Step back along THIS branch to the block just above the earlier
+        // retarget boundary (a side branch has no canonical #N to ask for).
+        let mut h = hash_p;
+        let mut n = p;
+        while n > boundary - 1 {
+            h = *client.header(h).ok().flatten()?.parent_hash();
+            n -= 1;
+        }
+        hash_p = h;
+        p = boundary - 1;
+    }
+    Some(work)
+}
+
+/// Row 228, gate lifetime: when does an accepted-fork verdict stop applying?
+///
+/// `reorg` is *this* claim's verdict; `peer_tip_held` says the peer's announced
+/// best is a block we already hold, i.e. its branch has been imported and the
+/// download is done. Between those two events the peer keeps announcing and
+/// every claim evaluates to `Keep` (its tip is still not ours), so clearing on
+/// a non-Reorg verdict would end the accept before the sync engine's next
+/// request. Run 6 (04:28:57) measured exactly that: accept at `.791`, cleared by
+/// the peer's next claim, download never sent. Only "the branch is now ours" or
+/// a link close (cleared at the call site) may end it.
+fn next_accepted_fork(current: bool, reorg: bool, peer_tip_held: bool) -> bool {
+    if reorg {
+        true
+    } else if peer_tip_held {
+        false
+    } else {
+        current
+    }
+}
+
+/// Row 228, second half: **the SDK's PoW fork choice sums raw targets**.
+///
+/// `PowBlockImport` decides "is this block better?" by comparing
+/// `PowAux::total_difficulty`, which is the sum of whatever
+/// `PowAlgorithm::Difficulty` returns. Ours returns the pallet's *target*, and a
+/// target is an **inverse** difficulty: a harder block stores a smaller number.
+/// So a heavier branch sums *lower* and every fork import is classified
+/// non-best — exactly what the 2026-11-21 04:01 rig observed: fork choice
+/// accepted depth 55, the branch was downloaded whole (the first half of this
+/// fix), imported as `🆕` and our own lighter chain stayed best.
+///
+/// This wrapper repairs that single decision and nothing else. It acts only
+/// when the SDK would decide one — `fork_choice.is_none()` — and only for a
+/// block whose parent is **not** our best (i.e. a true fork; a plain extension
+/// is always best and is left to the SDK). When our own work accounting says
+/// the incoming branch is heavier, it sets the verdict explicitly; otherwise it
+/// leaves the SDK's answer alone.
+pub struct WorkFirstImport {
+    inner: sc_consensus::BoxBlockImport<Block>,
+    client: Arc<FullClient>,
+}
+
+impl WorkFirstImport {
+    pub fn new(inner: sc_consensus::BoxBlockImport<Block>, client: Arc<FullClient>) -> Self {
+        Self { inner, client }
+    }
+}
+
+#[async_trait::async_trait]
+impl BlockImport<Block> for WorkFirstImport {
+    type Error = sp_consensus::Error;
+
+    async fn check_block(
+        &self,
+        block: sc_consensus::BlockCheckParams<Block>,
+    ) -> Result<sc_consensus::ImportResult, Self::Error> {
+        self.inner.check_block(block).await
+    }
+
+    async fn import_block(
+        &self,
+        mut block: sc_consensus::BlockImportParams<Block>,
+    ) -> Result<sc_consensus::ImportResult, Self::Error> {
+        if block.fork_choice.is_none() {
+            let info = self.client.info();
+            let parent = *block.header.parent_hash();
+            if parent != info.best_hash {
+                let hash = block.post_hash.unwrap_or_else(|| block.header.hash());
+                let number = u64::from(*block.header.number());
+                let ours = chain_work(&self.client, u64::from(info.best_number));
+                if let (Some(theirs), Some(ours)) = (branch_work(&self.client, hash), ours) {
+                    if theirs > ours {
+                        log::info!(
+                            "import: the branch at #{number} ({hash:?}) carries work {theirs} vs \
+                             our best #{best} {ours} — importing it as best, not as a side block \
+                             (the SDK sums raw targets, which inverts for a harder chain) (#228)",
+                            best = info.best_number
+                        );
+                        block.fork_choice = Some(sc_consensus::ForkChoiceStrategy::Custom(true));
+                    }
+                }
+            }
+        }
+        self.inner.import_block(block).await
+    }
 }
 
 /// Write (or clear) `<base-path>/gpn-forked` from the shared pending map. The
@@ -488,6 +617,10 @@ pub fn new_partial(config: &Configuration) -> Result<Service, ServiceError> {
         select_chain.clone(),
         create_inherent_data_providers(),
     );
+
+    // Row 228: wrap the PoW importer so a branch our own work accounting calls
+    // heavier is imported as best (the SDK's target-sum comparison inverts it).
+    let block_import = WorkFirstImport::new(Box::new(block_import), client.clone());
 
     let import_queue = sc_consensus_pow::import_queue(
         Box::new(block_import),
@@ -2556,9 +2689,27 @@ pub async fn new_full<
                                         // verdict is what opens them, and nothing
                                         // else does. Any other decision closes it
                                         // again on the same claim.
+                                        // Row 228, run 6 (04:28:57): the verdict
+                                        // must OUTLIVE this claim. `evaluate` says
+                                        // "their tip is heavier"; every later claim
+                                        // from the same peer before that branch has
+                                        // landed evaluates to Keep (their tip is not
+                                        // a block we hold), and clearing on it killed
+                                        // the accept before the sync engine's next
+                                        // request — B announced its way up our chain
+                                        // in the same 30 s. Hold the accept until the
+                                        // peer's announced tip is a block we hold
+                                        // (branch imported) or the link closes.
+                                        let peer_tip_held = parse_block_hash(&remote.best_hash)
+                                            .map(|h| client.header(h).ok().flatten().is_some())
+                                            .unwrap_or(false);
                                         peer_tips.set_accepted_fork(
                                             peer,
-                                            matches!(decision, fc::Decision::Reorg { .. }),
+                                            next_accepted_fork(
+                                                peer_tips.accepted_fork(&peer),
+                                                matches!(decision, fc::Decision::Reorg { .. }),
+                                                peer_tip_held,
+                                            ),
                                         );
                                         {
                                             let mut f = fork_shared.lock().unwrap();
@@ -3910,5 +4061,41 @@ mod seal_watch_tests {
     fn solve_for_an_unwatched_template_says_nothing() {
         let mut w = SealWatch::new(20_000);
         assert!(w.solved(Some(9), 100_000).is_none());
+    }
+}
+
+#[cfg(test)]
+mod accepted_fork_tests {
+    use super::next_accepted_fork;
+
+    /// Run 6 (04:28:57): the accept survived only until the peer's next claim.
+    /// A claim that does NOT repeat the Reorg verdict, while the peer's tip is
+    /// still off our chain, must not close the gate.
+    #[test]
+    fn a_non_reorg_claim_keeps_an_accepted_branch_open() {
+        assert!(next_accepted_fork(true, false, false));
+    }
+
+    /// Once the branch has landed the peer's announced best is a block we hold,
+    /// and the exception has done its job — it must close.
+    #[test]
+    fn an_accepted_branch_closes_once_its_tip_is_ours() {
+        assert!(!next_accepted_fork(true, false, true));
+    }
+
+    /// A Reorg verdict always opens the gate, even with no prior accept.
+    #[test]
+    fn a_reorg_verdict_opens_the_gate() {
+        assert!(next_accepted_fork(false, true, false));
+        assert!(next_accepted_fork(false, true, true));
+        assert!(next_accepted_fork(true, true, true));
+    }
+
+    /// Nothing is invented: an ordinary claim that never had an accept and is
+    /// not one now leaves the gate closed.
+    #[test]
+    fn an_ordinary_claim_starts_and_stays_closed() {
+        assert!(!next_accepted_fork(false, false, false));
+        assert!(!next_accepted_fork(false, false, true));
     }
 }
