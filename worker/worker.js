@@ -459,6 +459,15 @@ async function apRequest(env, opts) {
  * @param {string | null} body
  * @param {number} timeoutMs
  */
+/** Raw-socket writes are capped at ~64 KB by the Workers runtime: one
+ * `writer.write()` of a larger buffer reaches the peer truncated, so the AP
+ * sees fewer bytes than `Content-Length` promised. That is invisible for chat
+ * prompts (a few KB) and fatal for a speech request, whose reference clip is
+ * ~300 KB base64 — the AP answered nothing and the proxy reported a malformed
+ * response (found 2026-11-20 with the audio docs example). Write in 16 KB
+ * pieces so every frame is under the cap. */
+const SOCKET_WRITE_CHUNK = 16 * 1024;
+
 async function socketHttpRequest(url, method, headers, body, timeoutMs, binary = false) {
   if (url.protocol !== "http:") return { error: "raw sockets only speak plain http" };
   const host = url.hostname.replace(/^\[|\]$/g, "");
@@ -507,7 +516,9 @@ async function socketHttpRequest(url, method, headers, body, timeoutMs, binary =
 
     const writer = socket.writable.getWriter();
     await writer.write(new TextEncoder().encode(head));
-    if (bytes.byteLength) await writer.write(bytes);
+    for (let at = 0; at < bytes.byteLength; at += SOCKET_WRITE_CHUNK) {
+      await writer.write(bytes.subarray(at, Math.min(at + SOCKET_WRITE_CHUNK, bytes.byteLength)));
+    }
     writer.releaseLock();
 
     const reader = socket.readable.getReader();
