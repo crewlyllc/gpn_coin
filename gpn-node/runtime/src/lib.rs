@@ -123,7 +123,10 @@ pub const VERSION: sp_version::RuntimeVersion = sp_version::RuntimeVersion {
     spec_name: create_runtime_str!("gpn"),
     impl_name: create_runtime_str!("gpn"),
     authoring_version: 1,
-    spec_version: 52,
+    // 53: item 231 — `register_provider` (compute-marketplace call_index 0) is
+    // `Pays::No`, so no registration path charges a fee. Requires set_code: the
+    // bundled genesis WASM stays frozen at the launch version by design.
+    spec_version: 53,
     impl_version: 1,
     apis: RUNTIME_API_VERSIONS,
     transaction_version: 1,

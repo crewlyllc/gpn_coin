@@ -47,3 +47,17 @@ Format: `- [ ] <item id> — <question> | options: A … B … | recommend: … 
       because nothing in the log explains it. | raised 2026-11-20 12:10 PT (loop run, 0.3.63 §2)
 
 - [ ] self-heal/IPv6 — **the fleet's divergence self-heal cannot fetch the signed checkpoint, every ~5 min, and the cause is this host's IPv6 fallback — not the URL.** Evidence (2026-11-21 07:1x PT, audit): fleet log `cannot fetch the signed checkpoint (GET https://github.com/crewlyllc/gpn_coin/releases/download/snapshot-latest/snapshot.json: error sending request for url …)`; the same URL with `curl -4` → **200**; plain `curl` (and `curl -6`) → **000 / "Resolving timed out after 10000 ms"**, as do `https://github.com/`, `https://api.github.com/`, `https://objects.githubusercontent.com/`. `resolvectl query` answers AAAA records; `ip -6 addr show enp42s0` has **only fe80::/64** and `ip -6 route` has no default route. `git ls-remote` and `curl -4` both work, so it is a client fallback failure, not a dead uplink. Effect: the divergence guard has been effectively off since at least 07:03 PT. | options: A set IPv4 precedence in `/etc/gai.conf` (`precedence ::ffff:0:0/96 100`) — one file, reversible, no reboot · B disable IPv6 addressing at NetworkManager for `enp42s0` so DNS stops returning AAAA · C leave it and make `run-fleet.sh` force IPv4 in its HTTP client | recommend: A — smallest blast radius, benefits every client on the host, and `git`/`curl -4` already prove the IPv4 path is healthy. Standing rules forbid the auditor from changing DNS/firewall, so this needs owner approval. | raised 2026-11-21 (daily audit)
+
+- [ ] **231 — enact spec 53 on the testnet chain (registration must be free on every path)** — the
+      source half is done and tested, and the spec-53 WASM is building as
+      `wasm/gpn_runtime_spec53_free_registration.compact.compressed.wasm`; the runtime is *not on
+      chain*, so `register_provider` still charges a fee and the row cannot be closed. | question:
+      may the loop enact spec 53 on the testnet chain, or will you sign it? | options: **A** you
+      apply it with the offline testnet sudo key D5 (`Sudo.sudo(System.set_code)` via
+      `gpn-agent/src/bin/gpn_upgrade_runtime.rs`, the path specs 44/45/51 took; ~2 min, no fork) ·
+      **B** you delegate the enactment to the governance committee (3-of-5 + 10-block timelock,
+      `gpn_gov_upgrade`) · **C** park the enactment to the next release cut so one `set_code`
+      carries several runtime changes | recommend: **A** — the wasm is hash-verified and feature-
+      matched to the live chain, the change is one weight annotation (no storage migration, no
+      constant change), and doing it now is what makes "joining costs nothing" true on the network
+      rather than just in git. | raised 2026-11-21 15:0x PT (loop run, 0.3.66 §3b item 231)

@@ -686,12 +686,26 @@ pub mod pallet {
     // Dispatchable calls
     #[pallet::call]
     impl<T: Config> Pallet<T> {
+        /// **Fee-free registration (item 231, owner directive 2026-11-21).**
+        ///
+        /// Registering a provider must never cost money on any path. This call
+        /// carried a fee long after the PoW entry calls (19, 20) were made
+        /// `Pays::No`, which made "joining costs nothing" false for every
+        /// caller that used the plain path. The weight annotation now carries
+        /// `Pays::No` for the same reason as `accept_job` (#205): the
+        /// transaction pool reads `pays_fee` from `DispatchInfo` *before*
+        /// dispatch, so a `DispatchResult`-only fix would still reject a
+        /// zero-balance account with "Inability to pay some fees".
+        ///
+        /// Sybil resistance is unchanged: the PoW entry calls (19/20) remain
+        /// the gated paths, and this call still requires a signed origin and
+        /// refuses a duplicate registration.
         #[pallet::call_index(0)]
-        #[pallet::weight(<T as Config>::WeightInfo::register_provider())]
+        #[pallet::weight((<T as Config>::WeightInfo::register_provider(), Pays::No))]
         pub fn register_provider(
             origin: OriginFor<T>,
             requirements: GPURequirements,
-        ) -> DispatchResult {
+        ) -> DispatchResultWithPostInfo {
             let who = ensure_signed(origin)?;
             ensure!(
                 !<RegisteredProviders<T>>::contains_key(&who),
@@ -699,7 +713,9 @@ pub mod pallet {
             );
             <RegisteredProviders<T>>::insert(&who, requirements);
             Self::deposit_event(Event::<T>::ProviderRegistered { who });
-            Ok(())
+            // Post info says `Pays::No` as well, so dispatch cannot charge what
+            // the pool allowed (item 231).
+            Ok(Pays::No.into())
         }
 
         /// **Proof-of-work onboarding (spec 47) — one call, no coins.**
@@ -3242,6 +3258,49 @@ mod tests {
                 "accepting must not charge the provider a fee"
             );
             assert_eq!(Jobs::<Test>::get(job_id).unwrap().state, JobState::Accepted);
+            assert_eq!(pallet_balances::Pallet::<Test>::free_balance(BOB), 0);
+        });
+    }
+
+    /// #231 — registering a provider must cost nothing on **any** path.
+    ///
+    /// The two PoW entry calls (19, 20) are `Pays::No`; the plain
+    /// `register_provider` (call_index 0) was the last paid path to
+    /// registration, which made "joining costs nothing" false. Both facts are
+    /// asserted, for the same reason as `accept_job_is_fee_free`: the pool reads
+    /// `pays_fee` from `DispatchInfo` before dispatch, so only the weight
+    /// annotation makes a zero-balance account able to register.
+    #[test]
+    fn register_provider_is_fee_free() {
+        use frame_support::dispatch::{GetDispatchInfo, Pays};
+        use sp_runtime::traits::Dispatchable;
+        new_test_ext().execute_with(|| {
+            assert_eq!(
+                Call::<Test>::register_provider {
+                    requirements: default_reqs()
+                }
+                .get_dispatch_info()
+                .pays_fee,
+                Pays::No,
+                "register_provider must be Pays::No in DispatchInfo, or a zero-balance account can never join"
+            );
+
+            // An account that exists with nothing in it — the shape that used to be
+            // rejected by the pool with "Inability to pay some fees".
+            pallet_balances::Pallet::<Test>::force_set_balance(RuntimeOrigin::root(), BOB, 0)
+                .unwrap();
+
+            let post = RuntimeCall::from(Call::<Test>::register_provider {
+                requirements: default_reqs(),
+            })
+            .dispatch(RuntimeOrigin::signed(BOB))
+            .expect("a zero-balance account must be able to register");
+            assert_eq!(
+                post.pays_fee,
+                Pays::No,
+                "registering must not charge a fee — item 231"
+            );
+            assert!(RegisteredProviders::<Test>::contains_key(BOB));
             assert_eq!(pallet_balances::Pallet::<Test>::free_balance(BOB), 0);
         });
     }

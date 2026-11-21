@@ -1,3 +1,39 @@
+## 15:0x PT — 0.3.66 item 231 source half: `register_provider` is `Pays::No` at spec 53, build dispatched [TRIAGE]
+
+- **A0**: `GET /commits/main` ⇒ `fecadeff5e59f14d624abca85a84a0d797bd6620` (docs-only: LOOP-LOG +
+  list + checklist); `?head_sha=fecadeff…` ⇒ `total_count: 0` — expected under `ci.yml`
+  paths-ignore. The code run for its parent `6f2b7685` (**44955662523**) was `pending` at 14:12 PT
+  and is still `pending` at 14:2x — **not waited on**, per the dispatch rule. No conclusion to act
+  on: nothing red, nothing green.
+- **Box worked — §3b item 231** (`register_provider`, call_index 0, was the last paid path to
+  registration). Box left **UNTICKED** with evidence notes; only enactment is missing.
+  - Pallet: `#[pallet::weight((<T as Config>::WeightInfo::register_provider(), Pays::No))]` (:704)
+    and `DispatchResultWithPostInfo` + `Ok(Pays::No.into())`, mirroring `accept_job` (#205) — the
+    pool reads `pays_fee` from `DispatchInfo` before dispatch, so a dispatch-only fix is invisible
+    to it.
+  - New test `register_provider_is_fee_free`: `DispatchInfo` `Pays::No`, BOB's balance forced to 0,
+    dispatch succeeds, post `pays_fee == Pays::No`, registration present, balance still 0.
+    **Proved failing first**: with the annotation and signature reverted ⇒
+    `assertion left: Yes / right: No — "register_provider must be Pays::No in DispatchInfo"`;
+    restored ⇒ `cargo test -p pallet-compute-marketplace --lib` **73 passed, 0 failed**.
+  - `spec_version` 52 → **53** (`runtime/src/lib.rs:127`), pinned by
+    `attestation_identity_spec46::spec_version_matches_live_chain` (**4 passed**); `network.json`
+    `spec_version` 51 → **52** (it was stale — the chain has been at 52 for days), so
+    `check-spec-version.sh` ⇒ `source 53 / network 52 · OK`; `cargo fmt --check` clean on both
+    crates; `cargo check -p gpn-runtime` Finished.
+- **Dispatched, not waited on**: `gpn-node/scripts/build-spec53-wasm.sh` (new file) → 
+  `wasm/gpn_runtime_spec53_free_registration.compact.compressed.wasm`, log `/tmp/spec53-build.log`,
+  features `testnet-zero-ed,testnet-no-stake,testnet-fast-timelock` (reproduces live testnet
+  behaviour), canonical genesis WASM hash-guarded/restored (`76f37b23…16fa97`).
+- **[TRIAGE] — item 231 enactment.** The testnet sudo key is "a fresh OFFLINE key held by Jeremy"
+  (`node/src/chain_spec.rs:67`, key D5); this host cannot `set_code`. Live chain still answers
+  `specVersion 52`, so `Pays::No` is on nothing yet. Options for him: A run
+  `Sudo.sudo(System.set_code)` with D5 (the path specs 44/45/51 took, ~2 min) · B committee
+  governance (3-of-5, 10-block timelock) · C fold it into the next release's `set_code`.
+  Recommendation: **A**. Written to `docs/NEEDS-TRIAGE.md`.
+- **Next run**: read `/tmp/spec53-build.log` for `SPEC53 BUILD OK` and the decoded `spec_version: 53`,
+  add the `wasm/README-pending-upgrade.md` row, then item 232 (purge the paid-registration language).
+
 ## 14:12 PT — 0.3.66 item 230 implemented and proven live (confirm failure names the child's cause) [no triage]
 
 - **A0**: `GET /commits/main` ⇒ `7988c47dc79891755bc4d54faa48a04cf50ba8bf` (docs-only "releases: file
