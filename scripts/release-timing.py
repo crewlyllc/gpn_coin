@@ -44,8 +44,14 @@ def normalise(text: str) -> str:
 
 
 def commits(path: str):
-    """(timestamp, sha) for every commit that touched the file, oldest first."""
-    log = git("log", "--follow", "--reverse", "--format=%H %cI", "--", path)
+    """(timestamp, sha) for every commit that touched the file, oldest first.
+
+    No `--follow`: git only follows renames from one end, and combining it with
+    `--reverse` silently returned a single commit (2026-11-20, 0.3.64 reported
+    "no ticked boxes found in history" while `git log` plainly listed 9 commits).
+    These checklists are never renamed, so plain `git log` is both correct and enough;
+    default order is newest-first, so reverse in Python instead of via git."""
+    log = git("log", "--format=%H %cI", "--", path)
     out = []
     for line in log.stdout.splitlines():
         sha, _, when = line.partition(" ")
@@ -53,6 +59,7 @@ def commits(path: str):
             out.append((datetime.fromisoformat(when.strip()), sha))
         except ValueError:
             continue
+    out.sort(key=lambda pair: pair[0])
     return out
 
 

@@ -3,6 +3,28 @@
 Newest first. Written by the release loop; read by the assistant, who relays anything
 that needs Jeremy. `[TRIAGE]` = a decision waiting on the assistant.
 
+## 21:20 PT — 0.3.64 is FINISHED and FILED: cadence gate PASS on a fully 0.3.64-authored window; 217 + 218 COMPLETE; §10b timing recorded (and its tool fixed) [no triage]
+
+- **A0**: HEAD `5b1ffc2` → `GET /actions/runs?head_sha=` → **`total_count: 0`** (docs-only commit,
+  `ci.yml` paths-ignore — expected). No failure to diagnose.
+- **Did not wait for the 21:31 timer.** Chain head was already `#337580`, i.e. a complete
+  post-deploy window existed (restart 20:50:33). Ran the gate by hand:
+  `scripts/check-block-cadence.py --journal-unit gpn-fleet` → window **337481..337580**, mean
+  **14.13 s**, median 10.07 s, max **72.88 s**, clause 1 **0 violations**, clause 2 **6 gaps ≥3×
+  mean / 0 unexplained**, **`RESULT: PASS`** (sample `/tmp/cadence-now.json`). Sub-3 s bursts and the
+  152 s stall class are both gone; the six long gaps all carry `sealer: still searching template …`
+  from the new binary (20:56:28, 21:01:24, 21:03:24, 21:06:17, 21:09:58, 21:10:42).
+- **Boxes ticked:** §3b **217**, §3b **218**, §10 last box (task rows marked), §10b both, §0b both
+  filing boxes. `docs/releases/0.3.64.md` → `docs/releases/archive/0.3.64.md` (0 unticked boxes),
+  `INDEX.md` row added, GPN-LIST rows 217/218 → `COMPLETE 0.3.64`.
+- **Tool bug found and fixed:** `scripts/release-timing.py 0.3.64` exited with *"no ticked boxes
+  found in history"* while `git log` listed 9 commits — `git log --follow --reverse` returns exactly
+  one commit (git cannot reverse-follow). Dropped `--follow`, sort in Python. Now traces 44 of 59
+  boxes; `docs/releases/timing/0.3.64.{json,md}` committed. Slowest step named: §4's CI-green wait,
+  1h00m, a runner-cache problem not a checklist one.
+- **Next run:** no IN-PROGRESS items remain → §C: bundle remaining NEW rows, bump version, write
+  CHANGELOG, one push, generate the checklist.
+
 ## 21:00 PT — 0.3.64: peer-stability box ticked on measured evidence; cadence window is 73 blocks short, handle set for the 21:31 timer run [no triage]
 
 - **A0**: `GET /commits/main` → HEAD `0b20b74`; `GET /actions/runs?head_sha=0b20b74` → **`total_count: 0`**
