@@ -176,6 +176,18 @@ cleanup() {
   [ -n "$TMP" ] && rm -rf "$TMP"
   [ -n "$CFG_SRC" ] && rm -f "$CFG_SRC"
   [ -n "$CFG_DST" ] && rm -f "$CFG_DST"
+  # The commit lock must not outlive the process that took it. A lock naming a
+  # dead pid protects nothing and blocks everything: the 0.3.63 dry run left
+  # `holder: release-cut pid <dead>` behind and every later docs commit refused.
+  # On success the publish step has already released it; this is the safety net
+  # for dry-run, "already released", and failures.
+  inflight_l="${GPN_RELEASE_LOCK:-$HOME/.gpn/release-in-flight}"
+  if [ -f "$inflight_l" ] && grep -q "release-cut pid $$\b" "$inflight_l" 2>/dev/null; then
+    held_v="$(head -n1 "$inflight_l" 2>/dev/null || true)"
+    "$SCRIPT_DIR/release-lock.sh" release "$held_v" >/dev/null 2>&1 \
+      || rm -f "$inflight_l"
+    printf 'release-cut: released the commit lock (%s) on exit %d\n' "${held_v:-?}" "$rc" >&2
+  fi
   rm -f "$RELEASE_LOCK"
   return $rc
 }
@@ -604,7 +616,7 @@ esac
 # Take the repo lock now: from here until the signed manifest is live, nothing
 # else may be committed (#204). Every extra push in this window cancels a queued
 # CI run for this release. `scripts/hooks/pre-commit` refuses those commits.
-if [ -x "$RELEASE_LOCK_TOOL" ]; then
+if [ -x "$RELEASE_LOCK_TOOL" ] && [ "$DRY" = 0 ]; then
   $SCRIPT_DIR/release-lock.sh take "$VER" || {
     rc=$?
     echo "ABORT: could not take the release lock for $VER (exit $rc)." >&2
@@ -780,6 +792,10 @@ if [ "$DRY" = 1 ]; then
   sed 's/^/   | /' "$OUT"
   echo
   echo "dry run complete — nothing was uploaded, committed or pushed."
+  # A dry run commits nothing, so it must not hold the commit lock either:
+  # until 2026-11-20 it took it in acquire_release_lock and exited here without
+  # releasing, which left ~/.gpn/release-in-flight naming a dead pid and made
+  # every later docs commit refuse (hit by the 0.3.63 cut).
   exit 0
 fi
 
