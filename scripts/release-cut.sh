@@ -707,9 +707,35 @@ elif [ "$DRY" = 1 ]; then
   say "DRY RUN: would upload to $MIRROR_REPO"
   say "  linux-latest   gpn-linux.tar.gz   $Z_LINUX bytes sha256=${S_LINUX:0:16}…"
   say "  windows-latest gpn-windows.zip    $Z_WIN bytes sha256=${S_WIN:0:16}…"
+  say "  windows-latest gpn-windows.zip.bundle (provenance, mirrored with the zip)"
 else
   mirror_one linux-latest gpn-linux.tar.gz "$F_LINUX" "$S_LINUX" "$Z_LINUX"
   mirror_one windows-latest gpn-windows.zip "$F_WIN" "$S_WIN" "$Z_WIN"
+
+  # ── 4b. the provenance bundle travels with the zip it signs ──────────────
+  # Until 2026-11-20 this step mirrored only the two installers. The old zip
+  # was renamed aside but the *previous* .bundle stayed on windows-latest, so
+  # 0.3.63's mirror carried a bundle whose payload digest was 0.3.62's zip:
+  # `cosign verify-blob` on the served pair failed, and nothing caught it,
+  # because releases.json never mentions the bundle. The bundle is the only
+  # provenance a stranger can check — a missing or stale one refuses the cut.
+  B_NAME="gpn-windows.zip.bundle"
+  B_LINE="$(release_assets "$CFG_SRC" "$SRC_REPO" windows-latest \
+    | awk -v n="$B_NAME" '$1==n{print $2, substr($3,8)}')"
+  [ -n "$B_LINE" ] || {
+    echo "ABORT: $SRC_REPO windows-latest carries no $B_NAME." >&2
+    echo "       Mirroring the zip without provenance: refusing." >&2
+    exit 1
+  }
+  read -r B_ID B_SHA <<< "$B_LINE"
+  F_BUNDLE="$TMP/$B_NAME"
+  curl -L --fail --silent --show-error --retry 3 --retry-delay 3 --retry-all-errors \
+    --connect-timeout 20 -K "$CFG_SRC" -H 'Accept: application/octet-stream' \
+    -o "$F_BUNDLE" "$SRC_BASE/$B_ID" 2>&1 | scrub || {
+      echo "ABORT: download of $B_NAME failed" >&2; exit 1; }
+  [ "$(sha_of "$F_BUNDLE")" = "$B_SHA" ] || {
+    echo "ABORT: $B_NAME does not match the source digest — refusing" >&2; exit 1; }
+  mirror_one windows-latest "$B_NAME" "$F_BUNDLE" "$B_SHA" "$(size_of "$F_BUNDLE")"
 fi
 
 # ───────────────────────────────────────────────────────────────── 5 sign ──
