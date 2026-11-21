@@ -141,7 +141,12 @@ Source only. Not enacted: no `set_code`, no genesis change, `spec_version`
 a two-node testnet where a fresh key attests and registers with no faucet, and
 confirm the second attempt by the same key is rejected.
 
-## AMENDMENT 2026-11-21 — registration is free on EVERY path (owner)
+## AMENDMENT 2026-11-21
+> **Origin, recorded 2026-11-21 at the owner's correction:** the fee was not inherited from the
+> chain's economics — it was proposed by the assistant in an earlier conversation, then codified
+> here as "unchanged and remain fee-paying". A design document written by the assistant is not an
+> owner decision, and this one should never have settled a cost.
+ — registration is free on EVERY path (owner)
 
 The paragraph *"The existing `submit_attestation` / `register_provider` are unchanged and remain
 fee-paying"* is **withdrawn**. It recorded a fee structure nobody asked for: the fees (~0.0002 GPN)
