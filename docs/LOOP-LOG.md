@@ -3,6 +3,29 @@
 Newest first. Written by the release loop; read by the assistant, who relays anything
 that needs Jeremy. `[TRIAGE]` = a decision waiting on the assistant.
 
+## 17:24 PT — §9 deploy/confirm DONE (4/4): this box self-updated to 0.3.63; §10 2/3 [no triage]
+
+- **A0**: CI on main HEAD `44f75e4` — no run exists for that sha (`GET /actions/runs?head_sha=`
+  → `total_count: 0`), which is correct: it is a docs-only commit and `ci.yml` paths-ignores `**/*.md`.
+- **Box worked**: §9 "Deploy and confirm" — all four boxes, on this host's own node.
+  - self-update: `systemctl --user start gpn-update.service` 17:14:45 PT → `confirm: process=up
+    rpc=no 0s` → `rpc=yes 24s version=0.3.63` → `confirmed 0.3.63 is running` 17:16:55 PT.
+    `update-attempts.json`: `outcome confirmed`, `release_id 461f8b77…` == the linux asset sha256.
+  - running process: `/home/jeremyg/.local/bin/gpn-node`, pid 3278482 (was 2944334), 107,875,536 B,
+    mtime 17:16; `--version` → `gpn-node 0.3.63`; RPC `system_version` → `0.3.63`.
+  - honest gap: the unit runs `--quiet`, so the journal has the confirm arm but not the
+    check/download/swap step lines; the transition is dated on disk instead (versions/0.3.63 at
+    17:15, symlink + pid at 17:16).
+  - retention/failure: `current.previous` → `versions/0.3.62`; a refused apply
+    (`--state-dir /tmp/relprobe/state`) → rc 1 "cannot tell which version this box runs", and the
+    node answered `0.3.63` on the **same pid** right after — a failure does not take it down.
+- **§10 2/3**: change observed = the cadence gate running unattended (17:01:22, timer) and printing
+  `RESULT: FAIL` — clause 2, 3 unexplained gaps (84.27 s/7.14x, 47.60 s/4.03x, 54.01 s/4.58x).
+  The gate works; the acceptance is not met, so **row 217 stays IN-PROGRESS** and §10's "mark the row
+  DONE" box is deliberately left unticked. Peers: 6 m 33 s after restart, 3 × AUTHORITY, all at
+  `#336669` / `0x01e6ca49`, 0 ban/isolated/forked lines since the restart.
+- **Next run**: §10 box 3 (row 217 status) is the first unticked box; then filing (§0b) once §10 closes.
+
 ## 17:05 PT — §7b capability box ticked: audio is now callable from gpncoin.ai (two Worker defects fixed) [no triage]
 
 - **A0**: CI on main HEAD `4f3b803` = `pending` (run 44846236695, queued 00:48Z) — noted, not waited on,
