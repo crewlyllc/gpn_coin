@@ -3,6 +3,32 @@
 Newest first. Written by the release loop; read by the assistant, who relays anything
 that needs Jeremy. `[TRIAGE]` = a decision waiting on the assistant.
 
+## 22:10 PT — 0.3.65 box 1 (row 221) DONE: task vocabulary + `POST /v1/jobs` live on :8092, proven end to end [no triage]
+
+- **A0**: `GET /commits/main` → HEAD `97b257c` (the 21:37 checklist commit) → `GET /actions/runs?head_sha=97b257c`
+  → **`total_count: 0`** — docs-only commit, `ci.yml` paths-ignore, expected. No failure to diagnose; not waited on.
+- **Box ticked — §3b 221** (task vocabulary + generic dispatcher, design `docs/design-task-modality-registry.md`).
+  New `gpn-agent/src/tasks.rs`: 14 canonical words + aliases, `resolve()` in the design's order
+  (explicit task → model family → `chat`), `serves()` as the AP gate, `adapt_v1_jobs()` as the whole dispatcher;
+  `gpn_scheduler.rs` gains `POST /v1/jobs` (one parser → the word picks the endpoint → that endpoint keeps its
+  own validation/moderation/escrow/routing, so there is still exactly one job-creation path) and `GET /v1/tasks`
+  (the word list with `served` measured from the live registry).
+- **Evidence:** `cargo test --lib tasks::` → **11 passed**; `cargo fmt -- --check` clean; clippy silent on the new
+  code. Live on :8092 with this binary (AP swapped for ~4 min, then restored — `is-active` = active, `/health` 200,
+  `/v1/tasks` 404 again, i.e. the 0.3.64 release binary is back): `{"task":"chat","model":"qwen2.5:0.5b",…}` →
+  **200**, job `1795241259305`, answer `"Final!"`, log `[v1/jobs] task=chat model=qwen2.5:0.5b -> /v1/chat/completions`;
+  no task/no model → chat, job `1795241038936`; `{"task":"teleport"}` → **400** + `valid_tasks[]`;
+  `{"task":"caption"}` → **501** `no vision executor in this build`; `/v1/chat/completions` still 200 (adapter
+  regression). `website/ai.html` gains §`#tasks` "One endpoint, every task" with the table **rendered from
+  `/api/v1/tasks`**; `node website/tests/chat.test.js` → 45 passed.
+- **Not claimed:** acceptance 2 (`speak`→MP3) was not re-run — the audio handler is unchanged by this row and needs a
+  consented reference clip; acceptance 5's 503 branch has no live case on this fleet (one box advertises all four live
+  capabilities) and is covered by unit test `the_serving_gate_needs_an_advertised_capability_and_an_executor`.
+- **Note for the next box (222):** the provider still advertises a flat `capabilities[]`; `tasks.rs` reads only that,
+  so the matrix (`task → models`) is row 222's work. Also worth a look: default routing picked `tuned-6542:latest`
+  (a toy fine-tune) for an unspecified chat call and produced garbage — a catalogue/allowlist question, not this row.
+- **Next run**: box 2 = **222** (provider task matrix), code only — no CI gate.
+
 ## 21:37 PT — §C: 0.3.65 opened, all 9 NEW rows bundled (221–229), checklist generated, one push [no triage]
 
 - **A0**: HEAD `163b927` → `GET /actions/runs?head_sha=163b927` → **1 run, `pending`** (44870322382).

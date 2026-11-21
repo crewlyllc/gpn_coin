@@ -1469,6 +1469,94 @@ gpn/tok  = 3.793e-7 / 0.15 = 2.53 GPN per 1M</code></pre>
   </section>
 
   <!-- ============ ENDPOINTS ============ -->
+  <section id="tasks">
+    <div class="wrap">
+      <span class="kicker">One endpoint, every task</span>
+      <h2>Name the work, not the model</h2>
+      <p class="sub">Every kind of work on GPN is the same primitive — inputs, an optional model, outputs —
+        so there is one generic surface for all of it. Name a <b>task word</b> and the network picks a box
+        that can do it; name a <code>model</code> as well and you pin the implementation.
+        <b>No task and no model means <code>chat</code>.</b></p>
+
+      <pre><code>POST /api/v1/jobs
+{"task": "speak",
+ "inputs": [{"type": "text", "text": "Hello from the network."}],
+ "params": {"consent": true, "voice_ref": "&lt;base64 clip&gt;"}}
+→ the same job, escrow, artifact and poll paths every named endpoint uses</code></pre>
+
+      <p class="sub" style="margin-top:18px">The table below is read from
+        <code>GET /api/v1/tasks</code> on the live access point, so it reflects the words the
+        providers actually serve right now rather than a hand-copied list. A word that is not
+        <b>served</b> answers <code>503</code> for a missing capability or <code>501</code> for a missing
+        executor — it never silently becomes a different kind of work.</p>
+
+      <div class="table-wrap">
+        <table id="task-table">
+          <thead><tr><th scope="col">Task</th><th scope="col">Takes</th><th scope="col">Produces</th><th scope="col">Status</th></tr></thead>
+          <tbody id="task-rows">
+            <tr><td colspan="4" class="muted small">Loading the live vocabulary from <code>/api/v1/tasks</code>…</td></tr>
+          </tbody>
+        </table>
+      </div>
+
+      <div class="grid cols-2" style="margin-top:20px">
+        <div class="callout">
+          <span class="ct">One runnable call, right now</span>
+          <pre class="mb-0"><code>curl -sS --max-time 150 https://gpncoin.ai/api/v1/jobs \
+  -H "content-type: application/json" \
+  -d '{"task":"chat",
+       "inputs":[{"type":"text","text":"Say hello"}],
+       "params":{"wait":true,"max_tokens":32}}'</code></pre>
+        </div>
+        <div class="callout warn">
+          <span class="ct">Words are stable, aliases are not</span>
+          <p class="mb-0">A task word is never renamed — it is a promise about <em>modality</em>,
+            not about quality (<code>chat</code> means text in, text out; it does not promise a 70B
+            model). Aliases such as <code>complete</code> and <code>tts</code> are conveniences on top
+            of the canonical word.</p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <script>
+  /* The word table comes from the network, not from this file (rows 219/220/221):
+     if a capability stops being advertised, the row stops saying "served". */
+  (function () {
+    var rows = document.getElementById('task-rows');
+    if (!rows) return;
+    function esc(s) {
+      return String(s == null ? '' : s).replace(/[&<>"']/g, function (c) {
+        return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c];
+      });
+    }
+    fetch('/api/v1/tasks', { headers: { accept: 'application/json' } })
+      .then(function (r) { if (!r.ok) throw new Error('HTTP ' + r.status); return r.json(); })
+      .then(function (j) {
+        var data = (j && j.data) || [];
+        if (!data.length) throw new Error('empty vocabulary');
+        rows.innerHTML = data.map(function (t) {
+          var status = t.served
+            ? '<span class="tag live">served</span>'
+            : (t.endpoint ? '<span class="tag">no provider</span>'
+                          : '<span class="tag">not yet</span>');
+          var name = '<code>' + esc(t.task) + '</code>';
+          if (t.aliases && t.aliases.length) {
+            name += ' <span class="hint">' + t.aliases.map(esc).join(', ') + '</span>';
+          }
+          return '<tr><td>' + name + '</td><td>' + (t.accept || []).map(esc).join(' + ') +
+                 '</td><td>' + (t.produce || []).map(esc).join(' + ') +
+                 '</td><td>' + status + '</td></tr>';
+        }).join('');
+      })
+      .catch(function (e) {
+        rows.innerHTML = '<tr><td colspan="4" class="muted small">The live vocabulary is ' +
+          'unavailable right now (' + esc(e.message) + '). Retry, or read ' +
+          '<code>GET /api/v1/tasks</code> directly.</td></tr>';
+      });
+  })();
+  </script>
+
   <section id="endpoints">
     <div class="wrap">
       <span class="kicker">Reference</span>

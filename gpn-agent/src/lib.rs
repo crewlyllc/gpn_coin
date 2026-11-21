@@ -56,6 +56,7 @@ pub mod seedlist;
 pub mod selfheal;
 pub mod settle_policy;
 pub mod strict;
+pub mod tasks;
 #[cfg(test)]
 pub mod test_env;
 pub mod update;

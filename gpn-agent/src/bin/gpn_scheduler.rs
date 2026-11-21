@@ -5373,6 +5373,79 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
             }
 
+            // ── POST /v1/jobs — the task vocabulary surface (row 221) ────────
+            // One parser, one dispatcher: the *word* decides which endpoint
+            // serves the request, and that endpoint keeps its own validation,
+            // moderation, escrow and routing. The legacy OpenAI routes stay as
+            // thin adapters over the same job primitives, so there is exactly
+            // one job-creation path per kind of work (design
+            // docs/design-task-modality-registry.md §5).
+            let mut path = path;
+            if method == Method::Post && path.as_slice() == ["v1", "jobs"] {
+                match gpn_agent::tasks::adapt_v1_jobs(&body) {
+                    Ok(a) => {
+                        // A word is only servable if some live provider advertises
+                        // its capability: "no provider for task=speak" is the
+                        // honest answer, never a route to a different kind of work
+                        // (design §2.2 / acceptance 5).
+                        let advertised = {
+                            let reg = registry.lock().unwrap();
+                            let mut caps: Vec<String> = reg
+                                .iter()
+                                .filter(|p| p.last_seen.is_some())
+                                .flat_map(|p| p.capabilities.clone())
+                                .collect();
+                            caps.dedup();
+                            gpn_agent::tasks::lookup(a.word)
+                                .map(|t| gpn_agent::tasks::serves(t, &caps))
+                                .unwrap_or(false)
+                        };
+                        if !advertised {
+                            let _ = req.respond(
+                                Response::from_string(
+                                    json!({
+                                        "error": {
+                                            "message": format!("no provider for task={}", a.word),
+                                            "type": "gpn_unavailable",
+                                            "task": a.word,
+                                        }
+                                    })
+                                    .to_string(),
+                                )
+                                .with_header(hdr.clone())
+                                .with_status_code(503),
+                            );
+                            return;
+                        }
+                        eprintln!(
+                            "[v1/jobs] task={} model={} -> /{}",
+                            a.word,
+                            a.model.as_deref().unwrap_or("auto"),
+                            a.endpoint.join("/")
+                        );
+                        body = a.body.to_string();
+                        path = a.endpoint.to_vec();
+                    }
+                    Err(e) => {
+                        let (code, msg) = e.status_and_message();
+                        let mut out = json!({"error": {
+                            "message": msg,
+                            "type": if code == 501 { "gpn_not_implemented" } else { "gpn_bad_request" }
+                        }});
+                        // An unknown word lists the whole vocabulary, so a typo is
+                        // self-correcting without reading the docs.
+                        if let gpn_agent::tasks::TaskError::UnknownTask(_) = e {
+                            out["error"]["valid_tasks"] = json!(gpn_agent::tasks::words());
+                        }
+                        let _ = req.respond(
+                            Response::from_string(out.to_string())
+                                .with_header(hdr.clone())
+                                .with_status_code(code),
+                        );
+                        return;
+                    }
+                }
+            }
             let resp = match (&method, path.as_slice()) {
                 // GET /assignments — the provider-PULL transport (#46 Phase 1).
                 // A provider asks for ITS OWN queued assignments instead of waiting
@@ -6071,6 +6144,23 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     json!({"object":"list", "data": ids.iter().map(|m| json!({
                     "id": m, "object": "model", "owned_by": "gpn"
                 })).collect::<Vec<_>>()})
+                }
+                // GET /v1/tasks — the word list, with what the *live* network can
+                // serve right now (row 221). Generated from the registry, so the
+                // website and the docs cannot drift from the providers (rows
+                // 219/220); `served` is measured, not declared.
+                (Method::Get, ["v1", "tasks"]) => {
+                    let reg = registry.lock().unwrap();
+                    let mut caps: Vec<String> = reg
+                        .iter()
+                        .filter(|p| p.last_seen.is_some())
+                        .flat_map(|p| p.capabilities.clone())
+                        .map(|c| c.trim().to_string())
+                        .filter(|c| !c.is_empty())
+                        .collect();
+                    caps.sort();
+                    caps.dedup();
+                    gpn_agent::tasks::tasks_json(&caps)
                 }
                 (Method::Post, ["v1", "chat", "completions"]) => {
                     let v: Value = serde_json::from_str(&body).unwrap_or(json!({}));
