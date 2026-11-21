@@ -3,6 +3,38 @@
 Newest first. Written by the release loop; read by the assistant, who relays anything
 that needs Jeremy. `[TRIAGE]` = a decision waiting on the assistant.
 
+## 23:20 PT — 0.3.65 box 4 (row 224) DONE: the operator can find and copy their own code, and the site explains it [no triage]
+
+- **A0**: `GET /commits/main` → `8784012` (box 3) → `actions/runs?head_sha=8784012` → run **44877406357**
+  **queued** since 06:50 UTC. Not waited on (this box is code + tests + a website page). `7924b35`
+  returns `total_count: 0` now, so that earlier "pending" run was superseded, not failed.
+- **Box ticked — §3b 224** (the code must be findable and copyable), commit `5595a78`, pushed once.
+  One definition per fact: `referral::share_link` for the link, `derive_code` for the code.
+  - `gpn_node --referral [--json]` — code, owning address, source, link; exit 0 with or without a
+    wallet; answered before `Config::load()`.
+  - startup summary — one line with code + link, silent when there is no account.
+  - dashboard :8099 — "Your referral code" panel with a Copy button, fed by `GET /api/referral`;
+    a machine with no wallet gets the sentence naming `gpn_node --ensure-wallet`, not a fake code.
+  - gpncoin.ai/referrals — the derivation in full, a Python snippet that reproduces the page's own
+    example, the four places to find your code, an is/is-not table, and why the link is `/join?ref=`.
+- **Evidence**: `--lib gui::` **17**, `--lib referral::` **19**, `--bin gpn_node` **32**,
+  `website/tests/referral.test.js` **13**, `node-gui/test_referral_endpoint.py` **5 checks**;
+  fmt clean; clippy with CI's full `CLIPPY_ALLOWS -D warnings` clean.
+- **Live**: real `--gui` node on an isolated prefix printed the referral line and answered
+  `curl :18099/api/referral` with `GPN-AX3R-YC7C-KV` + `/join?ref=…`; the card's DOM was in the
+  served page. `--referral` under `strace` made **0** socket syscalls. Test tree stopped afterwards.
+- **Cross-check**: the page's Python snippet was run here and produces `GPNAX3RYC7CKV`, matching the
+  Rust binary for the same address — the alphabet is Crockford-style (`23456789ABCDEFGHJKLMNPQRSTUVWXYZ`),
+  which is the one detail an independent reimplementation gets wrong first (it did, five minutes).
+- **Incident, self-inflicted, no lasting damage**: a commit message written in double quotes contained
+  backticks, so bash executed `gpn_node --referral [--json]` — which resolved to the *fleet* binary in
+  `~/.local/bin` (0.3.62, no such flag) and started a node against `~/.gpn/node` for ~2 minutes before
+  being killed. Fleet processes (started 2h earlier) are untouched and still running; nothing was
+  written to the fleet base. Rule for this workspace: **never put backticks in a double-quoted shell
+  argument** — use `-F <file>` for commit messages.
+- **Next run**: box 5 = **225** (`/join?ref=` landing page + `/r/<code>` alias). Code + a website page,
+  no CI gate. Ask GitHub once for 44877406357 (and 5595a78's own run) first — a CI failure outranks the box.
+
 ## 22:55 PT — 0.3.65 box 3 (row 223) DONE: referral codes derive from the wallet and the AP checks them [no triage]
 
 - **A0**: `GET /commits/main` → `e883ac6` (loop-log docs commit) → `actions/runs?head_sha=e883ac6` →
