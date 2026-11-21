@@ -3,6 +3,37 @@
 Newest first. Written by the release loop; read by the assistant, who relays anything
 that needs Jeremy. `[TRIAGE]` = a decision waiting on the assistant.
 
+## 07:0x PT — 0.3.65 box 9 (row 229) TICKED: two runtimes, both intentional — the artifact embeds a frozen genesis WASM, the live chain runs spec 52 [no triage]
+
+- **A0**: `GET /commits/main` → `923a8b95` (LOOP-LOG + `0.3.65.md` only) →
+  `actions/runs?head_sha=923a8b95…` → **0 runs** (docs-only, `paths-ignore`) as expected.
+- **Box ticked — §3b 229** (deployed 0.3.62 constants vs repo). Verdict: **not a build/tree mismatch.**
+  - **Artifact → genesis code.** `./gpn-node build-spec --chain testnet` from the published bundle
+    (`/tmp/gpn064/gpn-node`, `gpn-node 0.3.64`) → `genesis.runtimeGenesis.code` 481,002 bytes,
+    sha256 `76f37b23a33e8ba3ada91849e69b66836590673f14ea009ef6d914eb0d16fa97`.
+  - **That sha is pinned**: identical to the committed `gpn-node/runtime/gpn_runtime.compact.compressed.wasm`
+    and to `CANON_SHA` (`release-linux-selfhosted.yml:36`, enforced :52-57); `runtime/build.rs`
+    embeds it with `include_bytes!`. The artifact is the tree, not a stale target dir.
+  - **Blob origin = `be390db` (2026-10-06)**, whose `runtime/src/lib.rs` had `spec_version: 11`,
+    `TargetBlockTime = 4`, `DifficultyAdjustmentWindow = 10`. Decompressed blob (skip 8-byte header,
+    zstd) `strings` → `elapsed_s=`, `avg_s=`, `target=` (pre-`e327d65` format) ⇒ the old pallet.
+  - **Frozen by design**: `0f36ff9` "freeze genesis WASM at the chain's launch version — runtime
+    changes go via set_code, never the genesis".
+  - **Live chain is not on genesis**: `state_getRuntimeVersion` → `specVersion 52` at block 339,714;
+    on-chain `:code` sha256 `925b74fe…`, 531,337 bytes, decompressed contains
+    `elapsed_ms=/avg_ms=/target_ms=`. Live log:
+    `ADJUST now=337886 last_adj=337841 … elapsed_ms=603071 blocks=45 avg_ms=13401 target_ms=15000 …`.
+  - **`blocks=10 target=4` is fresh-genesis behaviour**, reproduced by row 228's rig:
+    `ADJUST now=21 last_adj=11 elapsed_s=10 blocks=10 avg_s=1 target=4 … 288230376151711744 ->
+    115292150460684697` (exactly 2.5×).
+- **Correction of record**: always name the runtime — genesis (10 blocks / 4 s / 2.5×) vs on-chain
+  spec 52 (45 blocks / 15 s / symmetric). Row 194's fork work must use the on-chain runtime; a *new*
+  dev chain from any artifact retargets at 10/4 until a `set_code`.
+- §3b now has no unticked items. Next unticked box is §1 (*name the behaviour / write the failing
+  test*), then §2, then §3 — the bump and CHANGELOG for 0.3.65 are already in the tree
+  (`Cargo.toml` 0.3.65, `CHANGELOG.md` `## [0.3.65] - 2026-11-20`), so §3's boxes need ticks with
+  `bump-version.py --check` output. No blocker, no decision needed.
+
 ## 06:24 PT — 0.3.65 box 8 (row 228) TICKED: the eleventh rig reorged A from #219 onto B's shorter, heavier 170-block branch [no triage]
 
 - Eleventh rig (BIN `-v11`, 14:02:00Z–14:21:03Z). A.log verbatim:
