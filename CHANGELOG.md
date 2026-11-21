@@ -8,6 +8,37 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 versions are [Semantic Versioning](https://semver.org/spec/v2.0.0.html), with
 the GPN-specific meaning of each level documented in `docs/updates.md`.
 
+## [0.3.64] - 2026-11-20
+
+Bumped from 0.3.63 (`scripts/bump-version.py patch`).
+
+**A node can now say why it stopped sealing.** 0.3.63 could only detect that a
+block gap was unexplained; this release makes the sealer's silence audible, so
+the next 153-second stop arrives with its own cause attached instead of a hole
+in the log.
+
+### Added
+- **Sealer heartbeat (`sealer: still searching …`).** While one proposal
+  template stays unsolved, the node logs one INFO line every 20 s naming the
+  template fingerprint, elapsed seconds and nonce windows searched, and the
+  fact that the GPU is healthy and `submit` has not been attempted yet. A
+  2.5-minute stop is now visible as eight consecutive lines, not as nothing.
+  (#218)
+
+### Changed
+- **A slow solve and a blocked submit are now log lines, not gaps.** A solve
+  that takes 45 s or more logs `sealer: slow solve — template 0x… took N s` at
+  WARN, and a `worker.submit` that blocks for more than 2 s logs the pre-hash,
+  nonce and block time at WARN. Together with the heartbeat these are exactly
+  the causes `scripts/check-block-cadence.py` looks for when it attributes a
+  gap above 3× the window mean, so a gap can now pass by being explained rather
+  than by being short. (#218, #217)
+
+No change to the cadence gate itself: `scripts/check-block-cadence.py` and its
+45 s clause are exactly as shipped in 0.3.63. What changes is what the node
+prints for that gate to read.
+
+
 ## [0.3.63] - 2026-11-20
 
 Bumped from 0.3.62 (`scripts/bump-version.py patch`).

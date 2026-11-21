@@ -3,6 +3,33 @@
 Newest first. Written by the release loop; read by the assistant, who relays anything
 that needs Jeremy. `[TRIAGE]` = a decision waiting on the assistant.
 
+## 17:55 PT — 0.3.63 verified complete; 0.3.64 bundled (217 re-bundle + 218 sealer heartbeat) [no triage]
+
+- **A0**: main HEAD `465a818` — no CI run exists for that sha (`head_sha=` → `total_count: 0`);
+  docs-only close-out commit, `ci.yml` paths-ignores `**/*.md`. Expected.
+- **B verified, nothing to mark COMPLETE**: every box in `archive/0.3.63.md` is ticked, the archive
+  move and the `INDEX.md` row are in `465a818`, `https://gpncoin.ai/releases.json` serves `0.3.63`
+  (`published_at 2026-11-21T00:39:45Z`, linux `461f8b77…`), and this box's **running** node reports
+  it: `system_version` on `127.0.0.1:9944` → `0.3.63`. Row 217 was deliberately released IN-PROGRESS
+  (0.3.63 has an empty `.rs` diff), so there is no row to flip to COMPLETE.
+- **C — bundled 0.3.64**, per the sequencing recorded in 0.3.63 §3b and NEEDS-TRIAGE:
+  - merged `origin/fix/218-sealer-heartbeat` (`fe71e35`) → merge commit `c83149b`;
+    one file, `gpn-node/node/src/service.rs`, +205/−2 (SealWatch: 20 s heartbeat,
+    ≥45 s slow-solve WARN, >2 s blocked-submit WARN).
+  - rows **217** (re-bundle) and **218** marked IN-PROGRESS with the bundle note.
+  - `/usr/bin/python3 scripts/bump-version.py patch` → 0.3.64, 15 manifests + 14 lockfiles +
+    `network.json latest_version`; CHANGELOG section written (no `_TODO_`).
+  - `scripts/make-release-checklist.py 0.3.64` → `docs/releases/0.3.64.md` (2 in-progress).
+- **Testing gate** (run in a clean clone at `~/gpn-release-work`, because this checkout is the
+  runner's work dir and CI force-checked it out mid-build at 17:58 — that is what killed the first
+  local build with `can't create …/librocksdb-sys-*/out/*.o: No such file or directory`;
+  environment, not code):
+  - `cargo test --release -p gpn-node --bin gpn-node` → **293 passed; 0 failed; 2 ignored**
+  - `… seal_watch_tests` → **5 passed**
+  - `cargo fmt -- --check` → exit 0; CI allow-list `cargo clippy --release --workspace --all-targets -D warnings` → clean.
+- **Next run**: work box 1 of `docs/releases/0.3.64.md`; the long pole is the build/publish (§5–§7).
+  Do not merge anything else into main while 0.3.64 is in flight.
+
 ## 17:4x PT — 0.3.63 CLOSED AND FILED: §10 row update, §10b timings, archive + INDEX [no triage]
 
 - **A0**: CI on main HEAD `a42374a` — `GET /actions/runs?head_sha=a42374a` → `total_count: 0`.
