@@ -1362,11 +1362,20 @@ function Get-LoaderExit {
 # cannot be polled to learn whether one is in progress; SM_SHUTTINGDOWN is the
 # observable state it produces, and that is what is read here.
 #
+# #237: only the first of those is a reason to DEFER. The three reboot-pending
+# markers say "a reboot is owed", not "the box is going down now" -- they are
+# consumed at the next reboot and are routinely left behind for days by other
+# installers (118 stale entries on box 1, 2026-11-22). Treating them as a
+# shutdown froze that box's updater permanently, and the updater's own swap uses
+# MOVEFILE_DELAY_UNTIL_REBOOT, so a successful update creates the very marker
+# that would block the next one. They are returned as Notes and logged only.
+#
 # Probes are injectable so the assertion test can stub the flag both ways without
 # shutting a machine down.
 function Get-ShutdownState {
   param([scriptblock]$MetricsProbe = $null, [scriptblock]$RegistryProbe = $null)
   $reasons = @()
+  $notes = @()
 
   $metrics = $null
   if ($MetricsProbe) {
@@ -1382,23 +1391,23 @@ function Get-ShutdownState {
   }
 
   if ($RegistryProbe) {
-    foreach ($r in @(& $RegistryProbe)) { if ($r -and ([string]$r).Trim()) { $reasons += ([string]$r).Trim() } }
+    foreach ($r in @(& $RegistryProbe)) { if ($r -and ([string]$r).Trim()) { $notes += ([string]$r).Trim() } }
   } else {
     $sm = 'HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager'
     try {
       $pfro = @((Get-ItemProperty -LiteralPath $sm -Name PendingFileRenameOperations -ErrorAction Stop).PendingFileRenameOperations)
-      if ($pfro.Count -gt 0) { $reasons += 'a reboot is pending (PendingFileRenameOperations is non-empty)' }
+      if ($pfro.Count -gt 0) { $notes += ('a reboot is pending (' + $pfro.Count + ' PendingFileRenameOperations entries) - logged only, does not defer') }
     } catch { }
     if (Test-Path -LiteralPath 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Component Based Servicing\RebootPending') {
-      $reasons += 'a reboot is pending (CBS RebootPending)'
+      $notes += 'a reboot is pending (CBS RebootPending) - logged only, does not defer'
     }
     if (Test-Path -LiteralPath 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\WindowsUpdate\Auto Update\RebootRequired') {
-      $reasons += 'a reboot is pending (Windows Update RebootRequired)'
+      $notes += 'a reboot is pending (Windows Update RebootRequired) - logged only, does not defer'
     }
   }
 
-  if ($reasons.Count -eq 0) { return @{ Pending = $false; Why = '' } }
-  return @{ Pending = $true; Why = ($reasons -join '; ') }
+  if ($reasons.Count -eq 0) { return @{ Pending = $false; Why = ''; Notes = $notes } }
+  return @{ Pending = $true; Why = ($reasons -join '; '); Notes = $notes }
 }
 
 # #209: positive evidence that security software stopped the build. Same rules
@@ -1909,6 +1918,10 @@ try {
   # start is what gets refused (0xC000026B). Leave the install alone, leave the
   # node running, and let the next cycle after resume apply it normally.
   $sd = Get-ShutdownState
+  # #237: reboot-pending markers are notes, never a deferral.
+  if ($sd.Notes -and @($sd.Notes).Count -gt 0) {
+    foreach ($n in @($sd.Notes)) { Write-Log ('note: ' + $n) }
+  }
   if ($sd.Pending) {
     Write-Log ('deferred: system is shutting down - ' + $sd.Why)
     Write-Log 'the node was NOT stopped and nothing was installed - the next update cycle after the restart applies it normally'

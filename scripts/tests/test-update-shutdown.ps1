@@ -8,16 +8,22 @@
 # Extraction follows test-update-defer.ps1: take the update wrapper's function
 # bodies out of install.ps1 (up to the self-test marker) and dot them in.
 #
+# #237 (2026-11-22): reboot-pending markers (PFRO, CBS, WU) are NOTES, not a
+# deferral. Box 1 carried 118 stale PendingFileRenameOperations entries naming
+# other installers' leftovers and its updater refused every cycle with
+# "system is shutting down - a reboot is pending", forever.
+#
 # Covered:
 #   A  metrics probe says a shutdown began      -> pending, reason names it
 #   B  metrics probe says no shutdown           -> not pending
-#   C  registry probe reports one reason        -> pending, reason carried
-#   D  both probes report                       -> both reasons present
+#   C  PFRO-only (a pending reboot)              -> NOT pending, carried as a note
+#   D  shutdown + pending reboot                -> pending, both reported
 #   E  registry probe returns nothing / null    -> not pending, no crash
 #   F  the default probes run on this host      -> a hashtable, never a throw
 #   G  the check sits BEFORE the node is stopped and before --apply
 #   H  a pending shutdown logs `deferred: system is shutting down` and exits 75
 #   I  nothing is stopped or installed in that branch (no Stop-NodeTree / --apply)
+#   J  notes are logged, and they sit outside the deferral branch
 $ErrorActionPreference = 'Stop'
 
 $root = Resolve-Path (Join-Path $PSScriptRoot '../..')
@@ -59,13 +65,18 @@ $r = Get-ShutdownState -MetricsProbe { 0 } -RegistryProbe { @() }
 Ok 'B no shutdown and no pending reboot is not pending' (-not $r.Pending) ("why=" + $r.Why)
 Ok 'B the answer is a hashtable with both keys' ($null -ne $r.Pending -and $null -ne $r.Why) 'shape changed'
 
-# ---- C/D: a pending reboot blocks the cycle too ---------------------------
-$r = Get-ShutdownState -MetricsProbe { 0 } -RegistryProbe { @('a reboot is pending (CBS RebootPending)') }
-Ok 'C a pending reboot is deferred' ($r.Pending) 'not pending'
-Ok 'C the reason is carried through' ($r.Why -like '*CBS RebootPending*') ("why=" + $r.Why)
+# ---- C: a pending reboot is a NOTE, never a deferral (#237) --------------
+$r = Get-ShutdownState -MetricsProbe { 0 } -RegistryProbe { @('a reboot is pending (118 PendingFileRenameOperations entries)') }
+Ok 'C PFRO-only is NOT deferred' (-not $r.Pending) ("why=" + $r.Why)
+Ok 'C PFRO-only is carried as a note' (@($r.Notes).Count -eq 1 -and $r.Notes[0] -like '*PendingFileRenameOperations*') ("notes=" + (@($r.Notes) -join '|'))
+$r = Get-ShutdownState -MetricsProbe { 0 } -RegistryProbe { @('a reboot is pending (CBS RebootPending)', 'a reboot is pending (Windows Update RebootRequired)') }
+Ok 'C CBS+WU only is NOT deferred' (-not $r.Pending) ("why=" + $r.Why)
+Ok 'C both markers are carried as notes' (@($r.Notes).Count -eq 2) ("notes=" + (@($r.Notes) -join '|'))
 
+# ---- D: a real shutdown wins, and the notes ride along --------------------
 $r = Get-ShutdownState -MetricsProbe { 1 } -RegistryProbe { @('a reboot is pending (Windows Update RebootRequired)') }
-Ok 'D both signals are reported' ($r.Pending -and $r.Why -like '*SM_SHUTTINGDOWN*' -and $r.Why -like '*RebootRequired*') ("why=" + $r.Why)
+Ok 'D a shutdown is still deferred with a pending reboot' ($r.Pending -and $r.Why -like '*SM_SHUTTINGDOWN*') ("why=" + $r.Why)
+Ok 'D the reboot marker is reported as a note' (@($r.Notes) -contains 'a reboot is pending (Windows Update RebootRequired)') ("notes=" + (@($r.Notes) -join '|'))
 
 # ---- E: never a guess, never a crash --------------------------------------
 $r = Get-ShutdownState -MetricsProbe { 0 } -RegistryProbe { @() }
@@ -77,9 +88,9 @@ Ok 'E an unreadable metric is not treated as a shutdown' (-not $r.Pending) ("why
 
 # ---- F: the real probes run on a real machine -----------------------------
 $live = Get-ShutdownState
-Ok 'F the default probes return a hashtable' ($null -ne $live.Pending) 'no answer'
+Ok 'F the default probes return a hashtable' ($null -ne $live.Pending -and $null -ne $live.Notes) 'no answer'
 Ok 'F a pending answer always carries a reason' ((-not $live.Pending) -or ($live.Why -and $live.Why.Trim())) ("why=" + $live.Why)
-Write-Host ('live: pending=' + $live.Pending + ' why=' + $live.Why)
+Write-Host ('live: pending=' + $live.Pending + ' why=' + $live.Why + ' notes=' + (@($live.Notes) -join '|'))
 
 # ---- G: it must run before anything is stopped or installed ---------------
 $stopAt = $body.IndexOf("Write-Log 'update available - stopping GPN-Node before applying")
@@ -98,6 +109,12 @@ Ok 'H it exits 75 (deferred, not failed)' ($branch.Contains('exit 75')) 'wrong e
 Ok 'I it does not stop the node' (-not $branch.Contains('Stop-NodeTree')) 'stop inside the branch'
 Ok 'I it does not install anything' (-not ($branch.Contains('--apply'))) 'apply inside the branch'
 Ok 'I it leaves the node running' ($branch.Contains('the node was NOT stopped')) 'reassurance missing'
+
+# ---- J: notes are logged, and outside the deferral branch (#237) ----------
+$notesAt = $body.IndexOf('foreach ($n in @($sd.Notes))', $checkAt)
+Ok 'J the notes are logged' ($notesAt -gt 0) 'notes logging missing'
+Ok 'J notes are logged before the deferral branch' ($notesAt -gt 0 -and $notesAt -lt $branchStart) ("notes=" + $notesAt + " branch=" + $branchStart)
+Ok 'J the notes log does not defer' (-not $body.Substring($notesAt, [Math]::Max(0, $branchStart - $notesAt)).Contains('exit 75')) 'exit 75 between notes and branch'
 
 # ---- the extracted code stays pure ASCII (Windows PowerShell 5.1 decoding) --
 $nonAscii = 0
