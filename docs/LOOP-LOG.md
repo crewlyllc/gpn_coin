@@ -1,3 +1,36 @@
+## 20:2x PT — 0.3.67 box 4 (row 236) done: an update never starts while Windows is going down
+
+- **A0**: `origin/main` HEAD at start = `78684d8` (box 3/235). Its CI run **44982921625** was `pending` —
+  noted, not awaited (the open box is installer work, not a build/publish step). That run is now
+  `cancelled`, superseded by this run's pushes; the current HEAD `e67fa7f` has run **44984531666**
+  `pending`. Nothing about 236 depends on it.
+- **State audit**: crate = `0.3.67`; §3b had 235 ticked and **236** open. First unticked box = 236.
+- **Working tree was stale again** (`b741e94` local vs `78684d8` main) — fetched before touching anything,
+  per the 2026-11-21 lesson.
+- **Box worked — 236, ticked with evidence.** `Get-ShutdownState` in the update wrapper template reads
+  three OS-level signals before the node is stopped or `--apply` is called: `GetSystemMetrics(0x2000)`
+  (`SM_SHUTTINGDOWN`), a non-empty `PendingFileRenameOperations`, and the CBS / Windows Update
+  `RebootPending` keys. Any hit ⇒ log `deferred: system is shutting down - <why>`, node NOT stopped,
+  nothing installed, `exit 75`; the next cycle after the restart applies normally (§5-§8 work).
+  `ExitWindowsEx` is the call that *starts* a shutdown, not a state query, so it cannot be polled —
+  `SM_SHUTTINGDOWN` is its observable state and that is what is read (recorded in the code comment, since
+  the row names `ExitWindowsEx`).
+- **Evidence**: `scripts/tests/test-update-shutdown.ps1` 21 checks `RESULT: PASS (all checks)` on pwsh
+  7.4.6 here and under Windows PowerShell 5.1 on box 1 (`EXIT=0`, at `e67fa7f`); **13 failures** against
+  `git show 78684d8:install.ps1`. Live on box 1 the un-stubbed probes answered
+  `pending=True why=a reboot is pending (PendingFileRenameOperations is non-empty)` — the detector fired on
+  a real machine state. Regression: `test-update-defer` PASS, `test-update-exit-cause` PASS,
+  `test-update-confirm` 0 failures, `test-update-start-after-stop` PASS; `install.ps1` parses 0 errors,
+  pure ASCII.
+- **One test assertion was wrong, not the code**: the first version asserted "a healthy host is not
+  deferred" and failed on box 1 because box 1 genuinely owes a reboot. Corrected to "a pending answer
+  always carries a reason" (commit `e67fa7f`) rather than weakening the detector — that failure *was* the
+  live proof.
+- Commits: `e9e2890` (code + test), `e67fa7f` (test assertion). Both pushed to main.
+- **Next**: §3b is now fully ticked (235, 236). Next run: §3 bump/CHANGELOG check → §5 build (dispatch and
+  end the run), then publish, deploy, prove.
+
+
 ## 20:1x PT — 0.3.67 box 3 (row 235) done: a teardown-class start failure defers, it never rolls back
 
 - **A0**: `origin/main` HEAD at start = `b741e94` ("loop log: 0.3.67 box 2 (234) done"), a docs commit;
