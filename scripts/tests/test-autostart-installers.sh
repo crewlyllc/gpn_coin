@@ -394,7 +394,12 @@ line_apply=$(grep -n '\$updater --apply' "$uw" | head -1 | cut -d: -f1)
 # stopped, so nothing was installed and this build keeps running"), which sits *before*
 # --apply by design. Ordering must therefore be checked against the restart that follows
 # the apply, not the first `schtasks /Run` in the file.
-line_run=$(awk -v a="$line_apply" 'NR>a && /schtasks \/Run \/TN \$NodeTask/ {print NR; exit}' "$uw")
+# 0.3.67 (#233): the restart after the apply goes through Start-NodeAfterStop (which
+# re-checks that the stopped tree is gone and starts detached), so the bare
+# `schtasks /Run` this test used to look for is now INSIDE that function, above
+# --apply. Accept either mechanism: what matters is that a start happens between
+# the apply and any modal failure dialog.
+line_run=$(awk -v a="$line_apply" 'NR>a && /schtasks \/Run \/TN \$NodeTask|Start-NodeAfterStop/ {print NR; exit}' "$uw")
 line_fail=$(awk -v a="$line_run" 'NR>a && /Show-UpdateFailure \$apply/ {print NR; exit}' "$uw")
 [ -n "$line_end" ] && [ -n "$line_apply" ] && [ "$line_end" -lt "$line_apply" ] \
   && ok "stops the node BEFORE --apply" || bad "--apply is not preceded by schtasks /End"

@@ -51,7 +51,7 @@ function Ok($name, $cond, $detail) {
 
 $now = [long]([DateTime]::UtcNow - [DateTime]'1970-01-01').TotalSeconds
 
-# ── A: a teardown written during this attempt is quoted, and named ────────────
+# -- A: a teardown written during this attempt is quoted, and named --------------------
 $teardown = '{"ts":"2026-11-21T18:35:00Z","ts_unix":' + ($now - 5) + ',"code":-1073741510,"kind":"console-teardown","detail":"the console this node was attached to was destroyed (a console teardown, not a machine shutdown)","remediation":"nothing to fix","version":"0.3.67","os":"windows"}'
 $noteA = Get-ExitCauseNote @{ LastExit = $teardown; Tail = @() } ($now - 60)
 Ok 'A teardown record is quoted' ($noteA -ne '') $noteA
@@ -59,26 +59,26 @@ Ok 'A teardown record names the kind' ($noteA.Contains('console-teardown')) $not
 Ok 'A teardown record says what it is not' ($noteA.Contains('not a machine shutdown')) $noteA
 Ok 'A teardown record quotes the exit code' ($noteA.Contains('-1073741510')) $noteA
 
-# ── B: a real shutdown is a different slug, not silently identical ────────────
+# -- B: a real shutdown is a different slug, not silently identical --------------------
 $shutdown = '{"ts":"2026-11-21T18:35:00Z","ts_unix":' + ($now - 5) + ',"code":0,"kind":"system-shutdown","detail":"the machine is shutting down (SM_SHUTTINGDOWN=1)","remediation":"nothing to fix","version":"0.3.67","os":"windows"}'
 $noteB = Get-ExitCauseNote @{ LastExit = $shutdown; Tail = @() } ($now - 60)
 Ok 'B shutdown record names its own kind' ($noteB.Contains('system-shutdown')) $noteB
 Ok 'B the two events do not read the same' ($noteB -ne $noteA) $noteB
 
-# ── C: a record that predates this attempt is not evidence about it ───────────
+# -- C: a record that predates this attempt is not evidence about it --------------------
 $noteC = Get-ExitCauseNote @{ LastExit = $teardown; Tail = @() } ($now + 60)
 Ok 'C a stale record is ignored' ($noteC -eq '') $noteC
 
-# ── D: no record means no claim ──────────────────────────────────────────────
+# -- D: no record means no claim --------------------
 $noteD = Get-ExitCauseNote @{ LastExit = ''; Tail = @() } ($now - 60)
 Ok 'D no record -> empty note' ($noteD -eq '') $noteD
 Ok 'D no evidence object -> empty note' ((Get-ExitCauseNote $null 0) -eq '') 'null evidence'
 
-# ── E: garbage in the ledger must not throw ──────────────────────────────────
+# -- E: garbage in the ledger must not throw --------------------
 $noteE = Get-ExitCauseNote @{ LastExit = 'not json at all'; Tail = @() } ($now - 60)
 Ok 'E malformed JSON -> empty note' ($noteE -eq '') $noteE
 
-# ── F: the call site exists (a definition with no caller is the failure mode) ─
+# -- F: the call site exists (a definition with no caller is the failure mode) -
 Ok 'F the confirm failure path quotes the cause' `
   ($body.Contains('Get-ExitCauseNote (Get-StartEvidence) $cycleStartUnix')) 'call site missing'
 Ok 'F the cycle start is baselined somewhere' `
