@@ -1,3 +1,32 @@
+## 20:1x PT — 0.3.67 box 3 (row 235) done: a teardown-class start failure defers, it never rolls back
+
+- **A0**: `origin/main` HEAD at start = `b741e94` ("loop log: 0.3.67 box 2 (234) done"), a docs commit;
+  `?head_sha=<full 40>` ⇒ **total_count 0**, correct under `ci.yml` paths-ignore. The last code commit,
+  `74a17a6` (box 2), has CI run **44981895134** `pending` since 03:43Z (~10 min) — noted, not awaited;
+  the open box is neither a build nor a publish step.
+- **State audit**: `gpn-agent/Cargo.toml` = `0.3.67`; `docs/releases/0.3.67.md` §3b has 233/234 ticked and
+  235/236 open. First unticked box = **235**.
+- **Box worked — 235, ticked with evidence.** The updater now classifies the loader status BEFORE it decides
+  to roll back: `$script:LoaderCodes` + `Get-LoaderExit` in the update wrapper template read this attempt's
+  `last-exit.json` (signed, unsigned or `0x` hex; a record older than `$cycleStartUnix` is ignored) and map
+  `0xC000026B`, `0xC0000142`, `0xC0000135`, `0xC000013A` to *defer* — no rollback, one retry after 10 s, then
+  `deferred: environment did not allow the process to start (0x…)` via the new `Show-UpdateDeferred`
+  (`DEFERRED:`, exit 75 = EX_TEMPFAIL, dialog says "not failed … Nothing was rolled back"). `0xC0000005` is
+  named but still rolls back: an access violation at load is the build's fault. The launcher's own
+  `report-exit.ps1` gained `session-closing` / `dll-init-failed` / `load-access-violation`, so the synthetic
+  record no longer says `unknown`.
+- **Verified**: `scripts/tests/test-update-defer.ps1` — 44 checks, `RESULT: PASS` on pwsh 7.4.6 here and on
+  **Windows PowerShell 5.1 on box 1**; against `git show HEAD:install.ps1` the same test gives
+  `FAILURES: 38` (fail-before/pass-after). Regression: `test-update-exit-cause` PASS, `test-update-confirm`
+  `FAILURES: 0`, `test-update-start-after-stop` PASS; `install.ps1` parses 0 errors, 0 non-ASCII bytes.
+- **Live on box 1**: a real `last-exit.json` written the way the launcher writes it, read back from disk ⇒
+  `0xC000026B STATUS_DLL_INIT_FAILED_LOGOFF defer=True`; the same record older than the cycle ⇒ ignored; the
+  box's own record ⇒ `kind='provider' code=1 loader=none` (no false deferral); live node still up
+  (`gpn_node pid 41048`, `C:\gpn\data\update\current\gpn-node.exe`).
+- **Pushed once** — see the commit line appended below. No blocker, no [TRIAGE] this run (231 is unchanged and
+  owner-held; nothing new needs a decision).
+- Next run starts at box 4 (row 236: do not start an update while the system is shutting down).
+
 ## 19:5x PT — 0.3.67 box 2 (row 234) done: a console teardown is no longer called a machine shutdown
 
 - **A0**: `origin/main` HEAD at start = `9636408` ("0.3.67 box 1 (233)…"), a code commit; `?head_sha=<full 40>` ⇒ CI run **44980529326** `pending` since 03:25Z (~6 min). Not awaited — under the 90-minute threshold and the open box is neither a build nor a publish step.

@@ -870,6 +870,14 @@ if ($Note) {
       $detail='the console this node was started from was closed'
       $fix='start it detached (the installer does this) or run it as a scheduled task'
     }
+    # #235: loader/teardown statuses mean the ENVIRONMENT refused the image.
+    # Naming them here is what lets the updater defer instead of rolling back.
+    '-1073741205' { $kind='session-closing'; $detail='the window station or session was closing (0xC000026B STATUS_DLL_INIT_FAILED_LOGOFF) - the machine refused to load the process'; $fix='nothing to fix in the build; the next cycle starts normally once the session is back' }
+    '3221226091'  { $kind='session-closing'; $detail='the window station or session was closing (0xC000026B STATUS_DLL_INIT_FAILED_LOGOFF) - the machine refused to load the process'; $fix='nothing to fix in the build; the next cycle starts normally once the session is back' }
+    '-1073741502' { $kind='dll-init-failed'; $detail='a DLL could not be initialised (0xC0000142 STATUS_DLL_INIT_FAILED) - the loader refused the image'; $fix='nothing to fix in the build; retry once the session is back' }
+    '3221225794'  { $kind='dll-init-failed'; $detail='a DLL could not be initialised (0xC0000142 STATUS_DLL_INIT_FAILED) - the loader refused the image'; $fix='nothing to fix in the build; retry once the session is back' }
+    '-1073741819' { $kind='load-access-violation'; $detail='an access violation at load (0xC0000005) - the build itself is the suspect'; $fix='report it; this one is not an environment refusal' }
+    '3221225477'  { $kind='load-access-violation'; $detail='an access violation at load (0xC0000005) - the build itself is the suspect'; $fix='report it; this one is not an environment refusal' }
     default {
       $kind='unknown'
       $detail="the node exited $ExitCode without writing a reason"
@@ -1023,6 +1031,23 @@ function Show-UpdateFailure {
       ('"' + $ReportScript + '"'),'-ExitCode',[string]$Code,'-Log',('"' + $LogPath + '"'),'-Note',('"' + $note + '"')) -WindowStyle Hidden | Out-Null
   } catch {
     Write-Log ('could not show the failure dialog: ' + $_.Exception.Message)
+  }
+}
+
+# #235: a deferral is not a failure and must not read like one. Same dialog
+# channel, but the line says DEFERRED and the exit code is 75 (EX_TEMPFAIL), so
+# a 3-strikes counter or a status reader can tell "refused by the environment"
+# from "this build is broken".
+function Show-UpdateDeferred {
+  param([string]$What, [string]$Detail)
+  Write-Log ('DEFERRED: ' + $What + ' (exit 75) - ' + $Detail)
+  if (-not (Test-Path $ReportScript)) { return }
+  $note = 'auto-update deferred (not failed): ' + $What + ' - ' + $Detail + '. Nothing was rolled back. See ' + $LogPath
+  try {
+    Start-Process -FilePath 'powershell' -ArgumentList @('-NoProfile','-ExecutionPolicy','Bypass','-File',
+      ('"' + $ReportScript + '"'),'-ExitCode','75','-Log',('"' + $LogPath + '"'),'-Note',('"' + $note + '"')) -WindowStyle Hidden | Out-Null
+  } catch {
+    Write-Log ('could not show the deferral dialog: ' + $_.Exception.Message)
   }
 }
 
@@ -1271,6 +1296,53 @@ function Get-ExitCauseNote {
   if ($j.code -ne $null -and [string]$j.code -ne '') { $note = $note + ' (exit ' + [string]$j.code + ')' }
   if ($j.detail -and ([string]$j.detail).Trim()) { $note = $note + ': ' + ([string]$j.detail).Trim() }
   return $note
+}
+
+# #235: a start that dies at LOAD with a loader status was refused by the
+# ENVIRONMENT, not by the build. The 5th machine (2026-11-21) rolled 0.3.66 ->
+# 0.3.64 -> fail because 0xC000026B was treated as a code fault: the box was mid
+# shutdown, no process could load, and every rollback was refused the same way.
+#
+# Named, so the operator sees the actual status instead of "no process ever
+# appeared". Deferred (never rolled back) for the loader/teardown family.
+# 0xC0000005 is named but NOT deferred: an access violation at load is the
+# build's own fault and rolling back is the correct response to it.
+$script:LoaderCodes = @{
+  -1073741205 = @{ Hex = '0xC000026B'; Name = 'STATUS_DLL_INIT_FAILED_LOGOFF'; Defer = $true;  Why = 'the window station or session is closing' }
+  -1073741502 = @{ Hex = '0xC0000142'; Name = 'STATUS_DLL_INIT_FAILED';       Defer = $true;  Why = 'a DLL could not be initialised, so the loader refused the image' }
+  -1073741515 = @{ Hex = '0xC0000135'; Name = 'STATUS_DLL_NOT_FOUND';         Defer = $true;  Why = 'a required DLL is missing from this machine' }
+  -1073741510 = @{ Hex = '0xC000013A'; Name = 'STATUS_CONTROL_C_EXIT';        Defer = $true;  Why = 'the process was torn down with its console' }
+  -1073741819 = @{ Hex = '0xC0000005'; Name = 'STATUS_ACCESS_VIOLATION';      Defer = $false; Why = 'an access violation at load - the build itself' }
+}
+
+# Read the loader status out of this attempt's last-exit.json record. A record
+# written before the cycle began is not evidence about this attempt. Returns
+# $null when there is no usable record or the code is not a loader status.
+function Get-LoaderExit {
+  param($Evidence, [long]$Since = 0)
+  if (-not $Evidence -or -not $Evidence.LastExit) { return $null }
+  try { $j = $Evidence.LastExit | ConvertFrom-Json } catch { return $null }
+  if (-not $j) { return $null }
+  $ts = 0
+  try { $ts = [long]$j.ts_unix } catch { $ts = 0 }
+  if ($Since -gt 0 -and $ts -gt 0 -and $ts -lt $Since) { return $null }
+  if ($j.code -eq $null -or [string]$j.code -eq '') { return $null }
+  $raw = ([string]$j.code).Trim()
+  $code = $null
+  $c = 0L
+  if ([long]::TryParse($raw, [ref]$c)) {
+    if ($c -gt 2147483647) { $c = $c - 4294967296 }
+    if ($c -ge -2147483648 -and $c -le 2147483647) { $code = [int]$c }
+  } elseif ($raw -match '^0x([0-9a-fA-F]{1,8})$') {
+    $u = [Convert]::ToInt64($Matches[1], 16)
+    if ($u -ge 2147483648) { $u = $u - 4294967296 }
+    $code = [int]$u
+  }
+  if ($code -eq $null) { return $null }
+  if (-not $script:LoaderCodes.ContainsKey([int]$code)) { return $null }
+  $m = $script:LoaderCodes[[int]$code]
+  return @{ Code = [int]$code; Hex = $m.Hex; Name = $m.Name; Why = $m.Why; Defer = [bool]$m.Defer;
+    Line = ('deferred: environment did not allow the process to start (' + $m.Hex + ' ' + $m.Name + ') - ' + $m.Why) }
 }
 
 # #209: positive evidence that security software stopped the build. Same rules
@@ -1850,6 +1922,39 @@ try {
     Write-Log ('confirm cause: ' + $causeNote)
   }
   Write-Log ('NOT CONFIRMED: ' + $failureLine)
+
+  # #235: classify BEFORE any rollback. A loader/teardown status says the
+  # environment refused the image, so the build is not the suspect and rolling
+  # back only replaces a good build with an older one that is refused the same
+  # way (5th machine, 2026-11-21). Retry once after 10 s; if it is still
+  # refused, report `deferred:` and leave the new build installed.
+  $loader = Get-LoaderExit (Get-StartEvidence) $cycleStartUnix
+  if ($loader -and $loader.Defer) {
+    Write-Log ('start refused at load: ' + $loader.Hex + ' ' + $loader.Name + ' - ' + $loader.Why)
+    Write-Log ('not rolling back: ' + $loader.Hex + ' is the environment refusing the process, not a bad build')
+    Write-Log 'retry after 10s (the retry this class gets instead of a rollback)'
+    Start-Sleep -Seconds 10
+    [void](Start-NodeAfterStop 'deferred retry' 30)
+    $deferRes = Confirm-Running -Expect $expect -WindowSecs $ConfirmFirstStartSecs -CeilingSecs $ConfirmCeilingSecs
+    if ($deferRes) {
+      Write-Log ('CONFIRMED after the deferred retry: ' + $deferRes.Version + ' is running after ' + $deferRes.ElapsedSecs + ' s')
+      $deferMarker = Join-Path $InstallDir 'data\update\pending-update.json'
+      if (Test-Path -LiteralPath $deferMarker) {
+        try { Remove-Item -LiteralPath $deferMarker -Force -ErrorAction Stop } catch { }
+      }
+      Write-Log 'update cycle complete'
+      exit 0
+    }
+    $deferMsg = $loader.Line + '; retried once after 10 s and it was still refused; ' + $expect +
+                ' stays installed and NO rollback was attempted - the next cycle starts it normally'
+    Show-UpdateDeferred 'confirm the new version' $deferMsg
+    exit 75
+  }
+  if ($loader) {
+    $failureLine = $failureLine + '; the node exited at load with ' + $loader.Hex + ' ' + $loader.Name + ' (' + $loader.Why + ')'
+    Write-Log ('start failed at load: ' + $loader.Hex + ' ' + $loader.Name + ' - ' + $loader.Why + ' (not an environment refusal; rolling back)')
+  }
+
   Write-Log 'rolling back to the previous version and restarting it - a box must not be left on a build that does not come up'
   $rb = Invoke-Rollback
   foreach ($l in $rb.Lines) { if ($l.Trim()) { Write-Log ('rollback: ' + $l.Trim()) } }
