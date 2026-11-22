@@ -1,3 +1,21 @@
+## 05:51 PT — 0.3.68 §4: linux CI green on 1bc9488 (the prune-timer failure does not reproduce); Windows job still building [no triage]
+
+- **A0**: `origin/main` HEAD `52a36c5e` (docs-only) ⇒ `head_sha` query `total_count: 0` — `paths-ignore` intact.
+  Release SHA `1bc9488bb7fc` run **45024973751**: `in_progress`, created 12:57:57Z (54 min at read time). Not waited on.
+- **New since last run — the linux half concluded green.** `Build + unit tests (linux)` `137221062985`
+  **success**, 13:18:25→13:41:43Z, all 26 functional steps green including step 7 **`Test gpn-agent (non-GPU)`** —
+  the exact step that died on `ab3c502` with `failed to write …/invoked.timestamp` / `No such file or directory` (exit 101)
+  at 04:20:42 PT. That failure was the prune timer. It does not reproduce under `prune-ci-cache-daily.sh`. Environment cause confirmed, not our code.
+- `fmt + clippy` `137220923136` **success**; `secret-scan` `137220923314` **success**; GPU/macOS/audit lanes **skipped** by design.
+- **Still open**: `Build + unit tests (windows, self-hosted)` `137220923278` in_progress, started 13:16:37Z, at step 6/14
+  (`Build + test gpn-node (release)`) — a cold Windows release build is 40-75 min, so ~13:56-14:31Z is its normal finish.
+- **No box ticked.** The first unticked box is §4 "CI green on that exact SHA: fmt, clippy, secret-scan, Linux build, **Windows build**" —
+  four of five are now green, the fifth is in flight. Ticking it on four of five would be a claim without evidence.
+- Run age 54 min < the 90-minute stale-release threshold — nothing to cancel, nothing to re-dispatch.
+- **Next run**: read 45024973751's conclusion. `success` ⇒ tick §4 and go to §5 (dispatch `release-linux-selfhosted.yml` and
+  `release-windows.yml` for `1bc9488`, write the run ids into the boxes, end the run). `failure` ⇒ quote the Windows job's failing
+  step line and classify before touching anything.
+
 ## 05:31 PT — 0.3.68 §4 still waiting on a conclusion; 1bc9488's CI half is green, both build jobs in flight [no triage]
 
 - **A0**: `origin/main` HEAD `a07ee2f` (docs-only) ⇒ `head_sha` query `total_count: 0` — `paths-ignore` intact.
