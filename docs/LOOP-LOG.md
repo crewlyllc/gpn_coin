@@ -1,3 +1,25 @@
+## 01:31 PT — windows release build green on the same sha; §5 build boxes closed 4/7
+
+- **A0**: `origin/main` HEAD `4a1fbc1`… (checked out `d766892`) — the A0 question for `d766892`
+  (`?head_sha=` full 40) ⇒ `total_count: 0`, correct under `ci.yml` paths-ignore (that commit touched
+  `docs/LOOP-LOG.md` + `docs/releases/0.3.67.md` only). Nothing red. Local tree had been one commit
+  behind; `git pull --ff-only` → HEAD == origin/main **before** reading any box (the local copy still
+  showed the linux box unticked — the stale-tree trap from TOOLS.md).
+- **Box 1 — §5 `release-windows.yml` → `gpn-windows.zip`.** Run **45004869470** `completed / success`
+  09:19:02Z (26 min). Job `windows`: step 18 package, 22 provenance gate, 23 publish all success.
+  Asset from `GET /releases/tags/windows-latest`: `gpn-windows.zip` **248,806,172 B**
+  `sha256:19065d12…949de0` + `gpn-windows.zip.bundle` 9,049 B `sha256:8776e50d…0250868`, updated
+  09:18:56Z.
+- **Box 2 — §5 "Same SHA on both runs".** Both runs' `head_sha` = `88f2eea74788a…`; that sha's
+  `Cargo.toml` is `version = "0.3.67"`, ancestor of origin/main with a docs-only diff — built bytes
+  are this checklist's tree.
+- **Box 3 — §5 attestation ordering.** `GET /repos/jeremyzguo/gpn_coin` ⇒ `visibility: private`, so
+  the private path applies: step 20 public attestation **skipped** (expected), step 21 keyless cosign
+  success, step 22 gate success, step **23** publish — gate numbered before publish, as required.
+- **Next run**: §5's remaining two boxes are gated on §7 (they read the windows digest from
+  `releases.json`, which still serves the previous version) — so the first workable unticked box is
+  §6 "scan the built binaries for strings the change added", against the two published digests above.
+- No blockers, no [TRIAGE].
 ## 01:11 PT — linux release build concluded success; §5 linux box ticked with the published asset digest
 
 - **A0**: `origin/main` HEAD `4a1fbc1` (checklist docs commit) — docs-only, no CI run expected;
