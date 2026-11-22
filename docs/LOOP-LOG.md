@@ -1,3 +1,17 @@
+## 06:58 PT — 0.3.68 §4 TICKED (run 45024973751 concluded `success`); both release builds dispatched, handles written [no triage]
+
+- **A0**: `origin/main` HEAD `d6a187717d77` (docs-only) ⇒ `head_sha` query `total_count: 0`, `paths-ignore` intact, no run expected.
+- **§4 ticked on evidence, not optimism**: `GET /actions/runs/45024973751` ⇒ `status=completed conclusion=success`,
+  `head_sha=1bc9488bb7fc9a06dd4790b867178b907f0b301a`, created 12:57:57Z, updated 14:33:59Z. Jobs:
+  `fmt + clippy` 137220923136 success · `secret-scan` 137220923314 success · `Build + unit tests (linux)` 137221062985 success ·
+  `Build + unit tests (windows, self-hosted)` 137220923278 success. GPU/macOS/audit skipped by design.
+- **§5 dispatched and the run ended immediately** (per the dispatch rule — no waiting in-run):
+  tag `build/1bc9488bb7fc` created (workflow_dispatch refuses a raw sha), then
+  `release-linux-selfhosted.yml` ⇒ run **45035777994** (06:59:30 PT), `release-windows.yml` ⇒ run **45035780136** (06:59:31 PT),
+  both `head_sha=1bc9488bb7fc`, both `in_progress`. Handles written into the two §5 boxes.
+- No blockers, no decisions needed. Next run: read those two run ids once each; success ⇒ tick the build/publish boxes in order
+  (§6 artifact scan, §7 cut+publish), failure ⇒ quote the failing step's line and classify.
+
 ## 06:32 PT — 0.3.68 §4: Windows job verified compiling (two rustc spawned at 06:32 PT), run age 94 min but NOT stale — nothing cancelled [no triage]
 
 - **A0**: `origin/main` HEAD `d3051e03f235` (docs-only) ⇒ `head_sha` query `total_count: 0`, `paths-ignore` intact, no run expected for it.
