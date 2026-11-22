@@ -54,6 +54,23 @@ Rules:
 - The final gate is still §9/§10: version published and a node reporting it. A fully ticked file
   with no published release is not done.
 
+## 0d. Never regenerate a LIVE release checklist (owner rule, 2026-11-22)
+
+`make-release-checklist.py <version>` is for a **new** version with no file yet. Once
+`docs/releases/<version>.md` exists, it is the record of what was actually proven — **edit it,
+never regenerate it.**
+
+- On 2026-11-22 commit `bc724d6` re-ran the generator over the live `0.3.68.md` while "fixing §5".
+  It replaced the file with a fresh template copy and deleted **245 lines of earned evidence**:
+  §7 (cut), §7b (surfaces), §8 (stranger checks), §9 (deploy), §10 (proof) and §10b (timing) all
+  reverted to `[ ]` on a release that was already published and deployed.
+- The cost is not cosmetic: the next run would re-earn boxes already proven, or worse, "close" a
+  release whose evidence had been silently discarded.
+- If a section's *structure* is wrong, edit that section. If the file is genuinely lost, restore
+  it from git (`git checkout <sha> -- docs/releases/<version>.md`) before touching anything else.
+- Repair in the 0.3.68 case: restored the fully-ticked file from `86df377` and re-applied only the
+  genuinely new ticks on top.
+
 ## 0c. BLOCKED is only for an owner decision (owner rule, 2026-11-19)
 
 **An item may be marked `BLOCKED` for exactly one reason: it needs a design decision that is
