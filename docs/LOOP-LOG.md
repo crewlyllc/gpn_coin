@@ -25,8 +25,14 @@ No run to act on ⇒ straight to A.
 stays unticked on purpose: its done-when requires the live `GET :8092/providers` ⇒ 5 rows, which needs
 this build deployed (§9/§10).
 
-**Next run:** §4 push/CI (this commit is a code change, so it DOES start CI; verify green on the exact
-SHA), then §5 build both platforms — dispatch and END, no waiting.
+**§3 ticked too** (bump 0.3.69 in place, CHANGELOG `## [0.3.69]` no `_TODO_`, `bump-version.py --check`
+⇒ `lockstep: 15 manifest(s) and 14 lockfile entr(ies) agree`, seed parity re-checked + launcher-identity
+`RESULT: PASS`). **Pushed once:** `6a4c3aa..c8090a4` (`c8090a4d44a210d2548d71e980caaf9f43ecc0e3`).
+§4 recorded (3/4): docs-only-no-build verified on `6a4c3aa` (0 runs); CI-green box left open.
+
+**Next run:** ask `GET /actions/runs?head_sha=c8090a4d44a210d2548d71e980caaf9f43ecc0e3` — failure ⇒ read
+the job log and fix; success ⇒ §5, dispatch `release-linux-selfhosted.yml` + `release-windows.yml` on
+that SHA and END the run (no waiting).
 
 ## 10:30 PT release loop — queue exhausted; opened + bundled row 239 (/providers phantom rows) as 0.3.69 [no triage]
 
