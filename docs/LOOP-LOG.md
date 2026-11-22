@@ -1,3 +1,33 @@
+## 17:33 PT — 0.3.66 §5 verifier + §6 both boxes ticked; §7 cut dispatched detached [TRIAGE: 231 unchanged]
+
+- **A0**: `origin/main` = `a9d8754c…` (docs-only); `?head_sha=a9d8754c…` ⇒ `total_runs: 0`, as
+  `ci.yml` `paths-ignore` requires. No red anywhere; the code sha under test (`1b9ded2…`) is the one
+  44958227352 already passed. Checkout was stale (`2ebd280`, one docs commit behind) ⇒ reset to
+  `origin/main` first.
+- **§5 last box ticked — "verify the downloaded artifact with the verifier that matches"**: local
+  re-hash of the cached zip ⇒ `sha256 9d89d3ea…076c` = API digest; `cosign verify-blob --bundle`
+  vs `release-windows.yml@.*` + GitHub OIDC issuer ⇒ **`Verified OK`, exit 0**.
+- **§6 both boxes ticked (section DONE 2/2)** — windows half, from the *published* zip, not a local
+  target: `gpn_node.exe` has `Registering costs nothing on any path` ×1 +
+  `register_provider_entry_unsigned` ×6 and zero paid-registration phrases; `gpn_update.exe` has
+  `first output:`/`node log:`/`child: `; and the embedded stamp
+  `gpn-build-v1 version=0.3.66 sha=1b9ded2 spec=53` matches the Linux tarball's
+  `gpn_node --version`. No exe was executed on Linux — the claim is the binary's own stamp plus the
+  job's `success`, stated as such.
+- **Fixed on the way (environment, not code)**: `release-cut.sh` aborted `3/6` with
+  `no CI run for commit 1b9ded2 within 25 commits`. Cause: this runner checkout is a 4-commit
+  shallow clone (`.git/shallow`), so the script's "nearest green ancestor" walk had nothing to walk.
+  `git fetch --unshallow origin` ⇒ 1941 commits; dry run then reached `6/6` and signed
+  `version=0.3.66 min_version=0.1.0` (both asset digests identical to the API).
+- **§7 box 2 dispatched, not waited on**: `setsid nohup scripts/release-cut.sh --version 0.3.66`,
+  log `/tmp/release-cut-0.3.66.log`, started 17:31 PT. Next run reads that log: success ⇒ tick
+  §7's cut/network.json/releases.json-twice boxes; failure ⇒ quote the line and fix.
+- **Worth knowing**: `release-cut.sh` warns `scripts/release-lock.sh` is missing, so the repo is not
+  locked during a cut (a commit now would cancel the release's CI run). Not touched this run —
+  it is a separate fix, not a blocker.
+- **[TRIAGE] item 231 unchanged** — still AWAITING-OWNER on the spec-53 enactment (sudo key D5);
+  question in `docs/NEEDS-TRIAGE.md` §231, live chain still `specVersion 52`.
+
 ## 17:00 PT — 0.3.66 §5 attestation box ticked: cosign `Verified OK` on the published zip [TRIAGE: 231 unchanged]
 
 - **A0**: `?head_sha=2ebd280…` ⇒ 0 runs (docs-only, expected). No CI red anywhere; last code run
