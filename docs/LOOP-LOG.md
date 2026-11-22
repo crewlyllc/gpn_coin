@@ -1,4 +1,24 @@
-## 12:16 PT release loop — 0.3.69: §4 CI box ticked on `c8090a4` (run 45056406823 success, Windows 77 min); §5 SHA decided = `fe67524` [no triage]
+## 13:22 PT 0.3.69 §5/§6: linux release **published and verified**; windows still on box-1 CI
+- A0 CI: origin/main HEAD `4f214b2` = docs-only ⇒ `/actions/runs?head_sha=4f214b2…` ⇒ `total_count: 0`
+  (correct, paths-ignore). Not a red. `fe67524`'s CI run 45058527165: fmt/clippy + secret-scan +
+  linux **success**, windows job still `in_progress` 71 min ⇒ contention, under the 90-min threshold.
+- Boxes ticked (3 of 3 closed this run, all with re-derivable evidence):
+  * §5 `release-linux-selfhosted.yml` — run **45068778999** `completed/success` (20:51:21Z→21:04:43Z,
+    job `linux` success); `gpn-linux.tar.gz` on `linux-latest` re-created 21:02:24Z, 347,001,144 B,
+    API digest `sha256:c6eca129…cc12918b`; re-downloaded via `/releases/assets/780451873` and re-hashed
+    locally ⇒ same sha256 and size ⇒ the published bytes are the verified bytes.
+  * §6 artifact scan — extracted `gpn_scheduler` from those bytes: `unreachable_endpoints` 1,
+    `did not answer /status` 2, `an unreachable endpoint is not a provider` 1, and the build id
+    `gpn-build-v1 version=0.3.69 sha=fe67524 spec=53` ⇒ row 239 is in the shipped binary.
+  * §6 version — `./gpn-node --version` ⇒ `gpn-node 0.3.69`.
+- Honest note recorded in the box, not glossed: the inner `last_error` key is not findable as a bare
+  literal in the optimized scheduler (`grep -a` hits only unrelated `*last_error*` symbols), while the
+  same tree's debug build shows 12 ⇒ compiler literal-table effect, not a stale artifact; §10 proves
+  the real JSON keys on a live `/providers`.
+- Held, reason in the box: `release-windows.yml` — box-1 runner `busy=True` on `fe67524`'s own Windows
+  CI job (started 20:00:51Z). No cancel, no duplicate dispatch; next run ticks on that job's conclusion
+  and dispatches windows on tag `build/fe6752429af6`.
+- Blockers: none. [TRIAGE] none — nothing here needs a decision.
 
 ## 12:52 PT 0.3.69 §5: linux release build dispatched on fe67524, windows held on CI
 - A0 CI: origin/main HEAD `3767b8a` = docs-only ⇒ 0 runs for that sha (correct, paths-ignore). Not a red.
