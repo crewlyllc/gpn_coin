@@ -24,6 +24,12 @@
   342,421 and climbed again — stated openly rather than presented as a forward-only chain.
 - **Filed**: `docs/releases/archive/0.3.66.md`, INDEX row added, timing json written (replay reports
   0s because all ticks share one commit — noted, not hidden). Rows 230 and 232 → `COMPLETE 0.3.66`.
+- **Live site confirmed**: `curl -sL https://gpncoin.ai/download.html` at 17:57:49 PT ⇒
+  `Current signed release: <strong>0.3.66</strong>` (the page 301-redirects, so `-L` matters).
+- **CI handle for the next run**: the push of `a3a94a1`+`42b032a` created a *CI* run (`pending` at
+  17:57 PT) for `42b032a2a6c15c131384aef380d279db88f9626a` — caused by `website/download.html`, which is
+  not in `paths-ignore`. Not waited on. Next run: ask for that sha's run conclusion; `failure` is the
+  box, `success` closes it.
 - **[TRIAGE] 231 unchanged**: source + spec bump shipped in the 0.3.66 WASM; **enactment needs the
   offline sudo key (Jeremy's D5)** — re-raised in `docs/NEEDS-TRIAGE.md` §231. Checklist is 50/51 with
   that single box unticked by design.
