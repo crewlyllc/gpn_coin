@@ -1,3 +1,27 @@
+## 09:20 PT 0.3.68 closed: §10 proved on box 1, filing done (50/50), rows 237/238 COMPLETE [no triage]
+
+**§10 ticked from the machine, not from intent.** Box 1's own `GPN-Update` cycle applied 0.3.68 at 08:42–08:46 PT:
+`update.log` `08:42:46 note: a reboot is pending (118 PendingFileRenameOperations entries) - logged only, does not defer`
+-> `08:43:59 installed 0.3.68 at C:\gpn\data\update\versions\0.3.68`, `current -> versions/0.3.68 previous: 0.3.67`
+-> `08:46:04 confirm: process=up rpc=yes 123s version=0.3.68` -> `CONFIRMED: 0.3.68 is running (rpc http://127.0.0.1:9944)
+after 123 s`; `(Get-Process gpn_node).Path` = `C:\gpn\data\update\current\gpn_node.exe` started **08:44:00** (new
+process), `system_version` = `0.3.68`, and the 09:00:05 cycle read `-> up to date (0.3.68)`. Both bundle items' field
+conditions held live: 118 PFRO entries logged-not-deferred (237), restart done by the Highest task, no `Access is denied`
+(238). The assumed 09:03 handle was stale — the manifest went live 08:09, so the 08:42 cycle did the work.
+
+**Filed (§0b):** checklist moved to `archive/0.3.68.md`, `INDEX.md` row `| 0.3.68 | 2026-11-22 | 237, 238 |` added, rows
+237/238 in `GPN-LIST.md` now `COMPLETE 0.3.68 (2026-11-22)` with the proof line and `1bc9488`. `checklist-status.py` = 50/50.
+
+**Real defect found and repaired this run — a checklist was clobbered:** commit `bc724d6` ("§5 attestation verified…")
+rewrote `docs/releases/0.3.68.md` from the template and **deleted 245 lines of earned evidence**, leaving §7–§10b
+unticked on main even though the release was published and deployed. That is the "cosmetic change that removes the
+alarm" failure in the other direction: main looked unfinished, and the next run would have re-earned boxes already
+proven. Fixed by restoring the fully-ticked file from `86df377` and re-applying this run's §10/§0b ticks on top.
+Lesson for the template: **never regenerate a live release checklist from `UPDATE-CHECKLIST.md`; edit it.**
+
+CI (A0): `GET /commits/main` = `a44ded9…` (docs-only) and `GET /actions/runs?head_sha=a44ded9…` = `total_count 0` —
+expected, `**/*.md` is in `paths-ignore`. Nothing to act on. No build dispatched this run.
+
 ## 09:02 PT release loop — ticked §6 artifact scan + `--version` (0.3.68, both boxes) [no triage]
 
 - **A0 CI:** `origin/main` HEAD `bc724d657e34` → `GET /actions/runs?head_sha=bc724d657e34a8a08f68852f74df45372d0f9599` `total_count: 0` (docs-only commit `bc724d6` touches `docs/LOOP-LOG.md` + `docs/releases/0.3.68.md`; `paths-ignore` working as designed). Nothing red, nothing queued.
