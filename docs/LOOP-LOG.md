@@ -1,4 +1,22 @@
-## 21:40 PT — the fix run was queued behind a doomed run; freed, it now runs. §1 behaviour box ticked
+## 21:5x PT — §1 fail-before box ticked with same-turn re-runs; CI run 44987167844 healthy and still building
+
+- **A0**: `origin/main` HEAD `4b358fa` (docs-only, `?head_sha=` full-40 ⇒ `total_count: 0` — correct under
+  `paths-ignore`). The code/release sha stays `88f2eea`; its run is **44987167844**.
+- **Run 44987167844 status, read from the API**: `secret-scan` ✅, `fmt + clippy` ✅ (05:38Z),
+  `Build + unit tests (windows, self-hosted)` in progress at step 6, `Build + unit tests (linux)` in
+  progress at step 7 — i.e. running, ~60 min in, under the 90-minute build threshold. **Not waited on.**
+- **Box worked — §1 "Write the test that fails now".** Re-produced the fail-before in this turn instead of
+  quoting old notes: with `78684d8^:install.ps1` (no `LoaderCodes`/`Get-LoaderExit`, `grep -c` ⇒ 0),
+  `test-update-defer.ps1` ⇒ `FAILURES: 38` (`FAIL K the branch reports through it  not called`,
+  `FAIL L it names 0xC000026B (signed)  missing`, …) and `test-update-shutdown.ps1` ⇒ `FAILURES: 13`
+  (`FAIL I it leaves the node running  reassurance missing`). Pass-after on the release tree:
+  `RESULT: PASS (all checks)`.
+- **Correction to the earlier record**: the first attempt used `78684d8:install.ps1` and got
+  `RESULT: PASS` — because 78684d8 *is* the commit that added 235. The pre-change file is its parent.
+  A fail-before taken from the wrong side of the commit is not evidence; noted in the box.
+- **Next run**: read 44987167844's conclusion. Green ⇒ tick §4's CI box, then §2 (fmt/clippy/call-site/tree)
+  and open §5 by dispatching both release builds and ending the run with handles. Red ⇒ quote the step line.
+- No blocker, no [TRIAGE].
 
 - **A0**: `origin/main` HEAD `db5c88e1e4a1a1a0e4095c9b8ff0445399fd7736` is docs-only (`?head_sha=`
   full-40 ⇒ `total_count: 0`, correct under `paths-ignore`). The box this run had to resolve was the
@@ -2299,3 +2317,6 @@ in flight and correctly absent from INDEX/archive. `GPN-LIST.md` rows 217/218 ma
   221–227 — gap recorded, not papered over), §10 Prove the behaviour (3), §10b timing (2), §0b filing (2,
   gated on §10). Next run starts at §10.
 # LOOP-LOG
+
+## 21:40 PT — the fix run was queued behind a doomed run; freed, it now runs. §1 behaviour box ticked
+
