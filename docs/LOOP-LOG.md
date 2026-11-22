@@ -1,3 +1,27 @@
+## 20:45 PT — 0.3.67 §3 and three §4 boxes ticked; the CI for the code SHA is in flight, box 1 (build) is next
+
+- **A0**: `origin/main` HEAD at start = `1669436c…b090` (box 4/236 tick commit). Its run list is
+  `total_count: 0` because it is a docs commit — per the docs-do-not-build rule that is correct, not a
+  missing run. The last **code** commit `e9e28909…29a3` has run **44984299924** (`CI`, push,
+  2026-11-22T04:16:11Z) still `in_progress` at 20:41 PT; noted, not awaited.
+- **State audit**: crate = `0.3.67`; §3b fully ticked (233/234/235/236); first unticked box = §3
+  `scripts/bump-version.py patch`. Working tree at HEAD (no stale-tree repeat).
+- **Box worked — §3 "Bump and record", 4 boxes, all already true in the tree, ticked with evidence**:
+  - bump: `gpn-agent/Cargo.toml` = 0.3.67.
+  - changelog: `## [0.3.67] - 2026-11-21` present, 2031 bytes, `_TODO_` count 0.
+  - lockstep: `bump-version.py --check` → `lockstep: 15 manifest(s) and 14 lockfile entr(ies) agree`,
+    `gpn version: 0.3.67`, exit 0.
+  - seeds: no `seeds.json` in this tree; the one bootstrap seed in `network.json.bootstrap_seeds`
+    (`dns4 gpn-testnet.duckdns.org` + `ip4 142.129.54.88`, `12D3KooWAFtUNxc…hSVFo`) appears verbatim in
+    `install.ps1:169`, `install.sh:52`, `scripts/run-windows.cmd:165`, `run-windows-provider.ps1:174`,
+    `release-windows.yml:393` (dns4-only there, a consistent subset).
+- **§4 ticked (3 of 4)**: docs-only push starts no build — `?head_sha=6910cd47…` → `total_count: 0`
+  (proven, not assumed); one docs commit this run; nothing else pushed. The CI-green box is left open
+  with the run handle **44984299924** written into it, per the dispatch-and-end rule.
+- **Next run**: read 44984299924's conclusion. Green ⇒ tick it and open §5 (dispatch the two release
+  builds, one SHA, then end the run). Red ⇒ quote the failing line and fix.
+- No [TRIAGE] item. No owner decision reached this run.
+
 ## 20:2x PT — 0.3.67 box 4 (row 236) done: an update never starts while Windows is going down
 
 - **A0**: `origin/main` HEAD at start = `78684d8` (box 3/235). Its CI run **44982921625** was `pending` —
