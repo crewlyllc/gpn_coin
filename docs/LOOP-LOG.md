@@ -1,3 +1,22 @@
+## 22:35 PT — §1 closed: the "cannot be tested" box is n/a, both pwsh suites re-run PASS this run; CI Windows job still building [no triage]
+
+- **A0**: `origin/main` HEAD `ac47db7` (docs-only ⇒ `?head_sha=` full-40 would give `total_count: 0`
+  under `paths-ignore`). Release sha stays `88f2eea`; its run is **44987167844**, read once from the API:
+  `secret-scan` ✅, `fmt + clippy` ✅, `Build + unit tests (linux)` ✅ 06:02:58Z (incl. step 13 autostart
+  installers), `Build + unit tests (windows, self-hosted)` **in_progress** at step 7 `Build + test gpn-agent
+  (release)` since 05:34:50Z (~57 min — under box 1's normal build time and the 90-minute threshold).
+  **Not waited on, not cancelled.**
+- **Box worked — §1 "If the change cannot be tested, stop and tell Jeremy"** ticked **n/a** with
+  same-turn evidence: no 0.3.67 change is untestable. On the clean release tree (`e9e2890`, `git status`
+  empty), pwsh 7.4.6: `test-update-defer.ps1` ⇒ `RESULT: PASS (all checks)` EXIT=0
+  (`ok L it names 0xC000026B (signed)`, `ok L it files it as session-closing`, `ok ascii the wrapper
+  template is pure ASCII`); `test-update-shutdown.ps1` ⇒ `RESULT: PASS (all checks)` EXIT=0
+  (`ok I it leaves the node running`). §1 is now fully ticked.
+- **Next run**: §2 Implement — `cargo fmt --check` + clippy `-D warnings`, full affected suites,
+  call-site grep, no off-by-default flag, change present in the release tree. Then §4's CI box once
+  the Windows job concludes.
+- No blocker, no [TRIAGE].
+
 ## 22:12 PT — §4 CI box observed, not waited on: linux job green (step 13 fixed), Windows build still running
 
 - **A0**: `origin/main` HEAD `df75123` (docs-only; `?head_sha=` full-40 ⇒ `total_count: 0`, correct under
