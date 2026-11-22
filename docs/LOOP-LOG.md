@@ -1,3 +1,29 @@
+## 01:57 PT — §5 attestation boxes closed (6/7): cosign bundle verifies the published windows zip
+
+- **A0**: `origin/main` HEAD `b099f970d7cb` == local HEAD (fetched first). `?head_sha=` with the
+  full 40-char sha ⇒ `total_count: 0` — correct under `ci.yml` paths-ignore (that commit touched
+  `docs/LOOP-LOG.md` + `docs/releases/0.3.67.md` only). Nothing red, nothing to cancel.
+- **Box worked (first workable unticked): §5 "attestation exists for the digest actually
+  published" + "verify the downloaded artifact with the verifier that matches the mechanism".**
+  One action satisfied both, so both are ticked with the same evidence.
+  - `GET /releases/tags/windows-latest` (authenticated API): `gpn-windows.zip` 248,806,172 B
+    `sha256:19065d12…949de0` updated 09:18:56Z; `gpn-windows.zip.bundle` 9,049 B
+    `sha256:8776e50d…0250868`. Both re-downloaded from the release assets API (never the site).
+  - Local `sha256sum` matched the API digests byte for byte.
+  - Repo is private (user-owned), so the private path applies: `cosign verify-blob --bundle
+    gpn-windows.zip.bundle --certificate-identity-regexp '…release-windows\.yml@.*$'
+    --certificate-oidc-issuer https://token.actions.githubusercontent.com gpn-windows.zip`
+    ⇒ **`Verified OK`**. Decoded Fulcio cert SAN =
+    `…/release-windows.yml@refs/tags/build/88f2eea74788` — the exact build tag built from the
+    CI-green sha, so the signature binds the shipped bytes to this release's workflow run.
+  - `attestations/sha256:` 404 on a private user repo — expected on this path, noted in the box.
+  - 248 MB download removed afterwards; disk 71% used.
+- **Next run**: §5 is 6/7. The last §5 box reads the digest from `releases.json`, which still serves
+  the previous version — it closes after §7 publishes. So the next workable box is **§6 "scan the
+  built binaries for strings the change added"** (reorg=, work ours=, gpn-forked) against the zip
+  whose digest is now verified, then §6 `--version`.
+- No blockers, no [TRIAGE].
+
 ## 01:31 PT — windows release build green on the same sha; §5 build boxes closed 4/7
 
 - **A0**: `origin/main` HEAD `4a1fbc1`… (checked out `d766892`) — the A0 question for `d766892`
