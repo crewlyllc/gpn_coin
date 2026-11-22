@@ -1,3 +1,27 @@
+## 19:5x PT — 0.3.67 box 2 (row 234) done: a console teardown is no longer called a machine shutdown
+
+- **A0**: `origin/main` HEAD at start = `9636408` ("0.3.67 box 1 (233)…"), a code commit; `?head_sha=<full 40>` ⇒ CI run **44980529326** `pending` since 03:25Z (~6 min). Not awaited — under the 90-minute threshold and the open box is neither a build nor a publish step.
+- **State audit**: `gpn-agent/Cargo.toml` = `0.3.67`; `docs/releases/0.3.67.md` exists with §3b boxes 233 (ticked) / 234-236 (open). First unticked box = **234**.
+- **Box worked — 234, ticked with evidence.** The discriminator is the OS's own answer, not a guess:
+  `GetSystemMetrics(SM_SHUTTINGDOWN)` is non-zero only while a session is really ending, so a
+  `CTRL_SHUTDOWN_EVENT` with `SM_SHUTTINGDOWN == 0` is a console teardown — which is exactly what our own
+  `taskkill /T /F` stop provokes. `classify_shutdown_event()` + two new `last-exit.json` slugs
+  (`console-teardown` `0xC000013A`, `system-shutdown` 0) in `exit_report.rs`; `install.ps1` gained
+  `Get-ExitCauseNote`, which quotes the node's own record in the confirm failure line and refuses to quote a
+  record older than `$cycleStartUnix`. Before: `git show HEAD:gpn-agent/src/bin/gpn_node.rs:1984-1990`
+  printed "the machine is shutting down" for every such event.
+- **Verified**: 2 new gpn_node unit tests + 12-check `scripts/tests/test-update-exit-cause.ps1` PASS;
+  `test-update-confirm.ps1` 0 failures; `test-update-start-after-stop.ps1` PASS; gpn_node bin suite 34 passed;
+  `cargo test --lib exit_report` 11 passed; `cargo fmt --check` clean; clippy with CI's allow-list
+  `-D warnings` clean; `install.ps1` parses 0 errors and stays pure ASCII.
+- **Live on box 1**: `GetSystemMetrics(8192)` ⇒ **0** on a healthy running node
+  (`C:\gpn\data\update\current\gpn-node.exe`); `node.log` already carries **39**
+  `[supervisor] CTRL_CLOSE_EVENT` lines from our own stops — the same control-event class, previously
+  mislabelled. The end-to-end (0.3.67 supervisor through a release-driven update) is §5-§8 work and is
+  recorded as such in the box, not claimed.
+- **Pushed once**: `74a17a6` (`9636408..74a17a6 main`). CI for it is dispatched-and-forgotten, per the rule.
+- **No blocker, no [TRIAGE] this run** — 231 is unchanged (owner-held offline sudo key), nothing new to raise.
+- Next run starts at box 3 (row 235: never roll back on a teardown-class start failure).
 ## 19:26 PT — 0.3.67 box 1 (row 233) done: replacement starts after the tree is gone, detached, and logs the parent
 
 - **A0**: `origin/main` HEAD at start = `4e7a606` ("loop log") — docs-only, `?head_sha=` full-40 ⇒ no run, correct under `ci.yml` paths-ignore. The code-touching sha `c7d33de` (0.3.67 bump) has CI run **44978223917** `in_progress` since 02:54Z; under the 90-min threshold and no build/publish box open, so not awaited.
