@@ -1,3 +1,29 @@
+## 10:59 PT release loop — 0.3.69 §5 Windows-evidence box ticked over SSH; CI on c8090a4 still building [no triage]
+
+**A0 CI:** `main` = `770ce6120f34a0ec1dfcc0273c15794398aabd00` (`GET /commits/main`, 18:51Z, design commit),
+`GET /actions/runs?head_sha=770ce61…` ⇒ `total_count: 0` (docs-only, `paths-ignore` works — not a fault).
+The release's own code commit `c8090a4d44a2` has run **45056406823** (created 18:40Z): `fmt + clippy`
+success, `secret-scan` success, linux + windows build jobs **in_progress** at 18:59Z ⇒ nothing to tick,
+per A0 not waited on (19 min, not stale).
+
+**A — 0.3.69.** Local clone (`~/gpn-loop`, fetched from origin) instead of the runner work dir, which the
+live CI job is checking out — editing there would race the build. §4 is 3/4: the one open box is *CI green
+on c8090a4*, so it waits for GitHub's verdict; its note now carries the run id for the next pass.
+
+Ticked the one §5 box that does not depend on that verdict — **per-item Windows evidence over SSH**:
+- `scripts/box1.sh` read-only (runners API showed both `busy=true` first): `Get-Process gpn-node` ⇒
+  `C:\gpn\data\update\current\gpn-node.exe`; listeners ⇒ `0.0.0.0:8093 pid=34392` (`gpn_provider_status`),
+  **no 8092**, 9944 loopback only.
+- `GET http://127.0.0.1:8093/status` ⇒ 200, 1495 B: `address 5HgbpiTYE27CtBQF7gRWLz6Qt3HBxyi4tR2M75FC1oydH48z`,
+  `peer_id 12D3KooWP1JAFqvEvfsTuefkfQ6jH5vk7xe96A5Soj8o7tN63bm5`, `multiaddrs []`, `version 0.3.68`,
+  `git_sha 1bc9488`; `GET :8093/providers` ⇒ **404**.
+- Consequence recorded on row 239: box 1 serves the status page only, so the phantom-row defect is a
+  scheduler `:8092` payload and its live half must be proved on a host running the access point — not box 1.
+
+**Blockers:** none. **Next run:** ask once about 45056406823; on `success` tick §4 and dispatch
+`release-linux-selfhosted.yml` + `release-windows.yml` for `c8090a4d44a2`, write the two run ids in the boxes,
+and END (no waiting).
+
 ## 10:56 PT release loop — 0.3.69 §1/§2 done: row 239 code landed (owner-aware dedupe + `unreachable_endpoints`) [no triage]
 
 **A0 CI:** `origin/main` = `6a4c3aaab37be9b208cc70905e7d45fa558a5eef` (`git fetch` + `GET /commits/main`
