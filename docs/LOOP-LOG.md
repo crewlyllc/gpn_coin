@@ -1,3 +1,35 @@
+## 21:40 PT — the fix run was queued behind a doomed run; freed, it now runs. §1 behaviour box ticked
+
+- **A0**: `origin/main` HEAD `db5c88e1e4a1a1a0e4095c9b8ff0445399fd7736` is docs-only (`?head_sha=`
+  full-40 ⇒ `total_count: 0`, correct under `paths-ignore`). The box this run had to resolve was the
+  CI for the code commit `88f2eea`: run **44987167844** read `pending` at 20:56 PT, `pending` again
+  at 21:35 PT — **40 minutes with `total_count: 0` jobs**, which is not slowness.
+- **Diagnosed the queue rather than waiting on it.** `GET /actions/runners` ⇒
+  `DESKTOP-USBUADL online busy=true`; the busy job was `137091523988` (Windows build) belonging to the
+  *previous* run `44984299924`, whose linux job had already failed at 04:48. `ci.yml` line 53-55:
+  `concurrency: group: ci-${{ github.ref }}`, `cancel-in-progress` only for `pull_request` — so a new
+  push-triggered run queues behind the old one and gets no jobs at all. Classified: **environment /
+  runner contention**, not our code, not a missing run.
+- **Fixed by removing the cause, no cancel needed**: attempted `POST .../cancel` on `44984299924` and
+  got `409 Cannot cancel a workflow run that is completed` — it had gone `completed failure` at
+  05:34:47Z. `44987167844` picked up its 6 jobs within seconds (`secret-scan` + Windows build
+  `in_progress`, `fmt + clippy` queued). Handle stays in §4's box; not waited on.
+- **Useful fact from the old run**: its **Windows job `137091523988` completed `success`**
+  (steps 6/7 `success`). The red was linux-only — the Windows toolchain on box 1 is not implicated,
+  and the 233-236 Windows tests were never the failing side.
+- **Box worked — §1 "Name the behaviour and the machine-observable thing", ticked with same-turn
+  runs**: behaviour = an update never mistakes its own stop for a reason to give up. Observables
+  quoted from the live box-1 log (`19:22:14 taskkill ... SUCCESS (7 pids)` → `19:22:16 start ... node
+  pid 41048 parent cmd.exe` → `19:24:19 CONFIRMED: 0.3.66 is running after 124 s`), `last-exit.json`
+  slugs `console-teardown` vs `system-shutdown` (`exit_report.rs:129`), and exit 75 + `DEFERRED:`.
+  Re-run this turn: `test-autostart-installers.sh` ⇒ `all autostart/installer assertions passed`;
+  `test-update-exit-cause.ps1` ⇒ `RESULT: PASS (all checks)` EXIT=0; `test-update-defer.ps1` ⇒
+  `RESULT: PASS (all checks)`. Fail-before counts on record (38 and 13) from the pre-change tree.
+- **Next run**: read 44987167844's conclusion. Green ⇒ tick §4's last box and open §5 (dispatch
+  linux + windows release builds on the same SHA, write the handles, end the run). Red ⇒ quote the
+  failing step's line. Then §2 boxes (fmt/clippy/call-site/tree) are the cheap ones.
+- No blocker, no [TRIAGE] this run.
+
 ## 21:15 PT — 0.3.67 §4 "CI green" still open: the red was two of our tests, fixed in 88f2eea; green run now queued
 
 - **A0**: `origin/main` HEAD = `3dc6609` (loop-log commit, docs-only) → `?head_sha=` full-40 ⇒ **total_count 0**, correct under `paths-ignore`. The *code* sha is `88f2eea` (CI fix), run **44987167844**, `pending` since 04:55Z (20 min) — queued behind run 44984299924's Windows job. 44984299924 (sha `e9e2890`) was in progress at 04:16Z → **65 min**, under the 90-minute threshold and it is a build (not a publish) job, so it was **not** cancelled; letting it finish frees the single runner.
