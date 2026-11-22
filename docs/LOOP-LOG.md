@@ -1,41 +1,13 @@
-## 08:22 PT release/0.3.68 published end-to-end — §5-§9 + §10b ticked (46/50); box 1's 09:03 cycle is the last proof [no triage]
+## 08:44 PT release loop — ticked §5 attestation end-to-end (0.3.68) [no triage]
 
-**Both release builds had already concluded clean** — read from GitHub, not waited on:
-`45035777994` linux `success` (14:59:30Z→15:13:08Z) and `45035780136` windows `success` (→15:25:38Z), both
-`head_sha=1bc9488bb7fc`. Assets re-downloaded and hashed to the API digests:
-`gpn-linux.tar.gz` 340,605,647 `7be88a2e…c0f0`, `gpn-windows.zip` 248,806,119 `42d59058…4cc4`, bundle 9,049 `4d70f7f5…6c4d`.
-
-**Boxes ticked this run (18):** §5 build×2 + same-SHA, §5 attestation ordering / existence / verification
-(`cosign verify-blob … => Verified OK`; repo is `private`, so the cosign path is the correct one and the
-`attestations/sha256:` 404 is expected), §6 artifact scan + `--version`, §7 cut ×4, §7b surfaces ×3 + capability
-n/a, §8 stranger checks ×3, §9 deploy ×4, §10 peers, §10b timing ×2.
-
-**One real failure, diagnosed and fixed (not reported as a status):** `release-cut.sh` step 6/6 died with
-`! [rejected] HEAD -> main (non-fast-forward)`. Cause: local branch 1 ahead / 3 behind — two parallel loop runs
-had pushed checklist ticks while this run worked. Fixed by stashing the uncommitted docs, `git rebase origin/main`
-(commit re-created as `716ae19`), pushing with the explicit-URL form. Lesson: **after any long step, fetch and rebase
-before pushing the release commit.**
-
-**Deploy proof (linux fleet node on this host):** `gpn-update.service` at 08:12 → `confirmed 0.3.68 is running` at
-08:14:13 (105 s), `current -> versions/0.3.68`, `current.previous -> 0.3.67` (rollback retained), attempt record
-`release_id=7be88a2e…` (the signed linux digest). `system_version` on :9944 now `0.3.68`; 3 peers held 08:16→08:22,
-block 345,763→345,783, zero ban/panic lines.
-
-**Site:** `releases.json` live 0.3.68 twice (`16:08:01Z`); download/run-a-node/downloads stamps went 0.3.67→0.3.68 only
-after the site commit `c7f52f5` was pushed — live poll flipped at **08:18:59 PT** (09 s of polling). `docs/run-a-node.md`
-had been stale at 0.3.66 while its HTML said 0.3.67 (last release edited HTML only); both md + HTML now agree.
-
-**Two findings for the next bundle (neither blocks this release):**
-1. `website/releases.json` is not in `ci.yml` `paths-ignore`, so the manifest-only release commit `716ae19` started a
-   **full CI build** with both self-hosted runners busy — every release pays 40-75 min for a signed JSON file.
-2. `scripts/build-site-docs.py` emits `canonical …/docs/<slug>.html` while the committed pages carry extensionless
-   `…/docs/<slug>` — a blind regeneration would change every canonical URL on the site. The generated tree was
-   reverted; only the two stamps were hand-edited. Needs a fix + a verified run.
-
-**Open (handle, do not wait):** §10 box 1 — box 1's own `GPN-Update` task fires **09:03 PT** with `pfro=118` still in
-place (237's field condition) and `update RL=Highest`/`node RL=Highest` (238's post-condition). Next run reads
-`C:\gpn\update.log` for `note: a reboot is pending (118 PendingFileRenameOperations entries) - logged only, does not
-defer` → `CONFIRMED: 0.3.68 is running`, then ticks §10 and files the checklist into `archive/` + `INDEX.md` (§0b).
+- **A0 CI:** `origin/main` HEAD `86df377aa118` → `GET /actions/runs?head_sha=86df377aa118…` `total_count: 0` (docs-only; `paths-ignore` intact). Last code SHA `1bc9488b` CI run `45024973751` success. Nothing red.
+- **Boxes ticked (§5 attestation, 4 boxes):**
+  - *Same SHA*: run `45035777994` (linux) and run `45035780136` (windows) both `head_sha=1bc9488bb7fc9a06dd4790b867178b907f0b301a`; no macOS run in the manifest.
+  - *Ordering*: `visibility=private` ⇒ cosign path; job step order 19 availability → 20 attest (skipped, public-only) → 21 cosign sign → 22 provenance gate → 23 publish, gate has no `if:` (`release-windows.yml:720`).
+  - *Attestation exists for the published digest*: `windows-latest` carries `gpn-windows.zip` 248,806,119 `sha256:42d59058…84cc4` **and** `gpn-windows.zip.bundle` 9049 B = the `releases.json` digest.
+  - *Verify the downloaded artifact*: pulled the mirror URL a stranger gets (`crewlyllc/.../windows-latest`), sha256 `42d59058f7f8c5733379d67b3024dbeeed37aa5f33b482c1a11607cd04784cc4` matches manifest, `cosign verify-blob …` ⇒ **`Verified OK`**.
+- Next box: §6 artifact scan (`reorg=`, `work ours=`, `gpn-forked`) + `--version` on the built artifact.
+- Commit: docs-only, no CI.
 
 ## 07:41 PT release loop — ticked §5 windows build (0.3.68) [no triage]
 
