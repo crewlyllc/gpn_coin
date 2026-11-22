@@ -1,3 +1,71 @@
+## 07:05 PT AUDIT — fixed 1 (disk) / everything else clean [no triage]
+
+**What I checked (commands, in order)**
+- `systemctl --user list-units 'gpn*' --all` + `list-unit-files | grep -i gpn` — 23 units loaded.
+  Enabled **and** running: gpn-fleet, gpn-accesspoint, gpn-provider, gpn-diffusion, gpn-finetune,
+  gpn-explorer, gpn-faucet, gpn-oracle, gpn-provider-heartbeat, gpn-fleet-directive + 5 active timers
+  (ap-topup, cadence-gate, ci-cache-prune, deploy-drift, prune-ci-cache, update). **No enabled-but-dead unit.**
+  `gpn-node.service` is `disabled/dead` **by design** — gpn-fleet runs the node (pid confirms below).
+- Ports: `9944 LISTEN, 8092 LISTEN, 8093 LISTEN, 8099 LISTEN, 11434 LISTEN` (ss).
+- Chain: `system_version` = **0.3.67**; block **#345513** and advancing (#345508 → #345513 across the reads, ~10 s/block);
+  `system_peers` = **3** (all AUTHORITY, matching best numbers); `system_chain` = "GPN Public Testnet".
+  Observation, not a fault: `finalized #0` still reads 0 in the fleet footer — unchanged from previous days.
+- `/v1/models` on :8092 answers with 5 ollama models (deepseek-r1:14b/7b, llama3.2:1b, qwen2.5:0.5b/7b).
+  8093 `/health` = `{"status":"ok"}`, 8099 `/` = 200, 11434 `/api/tags` lists models.
+- Fleet journal 24 h: `grep -Eci 'panic|Reason:|ban|Incompatible|update fail|taskkill'` = **0**.
+  Journal is normal proposal/import/idle traffic; self-heal divergence check at 07:02:25 = `match` against signed checkpoint #344777.
+- `gpn-cadence-gate.state` (15:01:22Z): **PASS** — blocks 345411..345510, max gap 79.27 s, 0 clause-1 violations, 7 suspect gaps all explained by `sealer: still searching template`.
+- `gpn-deploy-drift.state` (15:01:21Z): `exit: 0`, empty message (no drift).
+- Update: `~/.gpn/update/update-attempts.json` last record = `{"version":"0.3.67","outcome":"confirmed","release_id":"c83b0915…c4fe4","attempts":1}`.
+  **Path drift worth noting:** the audit brief points at `~/.gpn/update.log` and `~/.gpn/update-attempts.json`;
+  neither exists — the real locations are `~/.gpn/update/update-attempts.json` and `~/.gpn/update/current`.
+- Release loop `feff1358…`: last 8 runs all `finished ok`, no timeouts. Latest (15:00Z) ticked 0.3.68 §4 on run 45024973751 (success, 4 jobs green).
+- Release record consistency: **site `website/releases.json` version 0.3.67 == running node `system_version` 0.3.67 == INDEX row 0.3.67 == `docs/releases/archive/0.3.67.md` == GPN-LIST rows 233-236 COMPLETE 0.3.67**. No version missing any of the three records.
+- Box 1 over SSH (`scripts/box1.sh`): `C:\gpn\data\update\current\gpn-node.exe`, `system_version` **0.3.67**, **2 peers**.
+- Resources: `free -h` available **23 GiB**; load 4.76 (mining + 100 % GPU, normal); GPU 1445/8188 MiB.
+- Heartbeat: two `push failed: no local libp2p identity yet` lines at 02:58 / 03:05 during the 0.3.67 restart window; **recovered** — zero journal entries since 03:10 and live `/status` now carries the peer identity, `gflops 824` (attested-idle), `disk_free_pct 20`.
+
+**What was wrong: disk at 18.2 % free (80 G/439 G) — cleaned**
+Owner rule is cleanup every run and stop at ≥ 20 %. `pgrep -x cargo` showed a **release build in flight**
+(pids 744081/744748/744822, `CARGO_TARGET_DIR=~/.ci-cache/gpn-agent-target`, workdir the runner checkout),
+so `~/.ci-cache`, every `*/target`, and no restarts were touched — correctly deferred.
+Deleted only `/tmp` scratch whose newest file was ≥ 2 days old and which no process held open (`lsof`, `/proc/*/cwd` both clean):
+
+| removed | size |
+|---|---|
+| /tmp/rel0360, /tmp/rel060, /tmp/dlcheck (0.3.60 verification trees) | 557M + 557M + 561M |
+| /tmp/anon063 | 561M |
+| /tmp/rel061, /tmp/v061 (0.3.61 trees) | 1.3G + 1.3G |
+| /tmp/gpn064 (0.3.64 tree) | 1.3G |
+| /tmp/gpnlx, /tmp/gpnscan | 960M + 960M |
+| /tmp/attest066, /tmp/win065 (0.3.65/66 zips) | 752M + 752M |
+| /tmp/row228 | 860M |
+| /tmp/rel67-target (cargo scratch, not the live target dir) | 1.6G |
+| `/tmp/*.tar.gz|*.zip` older than 3 d (incl. gpn-testnet-snapshot-20261114, stranger-linux) | ~600M |
+
+**Free before → after: 80 G (18.2 %) → 92 G (21.0 %)**, `df -h /` = `325G used, 92G avail, 78 %`.
+
+**Deliberately left, and why**
+- `~/.ci-cache` **79 G** — owner rule says keep, *and* the release build is writing to it right now.
+- `~/.cache/huggingface` **53 G**, `~/ollama` **8.1 G** — models, owner rule: never delete.
+- `gpn-agent/target` **16 G**, `gpn-node/target` **8.5 G** — cargo/rustc live; deleting would break the in-flight build. Revisit next run when idle.
+- `~/.openclaw/workspace/shared` **14 G**, `plugin-runtime-deps` **1.5 G**, credentials — owner rule.
+- `~/.openclaw/agents/*/sessions` **374 M** (150 files / 150 M older than 30 d) and `~/.openclaw/cron/runs` **33 M** (16 files / 7.5 M older than 30 d) — **report only**, these are the conversation record.
+- `/tmp/cutcheck`, `/tmp/rel67-lin`, today's tarballs — today's release-loop scratch, may be in use.
+
+**Top five disk consumers after cleanup (hidden paths included)**
+1. `~/.ci-cache` 79 G (build cache, owner-protected)
+2. `~/.cache/huggingface` 53 G (models)
+3. `~/.openclaw/workspace/projectmanager07/gpn-agent/target` 16 G (debug+release build tree)
+4. `~/.openclaw/workspace/shared` 14 G (data)
+5. `gpn-node/target` 8.5 G + `~/ollama` 8.1 G
+`state/bin-snapshots` **does not exist** (nothing to prune there); `/tmp` now 8 G (was 21 G).
+
+**Remains / next run**
+- Runners `openclawassist` and `DESKTOP-USBUADL` are both **busy=True** on runs 45035777994 (linux) / 45035780136 (windows), tag `build/1bc9488bb7fc` — 0.3.68 publish in flight. No restart, no cache prune, no target dir deletion until those conclude.
+- Reclaim `*/target/{debug,incremental}` (~24 G combined) the first run after cargo is idle, if free is still < 25 %.
+- GPN-LIST 237/238 IN-PROGRESS are bundled in 0.3.68 (expected, not a fault); 231 AWAITING-OWNER on the offline sudo key (docs/NEEDS-TRIAGE.md §231) — unchanged, not escalated again.
+
 ## 06:58 PT — 0.3.68 §4 TICKED (run 45024973751 concluded `success`); both release builds dispatched, handles written [no triage]
 
 - **A0**: `origin/main` HEAD `d6a187717d77` (docs-only) ⇒ `head_sha` query `total_count: 0`, `paths-ignore` intact, no run expected.
