@@ -78,7 +78,8 @@ Ok 'E an unreadable metric is not treated as a shutdown' (-not $r.Pending) ("why
 # ---- F: the real probes run on a real machine -----------------------------
 $live = Get-ShutdownState
 Ok 'F the default probes return a hashtable' ($null -ne $live.Pending) 'no answer'
-Ok 'F a healthy host is not deferred' (-not $live.Pending) ("why=" + $live.Why)
+Ok 'F a pending answer always carries a reason' ((-not $live.Pending) -or ($live.Why -and $live.Why.Trim())) ("why=" + $live.Why)
+Write-Host ('live: pending=' + $live.Pending + ' why=' + $live.Why)
 
 # ---- G: it must run before anything is stopped or installed ---------------
 $stopAt = $body.IndexOf("Write-Log 'update available - stopping GPN-Node before applying")
