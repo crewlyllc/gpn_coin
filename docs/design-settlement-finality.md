@@ -54,6 +54,12 @@ Adopt GRANDPA (or any finality gadget) only when **all** of these hold:
 
 Until then, depth is the contract.
 
+**These four conditions are recorded, with how each one is measured and how a proposal must answer
+it point by point, in [`docs/finality-revisit-condition.md`](finality-revisit-condition.md).**
+Current status (2026-11-22): **0 of 4 met** — one operator, no published validator-set change
+procedure, no loss test, no stall alarm. That file is the one to edit when a condition changes, and
+the one to quote when refusing a gadget proposal.
+
 ## 5. Acceptance
 
 1. `network.json` and `/api/network` report `settlement_depth: 288` and the time equivalent.

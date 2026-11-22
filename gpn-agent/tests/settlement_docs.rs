@@ -59,6 +59,35 @@ fn network_json_publishes_the_settlement_depth() {
     );
 }
 
+/// #241 — the GRANDPA revisit condition must live in `docs/` and be reachable
+/// from the settlement design, so a future proposal is answered point by point
+/// instead of by recollection. This is textual for the same reason as above:
+/// a condition recorded nowhere is a mood.
+#[test]
+fn finality_revisit_conditions_are_recorded_and_referenced() {
+    let doc = read("docs/finality-revisit-condition.md");
+    for required in [
+        "**≥ 7 operators running validating keys that Jeremy does not hold",
+        "**Who can add or remove a validator",
+        "**The network keeps producing and finalising with any one operator gone.**",
+        "**Something notices when finality stops advancing",
+        "verdict:             ADOPT / REFUSE",
+    ] {
+        assert!(
+            doc.contains(required),
+            "docs/finality-revisit-condition.md must carry {required:?} — \
+             a revisit condition that omits it can be argued around"
+        );
+    }
+
+    let design = read("docs/design-settlement-finality.md");
+    assert!(
+        design.contains("finality-revisit-condition.md"),
+        "the settlement design must link docs/finality-revisit-condition.md, or the \
+         conditions are not reachable from the decision they govern"
+    );
+}
+
 #[test]
 fn operator_guide_shows_how_to_check_288_deep() {
     let text = read("docs/run-a-node.md");

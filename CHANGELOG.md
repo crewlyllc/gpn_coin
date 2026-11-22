@@ -28,7 +28,10 @@ at a difficulty boundary and reported to the operator as a bogus signature error
 - **The GRANDPA revisit condition is written down** (row 241), so finality is adopted on
   evidence rather than mood: ≥7 independent operators with keys we do not hold across ≥4
   admin domains, a published validator-set change procedure, survival of any single
-  operator's loss, and a finality-stall alarm. Referenced from the settlement design.
+  operator's loss, and a finality-stall alarm. Referenced from the settlement design, with
+  how each condition is measured and a proposal block whose blank line means REFUSE
+  (`docs/finality-revisit-condition.md`; status 2026-11-22: 0 of 4 met, asserted by
+  `tests/settlement_docs.rs`).
 
 ### Changed
 - **Entry onboarding re-checks difficulty immediately before submit and re-mines instead of
