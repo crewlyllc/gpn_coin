@@ -1,3 +1,14 @@
+## 23:45 PT — §2 box 3 ticked: full affected suites run in full (785 lib + 34 bin rust, 8/8 script suites) [no triage]
+
+- **A0**: `origin/main` HEAD `72ad930` (docs-only ⇒ `?head_sha=72ad930…` `total_count: 0`, correct under
+  `paths-ignore`). Release build sha stays `88f2eea`, whose CI run **44987167844** is **success**.
+- **Box ticked**: §2 `- [ ] Full affected suites run, not just the new test.` Worktree `/tmp/rel67` @ `72ad930`:
+  `cargo test --release --lib` ⇒ `785 passed; 0 failed; 14 ignored`; `cargo test --release --bin gpn_node`
+  ⇒ `34 passed; 0 failed`; pwsh 7.4.6 `test-update-defer` / `-exit-cause` / `-shutdown` / `-start-after-stop`
+  all `RESULT: PASS (all checks)`, `test-update-confirm` `FAILURES: 0`, `test-defender-exclusions` all passed;
+  bash `test-launcher-identity` `RESULT: PASS`, `test-autostart-installers` all assertions passed. All EXIT 0.
+- **Blockers**: none. **Triage**: none.
+
 ## 23:28 PT — §2 box 2 ticked: fmt clean + clippy green with CI's exact allow-list (my first attempt used the wrong flags; that was the cause of the 33 errors) [no triage]
 
 - **A0**: HEAD `f42c915`, `?head_sha=f42c915…` is docs-only ⇒ no run. Release CI run **44987167844**
