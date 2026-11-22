@@ -8,6 +8,23 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 versions are [Semantic Versioning](https://semver.org/spec/v2.0.0.html), with
 the GPN-specific meaning of each level documented in `docs/updates.md`.
 
+## [0.3.69] - 2026-11-22
+
+Bumped from 0.3.68 (`scripts/bump-version.py patch`).
+
+### Fixed
+- **`/providers` no longer counts an unreachable endpoint as a provider** (row 239, the
+  residual of 147). The access point kept an identity-less placeholder row for every
+  configured/on-chain `/status` URL that did not answer, even when the machine behind that
+  URL was already in the registry under its real account — so `GET :8092/providers`
+  returned **7 rows for 5 providers** (measured 2026-11-22 10:25 PT: `5ENqSp5Q…`, `5Fh75o8N…`,
+  `5FCwsMfV…`, `5HVtpozG…`, `5HgbpiTY…` plus `address: ""` rows for
+  `http://gpn-testnet.duckdns.org:8093/status` and `http://23.241.109.255:8093/status`). The
+  placeholder could never be matched to its own machine because the live row's `status_url`
+  is `http://127.0.0.1:8093` (this host) or `pull://<account>` (box 1, no `multiaddrs`), so
+  `known_hosts()` never met the URL host. Unreachable endpoints are now reported top-level as
+  `unreachable_endpoints: [{url, last_error}]` instead of masquerading as provider rows.
+
 ## [0.3.68] - 2026-11-22
 
 Bumped from 0.3.67 (`scripts/bump-version.py patch`).
