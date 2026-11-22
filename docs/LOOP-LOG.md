@@ -1,3 +1,20 @@
+## 05:12 PT — 0.3.68 §5 SSH-evidence box ticked; 45018066004's red explained (prune timer), its successor still queued [no triage]
+
+- **A0**: main HEAD `180e227` (docs-only) ⇒ `total_count: 0` runs, `paths-ignore` intact.
+  The release SHA `1bc9488` has run `45024973751` in `pending` — noted, not waited on.
+- **Diagnosed 45018066004 instead of parking it.** Linux job `137200899218` died in *Test gpn-agent*
+  with `error: failed to write …/.fingerprint/gpn-agent-a73593bae3614032/invoked.timestamp` /
+  `No such file or directory`, `exit code 101`, at `12:20:42Z` = **04:20:42 PT**. Cause: the prune
+  timer, at `04:20:21` that morning, still running the old bare `find ~/.ci-cache -mtime +7 -delete`.
+  Not our code. The unit now runs `scripts/prune-ci-cache-daily.sh` (build-in-flight + 20-min-quiet
+  guards) and ran clean at `04:36:11`. Same run: `secret-scan` and `fmt + clippy` both green on `ab3c502`.
+- **Box ticked — §5 "Per-item Windows evidence over SSH"**: `scripts/box1.sh` read-only probe on box 1
+  ⇒ `VERSION=gpn-node.exe 0.3.67`, `UPDATE_RUNLEVEL=Highest`, `NODE_RUNLEVEL=Highest`, `PFRO_COUNT=118`,
+  `NODE_PATH=C:\gpn\data\update\current\gpn-node.exe`. Per-item proofs are the §3b PowerShell runs (237:
+  `RESULT: PASS`, `EXIT=0`, 27 ok under 5.1.22621.4249; 238: fail-before XML parse error → pass-after).
+- **Still open**: §4 CI-green box tracks `1bc9488` (run `45024973751`), whose Windows job is the one
+  currently building on box 1. Not ticked without a conclusion.
+
 ## 05:10 PT — 0.3.68 §3b/238 ticked: the update task's XML was never well-formed; registration had been failing rc=1 on every box [no triage]
 
 - **A0**: `origin/main` HEAD `c8e1e7de…` == local; `GET /actions/runs?head_sha=c8e1e7de…` ⇒ `total_count: 0`
