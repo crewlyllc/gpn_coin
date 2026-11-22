@@ -1,3 +1,31 @@
+## 09:58 PT release loop — queue exhausted; 0.3.68 re-verified; closed stale triage item 237 [TRIAGE: 194, 231, self-heal/IPv6 still open]
+
+**A0 CI:** `git ls-remote origin main` ⇒ `cd3db547f815`. `GET /actions/runs?head_sha=cd3db547…` ⇒ `total_count: 0`
+(docs-only, `paths-ignore` as designed). The one live run is `45043060386` on code SHA `c7f52f5` — `in_progress`,
+created 16:18Z but its jobs only started 17:25Z (queued ~67 min behind the earlier build); jobs so far:
+`secret-scan` success 17:25Z, `fmt + clippy` success 17:26Z, `Build + unit tests (linux)` success 17:26Z→17:51Z (25m13s),
+`Build + unit tests (windows, self-hosted)` `in_progress` since 17:25Z (~32 min at read, normal duration). Not blocking,
+not stale ⇒ nothing cancelled, nothing waited on.
+
+**A — no boxes to work.** `GPN-LIST.md` column-2 parse over 217 rows: 190 `COMPLETE`, 19 `COMPLETE <version>` stamps,
+7 `BLOCKED` (12, 13, 16, 17, 26, 153, 194), 1 `AWAITING-OWNER` (231). **Zero `IN-PROGRESS`, zero `NEW`** ⇒ C has an empty set.
+
+**B — verified from the machine again, not from the previous entry:**
+- `https://gpncoin.ai/releases.json` ⇒ `0.3.68`, published `2026-11-22T16:08:01Z`.
+- local `:9944` `system_version` ⇒ **`0.3.68`**, `system_health` ⇒ `peers 3, isSyncing false`.
+- `docs/releases/0.3.68.md` absent; `archive/0.3.68.md` 51 ticked / 0 unticked; `INDEX.md` has the row; rows 237/238 `COMPLETE 0.3.68`.
+
+**What this run actually fixed:** `docs/NEEDS-TRIAGE.md` item **237** was still an open `- [ ]` asking for an owner decision
+that the release had already answered — option A (narrow the shutdown gate) shipped in 0.3.68 and box 1 applied it. Ticked it with
+the deploy-log evidence so the assistant stops relaying a dead question. That row was the stale-question class: a triage file that
+is never pruned turns into a fake backlog.
+
+**Still open in `docs/NEEDS-TRIAGE.md` (nothing new raised):** 194 (box-3 fork venue — recommend retiring the live half),
+231 (may the loop enact spec 53 / will you sign it — recommend A, now 6 runs open), self-heal/IPv6 (recommend `/etc/gai.conf`
+IPv4 precedence; standing auditor rule forbids the edit). No new decision raised by this run.
+
+Commit: docs-only (`paths-ignore`) ⇒ no CI started.
+
 ## 09:36 PT release loop — queue exhausted: no IN-PROGRESS, no NEW rows; 0.3.68 re-verified live [no triage]
 
 **A0 CI:** `origin/main` = `dd1b73606f0bd7e6c52d79ba6e5c01259da1e114` (`git ls-remote` agrees; the workspace clone's
