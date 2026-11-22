@@ -1,3 +1,10 @@
+## 07:20 PT release loop — ticked §5 linux build (0.3.68) [no triage]
+
+- **A0 CI:** no run exists for `origin/main` HEAD `fe87650` (docs-only, `paths-ignore` working as designed). Last code SHA `1bc9488b` = CI run `45024973751` **success**. Nothing red.
+- **Box ticked:** §5 `release-linux-selfhosted.yml` → Linux run `45035777994` `conclusion=success`, `head_sha=1bc9488bb7fc`, job 14:59:33Z→15:13:07Z; build log `Compiling gpn-node v0.3.68`; asset `gpn-linux.tar.gz` 340,605,647 bytes, updated 15:13:04Z, `sha256:7be88a2e9f064ef44746fe57951ef744530710f90b306290c87eafbc1bf5c0f0`.
+- **Windows run `45035780136`** still `in_progress` (started 14:59Z, ~20 min at time of writing) — not waited on, per dispatch-and-end rule. Next run reads the handle.
+- Commit `1e0eb5a` (docs-only, no CI).
+
 ## 07:05 PT AUDIT — fixed 1 (disk) / everything else clean [no triage]
 
 **What I checked (commands, in order)**
