@@ -1,3 +1,35 @@
+## 05:10 PT — 0.3.68 §3b/238 ticked: the update task's XML was never well-formed; registration had been failing rc=1 on every box [no triage]
+
+- **A0**: `origin/main` HEAD `c8e1e7de…` == local; `GET /actions/runs?head_sha=c8e1e7de…` ⇒ `total_count: 0`
+  (docs-only, `paths-ignore` intact). Nothing red to work.
+- **§3b box 238 worked for real, and it was not a checkbox exercise — the feature had never worked.**
+  `install.ps1`'s `$UpdateTaskXml` comment contained
+  `Box 1, 2026-11-17 07:11:39 -- every gpn process answered` and
+  `this XML is elevated -- it registers GPN-Node with HIGHEST --`. **`--` is illegal inside an XML
+  comment**, so `schtasks /Create /XML` answered **rc=1 on every box**, `Register-UpdateTask` returned
+  `$false`, the installer fell back to the Startup-shortcut loop, and `Assert-UpdateTaskElevation`
+  re-registered the *same broken XML* — the one mechanism written to heal "updater at Limited" could
+  never fire. That is why 238's field state survived installs.
+- **Fix (commit `1bc9488`, `install.ps1` sha256 `a322cc4f4c13…5d4334`):** comment rewritten without
+  `--`; `Register-UpdateTask` now parses the rendered task XML with `System.Xml` **before** calling
+  schtasks and names the parser's error instead of an opaque rc=1; test H added.
+- **Evidence, box 1, Windows PowerShell 5.1.22621.4249 (the task's own interpreter):**
+  fail-before on `HEAD~1:install.ps1` ⇒ `FAIL H the rendered update-task XML is well-formed  parse error:
+  An XML comment cannot contain '--' … Line 38, position 39`, `FAILURES: 3`;
+  pass-after ⇒ `RESULT: PASS (all checks)`, 21 ok, `EXIT=0`.
+- **Live self-heal on the real box, no manual step:** regressed the task ⇒ `before: update=Limited
+  node=Highest`; shipped `install.ps1 -UpdateTaskOnly` ⇒ `scheduled task GPN-Update registered …` +
+  `GPN-Update runs at RunLevel=Highest (can stop GPN-Node, RunLevel='Highest')` ⇒
+  `after: update=Highest node=Highest`, `EXIT=0`. Scheduled path then ran at that level:
+  `LastRunTime 2026-11-22 04:56:56`, `LastTaskResult 0`, `update.log [04:56:14] check: -> up to date (0.3.67)`.
+  The stop-under-elevation half was observed 03:16 PT (`CONFIRMED: 0.3.67 … after 123 s`); the deployed
+  0.3.68 cycle lands at §9/§10.
+- **Class swept, not just the instance:** no `<!--` block in any `.ps1`/`.xml`/`.cmd` in the tree
+  contains `--` (`bad_comment_files 0`); `install.ps1` is 0 non-ASCII bytes (the WS5.1 ANSI-decode guard).
+- **§4 CI box note updated:** the code commit for this box is `1bc9488`, which supersedes `ab3c502` for
+  the "CI green on that exact SHA" box; CI run **45024973751** was created `pending` for it. Next run reads
+  its conclusion — not waiting here, per the dispatch rule.
+
 ## 04:38 PT — 0.3.68 §3b/237 proved on box 1 under PowerShell 5.1; CI run 45018066004's linux job failed on a cache-prune race, cause found and fixed on the host [no triage]
 
 - **A0**: run 45018066004 (`ab3c502`) — `secret-scan` success, `fmt + clippy` success,
