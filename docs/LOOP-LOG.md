@@ -1,3 +1,22 @@
+## 00:52 PT — both release builds dispatched on the CI-green sha; §5 SSH-evidence box ticked; run ended (not waited on)
+
+- **A0**: `origin/main` HEAD `8dea06a2577464d04ab13592864387e4ad711e67` (checklist docs commit) →
+  `?head_sha=8dea06a…` ⇒ `total_count: 0` — correct under `ci.yml` paths-ignore (docs only). No
+  CI failure to act on. Local HEAD == origin/main, nothing stale.
+- **Box 1 — §5 "Per-item Windows evidence was collected over SSH".** Ticked from the §3b notes: all
+  four Windows proofs (233 `LIVE233 RESULT: PASS` with update.log taskkill→schtasks ordering and
+  node pid 41048; 234 live `GetSystemMetrics(8192)`⇒0 + 39 `CTRL_CLOSE_EVENT` lines; 235
+  `live-defer-235.ps1` on the box's real last-exit.json; 236 real `Get-ShutdownState` ⇒
+  `pending=True … PendingFileRenameOperations is non-empty`) came from `scripts/box1.sh`, not dispatches.
+- **Dispatched, then ended the run (dispatch rule).** Tag `build/88f2eea74788` created and pushed at
+  sha `88f2eea…` (the run-44987167844-green release sha; `git diff --stat 88f2eea HEAD` = docs only,
+  so the artifact bytes are the CI-verified tree):
+  - `release-linux-selfhosted.yml` → run **45004843977** (in_progress 08:52:38Z)
+  - `release-windows.yml` → run **45004869470** (in_progress 08:52:58Z)
+  Both handles are written into their boxes; no polling, no waiting.
+- **Next run**: ask GitHub once for those two run ids; if success, tick §5 boxes 2/3, then §6
+  artifact scans against the published digests.
+
 ## 00:40 PT — §2 last box ticked ('the change is in the tree about to be released'); §2 closed 6/6
 
 - **A0**: `origin/main` HEAD `401ad10e069b9bd27148ef1e57a9fe54c17374eb` (LOOP-LOG docs commit) →
