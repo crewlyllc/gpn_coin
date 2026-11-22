@@ -1,3 +1,21 @@
+## 22:12 PT — §4 CI box observed, not waited on: linux job green (step 13 fixed), Windows build still running
+
+- **A0**: `origin/main` HEAD `df75123` (docs-only; `?head_sha=` full-40 ⇒ `total_count: 0`, correct under
+  `paths-ignore`). The release sha stays `88f2eea`; its run is **44987167844**.
+- **Run 44987167844, read once from the API (not waited on)**: `secret-scan` ✅ 05:36:31Z,
+  `fmt + clippy` ✅ 05:38:24Z, `Build + unit tests (linux)` ✅ 06:02:58Z — **step 13
+  `Autostart installers (Windows + Linux, reversible)` success**, i.e. the two assertions `88f2eea`
+  repaired now pass in CI (that step was the failure in 44984299924). `Build + unit tests (windows,
+  self-hosted)` still `in_progress` at step 7 `Build + test gpn-agent (release)` since 05:34:50Z
+  (~37 min; under both the normal box-1 build time and the 90-minute threshold).
+- **Box worked — §4 "CI green on that exact SHA"**: left unticked with the per-job evidence recorded
+  inline. Ticking it needs the Windows job's conclusion, which does not exist yet; the box is not a
+  build/publish step I can dispatch, and the run is healthy, so nothing was cancelled or re-dispatched.
+- Local tree fast-forwarded to `df75123`; working tree was clean before the edit.
+- **Next run**: read 44987167844 once more. Windows job success ⇒ tick §4, then §2 (fmt/clippy/
+  call-site/tree) and open §5 with dispatch handles. Windows job failure ⇒ quote the failing step line.
+- No blocker, no [TRIAGE].
+
 ## 21:5x PT — §1 fail-before box ticked with same-turn re-runs; CI run 44987167844 healthy and still building
 
 - **A0**: `origin/main` HEAD `4b358fa` (docs-only, `?head_sha=` full-40 ⇒ `total_count: 0` — correct under
