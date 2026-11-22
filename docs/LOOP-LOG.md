@@ -1,3 +1,22 @@
+## 15:36 PT 0.3.70 box 2 (241) DONE — GRANDPA revisit condition recorded as a testable contract
+- A0: `origin/main` HEAD `37b84a9`, one run for that sha — **45084034435 `CI pending`** (single-slot
+  runner). Not waited on, per the rule; push supersedes it. No failure to act on.
+- Box: **241**. Wrote `docs/finality-revisit-condition.md`: the four conditions verbatim, each with
+  *why*, *how to measure* (validating-key + admin-domain registry; authorisation rule + rejected-change
+  test; stop-one-validator run; forced-stall log line), and status. Proposal block ends
+  `verdict: ADOPT / REFUSE`, blank line ⇒ REFUSE. `docs/design-settlement-finality.md` §4 now links it
+  and states the measured status **0 of 4 met** (2026-11-22): one operator, no published change
+  procedure, no loss test, no stall alarm.
+- Measured, not asserted: `network.json` has no operator registry (keys `network, chain_id,
+  genesis_hash, spec_version, bootnodes, bootstrap_seeds, bootstrap_urls, settlement_depth,
+  settlement_time_secs, latest_version`), so the operator count is unmeasurable — recorded as zero
+  rather than rounded up.
+- Test-first: doc renamed away ⇒ `settlement_docs` `FAILED. 0 passed; 1 failed`; in place ⇒
+  `4 passed; 0 failed`. `cargo fmt --check` ⇒ clean. The test asserts five required strings **and**
+  the design-doc link, so the two files cannot drift apart.
+- Commit `845b055`, pushed once to main. Next box: 242 (unsigned entry rejected as bad signature).
+- No [TRIAGE] items. `scripts/git-hooks/pre-commit` still modified in the tree (not mine) — left alone.
+
 ## 15:56 PT 0.3.70 box 1 (240) DONE — settlement published as depth; main's red fmt fixed
 - A0: refused to wait on anything. HEAD `a83907f` run 45081100470 `in_progress` ⇒ noted, continued.
   But the PREVIOUS sha had a real red: run **45075851892** on `870ddda` = **failure**, job
