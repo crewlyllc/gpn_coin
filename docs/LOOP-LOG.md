@@ -1,3 +1,33 @@
+## 17:56 PT — 0.3.66 RELEASED: cut, published, self-updated, observed [TRIAGE: 231 enactment still owner-gated]
+
+- **A0**: `origin/main` HEAD `06f4cb6` (docs-only) ⇒ `?head_sha=` gives `total_runs: 0`, correct under
+  `ci.yml` paths-ignore. No red run for the code sha `1b9ded2` (44958227352 succeeded).
+- **§7 release-cut COMPLETED** — the 17:35 detached dispatch (pid 294969) ran to exit 0 at 17:44 PT;
+  `/tmp/release-cut-0.3.66.log` ends `release-lock: released (0.3.66)` / `released 0.3.66 —
+  https://gpncoin.ai/releases.json`. Signed manifest commit **`753e76c`** (`06f4cb6..753e76c main`).
+  Mirror digests re-verified in `crewlyllc/gpn_coin`: linux `547a1d21…` 340,399,822 B, windows
+  `9d89d3ea…` 248,794,331 B.
+- **§7c/§7b/§8 ticked**: `network.json latest_version 0.3.66`; `releases.json` served 0.3.66 at
+  17:45:08 **and** 17:45:18 PT; anonymous download of both mirror assets (no credentials) re-hashed by
+  hand ⇒ both digests equal the manifest. Both GitHub repos carry the same two asset sizes.
+- **Stale version stamps found and fixed**: `website/download.html` said `Current signed release:
+  0.3.65`, `docs/run-a-node.md` said 0.3.64. Fixed in **`a3a94a1`** (0.3.66; doc stamp also corrected to
+  block 342,914 — the 0.3.65 stamp had carried a stale block number).
+- **§9 deploy: a node updated ITSELF** — `systemctl --user start gpn-update.service` 17:46:49 PT;
+  `17:48:43 confirm: waiting … for 0.3.66` → `17:48:58 confirm: process=up rpc=yes 14s version=0.3.66`
+  → `confirmed 0.3.66 is running`. Attempt record `release_id 547a1d21…` (the signed linux sha256),
+  `current -> versions/0.3.66`, `current.previous -> versions/0.3.65`.
+- **§10 observed on the real machine**: `POST :9944 system_version` ⇒ `0.3.66`; installed tree's
+  `gpn_register --help` prints `direct registration (free, no proof of work)` (item 232, live);
+  `system_peers` ⇒ 3 peers at 17:52, head 342,421→342,422 moving; no `gpn-isolated`/`gpn-forked` markers.
+  Note recorded in the checklist: right after the restart the node re-anchored from 342,914 down to
+  342,421 and climbed again — stated openly rather than presented as a forward-only chain.
+- **Filed**: `docs/releases/archive/0.3.66.md`, INDEX row added, timing json written (replay reports
+  0s because all ticks share one commit — noted, not hidden). Rows 230 and 232 → `COMPLETE 0.3.66`.
+- **[TRIAGE] 231 unchanged**: source + spec bump shipped in the 0.3.66 WASM; **enactment needs the
+  offline sudo key (Jeremy's D5)** — re-raised in `docs/NEEDS-TRIAGE.md` §231. Checklist is 50/51 with
+  that single box unticked by design.
+
 ## 17:33 PT — 0.3.66 §5 verifier + §6 both boxes ticked; §7 cut dispatched detached [TRIAGE: 231 unchanged]
 
 - **A0**: `origin/main` = `a9d8754c…` (docs-only); `?head_sha=a9d8754c…` ⇒ `total_runs: 0`, as

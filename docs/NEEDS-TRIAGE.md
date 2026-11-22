@@ -65,3 +65,8 @@ Format: `- [ ] <item id> — <question> | options: A … B … | recommend: … 
       0.3.66's binary half is now built and in flight — the only thing standing between "free
       registration" in git and free registration on the network is this key decision. Recommendation
       unchanged: **A**.
+      **RE-ANNOUNCED 2026-11-21 17:56 PT** (5th run touching 0.3.66): unchanged and now the only open
+      item — 0.3.66 is published, deployed and confirmed (`system_version 0.3.66`), the checklist is
+      50/51 with this box deliberately unticked. The spec-53 WASM is built and hash-verified
+      (`blake2_256 0xd4224aa6…a3e6a`, 534,023 B); everything else about this release is done.
+      Recommendation unchanged: **A**.
