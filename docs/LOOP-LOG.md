@@ -1,3 +1,30 @@
+## 11:47 PT release loop — 0.3.69: row 239 proved live (old-vs-new A/B), §4 CI still in flight [no triage]
+
+**A0 CI:** `origin/main` = `b4b1e261ef0996338eec4aa5301e44eebb30352a` (`git ls-remote` after `git fetch`;
+the runner work dir was 6 commits stale at `c8090a4` — fast-forwarded first, per TOOLS). Run
+**45056406823** (`c8090a4`) still `in_progress`: `fmt + clippy` success, `secret-scan` success,
+`Build + unit tests (linux)` success (18:44→19:11Z), `Build + unit tests (windows, self-hosted)` in step 7
+`Build + test gpn-agent (release)` since 18:43Z ⇒ 64 min at 19:47Z, inside the 40–75 min cold-Windows
+budget ⇒ not stale, not cancelled. Run **45058527165** (`fe67524`, row 231) `pending` behind it on the
+same single-slot box-1 runner. Nothing to tick on conclusion; per A0 not waited on.
+
+**A — first unticked box is §4 "CI green on that exact SHA" (pending)**, so instead of idling this run
+did the box that was previously deferred: row 239's *live* half, measured by A/B on this host against
+the real node (`:9944`, `--providers http://127.0.0.1:8093`), two spare ports, identical input:
+- OLD production binary `~/.local/bin/gpn_scheduler` (0.3.68) on `:30993` ⇒ `GET /providers` = **3 rows**:
+  `5ENqSp5Q…` + two `address:""`/`healthy:false` placeholders (`gpn-testnet.duckdns.org:8093/status`,
+  `23.241.109.255:8093/status`). Defect reproduced from live data.
+- NEW build of HEAD (`cargo build --bin gpn_scheduler`, 24.61 s cached) on `:30992` ⇒ **1 provider row**
+  + `unreachable_endpoints: [{url: http://23.241.109.255:8093/status, reachable: false}]`; the duckdns
+  placeholder vanished (its on-chain owner already has a live row ⇒ collapsed). Log:
+  `[route] … did not answer /status — publishing no capability or identity for it`.
+- Both test instances killed by port-verified pid; production `:8092` pid 806197 untouched (still 7 rows
+  on 0.3.68). Evidence pasted into `docs/releases/0.3.69.md` §3b row 239 note; box **deliberately still
+  unticked** — its done-when names `GET :8092/providers` on the deployed access point, which needs §9/§10.
+
+**Next run:** ask once about 45056406823 (and 45058527165); on `success` tick §4's last box, then dispatch
+`release-linux-selfhosted.yml` + `release-windows.yml` on the same SHA, write the run ids into §5, END the run.
+
 ## 11:16 PT release loop — §5 attestation-ordering box verified statically (cosign path); CI on c8090a4 still on the Windows build [no triage]
 
 **A0 CI:** `origin/main` = local HEAD = `fe6752429af6` (fetched, `git rev-parse origin/main`). Its run
