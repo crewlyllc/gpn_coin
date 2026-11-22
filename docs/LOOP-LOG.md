@@ -1,3 +1,25 @@
+## 15:56 PT 0.3.70 box 1 (240) DONE — settlement published as depth; main's red fmt fixed
+- A0: refused to wait on anything. HEAD `a83907f` run 45081100470 `in_progress` ⇒ noted, continued.
+  But the PREVIOUS sha had a real red: run **45075851892** on `870ddda` = **failure**, job
+  `fmt + clippy`, step `rustfmt (check, agent)`: `Diff in
+  gpn-agent/examples/entry_state_probe.rs:63`, `:81`, `unsigned_entry_probe.rs:8`, `:86` ⇒
+  classified **our code** (a commit that never ran `cargo fmt`), fixed in this commit rather than
+  parked — every later push would have inherited it. `cargo fmt --check` ⇒ clean.
+- Box: **240** settlement depth. `GET /api/finality` (`mode=depth`, `confirmations=288`,
+  `finalized_head:null`), `/network` + `/api/network` carry `settlement_depth: 288` /
+  `≈72 min at 15 s` / `finalized_head: null`, `network.json` publishes both numbers, explorer and
+  the worker proxy serve it. Warning "chain_getFinalizedHead returns genesis; use depth" is on
+  nodes.html, technical-overview.html, both run-a-node guides; `tests/settlement_docs.rs` (3/3)
+  asserts the string is in the shipped files. 288-deep check run live: head `347486` ⇒ `settled`.
+- Tests: lib network_directory 18/18 · settlement_docs 3/3 · gpn_scheduler 105/105 · worker 66/66 ·
+  fmt clean · clippy with CI's exact allow-list exit 0. Live proof: AP built from this tree on
+  :18092 and explorer on :18082 both answered `/api/finality`; both killed after (pid checked
+  against the test port, production :8092 untouched).
+- Commit `fa3c681` (code+docs+checklist), pushed once. Next box: 241 (GRANDPA revisit condition).
+- No [TRIAGE] items, nothing needs Jeremy.
+- Note for a later run: `scripts/git-hooks/pre-commit` is still modified in the working tree (not
+  mine) — left uncommitted again.
+
 ## 15:05 PT 0.3.70 bundle OPENED — rows 240-247, checklist generated, box 1 next run
 - A0: main HEAD `f327ef0` — 0 CI runs for that sha (docs-only commit; `paths-ignore` working as intended,
   so "no run" is correct, not a gap). No failure to act on.
