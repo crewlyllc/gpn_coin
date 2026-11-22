@@ -1,3 +1,29 @@
+## 15:1x PT — 0.3.66 §4 CI-green box ticked: run 44958227352 success on 0a7f2e5 [no triage]
+
+- **A0**: `GET /commits/main` ⇒ `454ab07f…` (docs-only: checklist §3/§4 ticks + LOOP-LOG);
+  `?head_sha=454ab07f…` ⇒ `total_count: 0` — expected under `ci.yml` paths-ignore, not a problem.
+  Local checkout was 2 behind (on `0a7f2e5`) and clean, so it was reset to `origin/main` first.
+- **Box worked — §4 "CI green on that exact SHA", ticked with evidence.**
+  **Run 44958227352 = `success`** for `0a7f2e5ba5c588e3796ee8cc6da94e9b9bc9b170` (created 22:43:40Z,
+  completed 00:09:35Z / 15:09 PT): `fmt + clippy` 108 s, `secret-scan` 51 s,
+  `Build + unit tests (linux)` 22:56→23:28Z (32 min), `Build + unit tests (windows, self-hosted)`
+  22:52→00:09Z (77 min, DESKTOP-USBUADL). Skipped by design: dep audit, two-node GPU, macos.
+  No push was needed; it is the run for the item-232 commit already on `main`.
+- **The red before it, diagnosed rather than waived**: 44950717469 (`f1db7476`, 21:17Z) failed with
+  `error[E0433]: cannot find "ChildEvidence" in "update"` at `src/bin/gpn_update.rs:1375`, plus
+  `E0407`/`E0609` (`child_evidence` not a member of `update::ConfirmProbe`; `no field "child" on
+  exit_report::Report`). Class: **our code, transient mid-series** — the bin half of item 230 landed
+  before its lib half. Fixed by `6f2b768` (`update.rs:2361 pub struct ChildEvidence`,
+  `exit_report.rs:184 pub child`), an ancestor of `0a7f2e5`. Verified on this host too:
+  `cargo check --bin gpn_update --bin gpn_node` ⇒ `Finished ... in 7.45s`.
+- **Waiting note (honest)**: this box was CI-dependent, so the run did read the conclusion instead of
+  ending blind — 40 min in_progress at hand-off time, 87 min total end to end. From here the loop is
+  back on the dispatch-and-end pattern: §5's two build dispatches get triggers + run ids only.
+- **Still open**: item 231 `AWAITING-OWNER` in `docs/NEEDS-TRIAGE.md` (spec-53 enactment needs the
+  offline sudo key D5; live chain still answers specVersion 52). Nothing new for Jeremy this run.
+- **Next run**: §5 — dispatch `release-linux-selfhosted.yml` **and** `release-windows.yml` on the
+  same SHA `0a7f2e5b…`, write the run ids in the boxes, end the run.
+
 ## 14:58 PT — 0.3.66 §3 (bump/CHANGELOG/lockstep/seeds) ticked with evidence; CI noted, not waited [no triage]
 
 - **A0**: HEAD = `0a7f2e5ba5c588e3796ee8cc6da94e9b9bc9b170`. One run for it,
