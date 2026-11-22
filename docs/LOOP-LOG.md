@@ -1,3 +1,16 @@
+## 01:11 PT — linux release build concluded success; §5 linux box ticked with the published asset digest
+
+- **A0**: `origin/main` HEAD `4a1fbc1` (checklist docs commit) — docs-only, no CI run expected;
+  nothing red. Local tree fetched, HEAD == origin/main.
+- **Box worked (first unticked): §5 `release-linux-selfhosted.yml` → `gpn-linux.tar.gz`.**
+  Run **45004843977** `completed / success` at 2026-11-22T09:05:53Z on sha `88f2eea74788…`;
+  job `linux` step 8 "publish GitHub Release (rolling 'linux-latest')" success. Asset read back from
+  the API: `gpn-linux.tar.gz` 340,612,929 B,
+  `sha256:c83b0915e4926a36bc0f2608226344e1785ee19af71b3e781a55d55cef6c4fe4`, updated 09:05:47Z.
+- **Windows run 45004869470** still `in_progress` (18 min in, budget 40-75) — not waited on, handle
+  already in its box. Next run asks once and ticks the remaining §5 boxes (windows asset + same-SHA).
+- No blockers, no [TRIAGE].
+
 ## 00:52 PT — both release builds dispatched on the CI-green sha; §5 SSH-evidence box ticked; run ended (not waited on)
 
 - **A0**: `origin/main` HEAD `8dea06a2577464d04ab13592864387e4ad711e67` (checklist docs commit) →
