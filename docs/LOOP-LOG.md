@@ -1,3 +1,27 @@
+## 17:00 PT — 0.3.66 §5 attestation box ticked: cosign `Verified OK` on the published zip [TRIAGE: 231 unchanged]
+
+- **A0**: `?head_sha=2ebd280…` ⇒ 0 runs (docs-only, expected). No CI red anywhere; last code run
+  44958227352 on `0a7f2e5` was already `success`.
+- **Build pair finished**: `release-linux-selfhosted.yml` run **44966033883** `success` (00:34:41Z),
+  `release-windows.yml` run **44966053558** `success` (00:45:32Z), both on
+  `1b9ded2116dd632269e2c4d62e79e348fcb1949a`.
+- **Box ticked — §5 "attestation exists for the digest that is actually published"**:
+  `windows-latest` carries `gpn-windows.zip` 248 794 331 B `sha256 9d89d3ea…076c` **and**
+  `gpn-windows.zip.bundle` 9 033 B `sha256 928277b2…d18b` (both asset-updated 00:45:25Z).
+  Downloaded both from the asset API, re-hashed locally ⇒ exact digest match, then
+  `cosign verify-blob --bundle … --certificate-identity-regexp 'release-windows.yml@.*'
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com` ⇒ **`Verified OK`**.
+  `releases.json` still serves 0.3.65 (the cut is §7), so the digest came from the published asset
+  and was checked by local re-hash — no site URL was hashed. Zip+bundle cached in `/tmp/attest066/`.
+- **Next run**: §5 box 2 (paste the verifier output, ~2 s off the cache), finish §6 for windows
+  (the linux half was already read from the published asset at 16:41), then §7 `release-cut.sh`
+  (dispatch, write the handle, end).
+- **[TRIAGE] item 231 still AWAITING-OWNER** — spec-53 enactment needs sudo key D5. Source half
+  proven, spec-53 WASM built (`sha256 d5c1b69a…42819f`, code hash `0xd4224aa6…a3e6a`), live chain
+  still answers `specVersion 52` (re-checked 16:56 PT). Question in `docs/NEEDS-TRIAGE.md` §231;
+  recommendation **A** (loop enacts with D5, ~2 min, no fork). Harmless to the 0.3.66 cut — 0.3.66
+  ships the source change either way; only the on-chain half waits.
+
 ## 16:41 PT — 0.3.66 §5: linux build success + published; linux half of §6 verified, windows run still in flight [no triage]
 
 - **A0**: `origin/main` = `2c28424c…` (docs-only: the §5 dispatch commit); `?head_sha=2c28424c…` ⇒
