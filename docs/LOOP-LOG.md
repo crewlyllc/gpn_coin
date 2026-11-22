@@ -1,4 +1,4 @@
-## 03:18 PT — 0.3.67 §7–§10b worked: versions live everywhere, node self-updated, and box 1 found blocking itself [TRIAGE]
+## 03:09 PT — 0.3.67 §7–§10b worked: versions live everywhere, node self-updated, and box 1 found blocking itself [TRIAGE]
 
 - **A0**: CI run 45013609816 on `cf42692` was `in_progress` (started 10:40Z) — noted, not awaited.
 - **§7 DONE (4/4).** Cut already finished at 02:44 (`released 0.3.67`). Ticked:
