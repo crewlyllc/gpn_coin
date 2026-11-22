@@ -1,3 +1,11 @@
+## 13:55 PT 0.3.69 §5 — duplicate run: linux box was already ticked by the 21:12Z run
+- This run found the linux box already ticked at HEAD (`36d75c1`/`111e4f7`); independent re-check of
+  the same published asset (digest `c6eca129…12918b`, `gpn_node 0.3.69 (spec 53, fe67524)`)
+  is appended to that box rather than overwriting it.
+- A0: main HEAD `111e4f7` = docs-only ⇒ 0 runs. `release-windows.yml` run 45072558357 `in_progress`
+  (started 21:31:22Z, 19 min) ⇒ noted, not waited on, not stale. That is the only open build.
+- No triage item.
+
 ## 13:31 PT 0.3.69 §5: windows release build **dispatched** (run 45072558357), run ended per dispatch rule
 - A0 CI: origin/main HEAD `36d75c1` is docs-only ⇒ no run (`total_count: 0`) — expected, not a red.
   `fe67524`'s CI run **45058527165** asked once: `completed / success` (updated 21:19:25Z) ⇒ the
