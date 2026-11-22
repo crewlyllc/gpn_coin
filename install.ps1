@@ -3331,6 +3331,36 @@ Invoke-Step "create $BinDir and copy the release binaries" {
 }
 Say "binaries installed in $BinDir"
 
+# 0a. Refuse to finish an install that is OLDER than the published release.
+#     2026-11-22: the one-command download on gpncoin.ai had no failure detection, so a
+#     blocked/404 download left the previous build in bin\ and this script reinstalled it
+#     happily -- a "fresh install" reported 0.3.64 while the manifest served 0.3.68.
+#     Offline installs are unaffected: no manifest answer means no check.
+try {
+  $manifest = Invoke-RestMethod 'https://gpncoin.ai/releases.json' -TimeoutSec 15 -ErrorAction Stop
+  $latest = [string]$manifest.version
+  $here = $null
+  $nodeExe = Join-Path $BinDir 'gpn-node.exe'
+  if (Test-Path -LiteralPath $nodeExe) {
+    $here = (Get-Item -LiteralPath $nodeExe).VersionInfo.ProductVersion
+    if (-not $here) { $here = (Get-Item -LiteralPath $nodeExe).VersionInfo.FileVersion }
+    if ($here) { $here = ($here -split ' ')[0] -replace '^[^0-9]*', '' }
+  }
+  if ($here) {
+    $cmp = [version]($here -replace '-.*$','')
+    $want = [version]($latest -replace '-.*$','')
+    if ($cmp -lt $want) {
+      throw ("the binaries in " + $BinDir + " are $here but the published release is $latest -- " +
+             "this install would leave an OLD build running. Re-download the archive " +
+             "(the one-command install now verifies size and sha256) and run install.ps1 from it.")
+    }
+    Say "version check: installing $here (published latest $latest)"
+  }
+} catch {
+  if ($_.Exception.Message -like '*older build*' -or $_.Exception.Message -like '*published release*') { throw }
+  Warn ("version check skipped: " + $_.Exception.Message + " (offline install?)")
+}
+
 # 1a. version pointer: `data\update\current` is what the launcher runs and what
 #     the updater flips to apply a release. An install that leaves it absent (or
 #     dangling) makes every later update start the WRONG tree, and makes

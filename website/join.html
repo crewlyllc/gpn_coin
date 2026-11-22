@@ -100,9 +100,15 @@
       <h3>Windows (PowerShell)</h3>
       <div class="field">
         <pre><code id="join-win-quick">New-Item -ItemType Directory -Force C:\gpn | Out-Null
-curl.exe -L -o C:\gpn\gpn-windows.zip https://github.com/crewlyllc/gpn_coin/releases/download/windows-latest/gpn-windows.zip
-Expand-Archive C:\gpn\gpn-windows.zip -DestinationPath C:\gpn\bin -Force
-powershell -NoProfile -ExecutionPolicy Bypass -File C:\gpn\bin\install.ps1<span data-ref-arg></span></code></pre>
+$m = Invoke-RestMethod https://gpncoin.ai/releases.json
+$asset = $m.assets | Where-Object { $_.os -eq 'windows' }
+curl.exe -fL -o C:\gpn\gpn-windows.zip $asset.url
+if ($LASTEXITCODE -ne 0) { throw "download failed (curl exit $LASTEXITCODE)" }
+$f = Get-Item C:\gpn\gpn-windows.zip
+if ($f.Length -ne $asset.size) { throw "download is $($f.Length) bytes, manifest says $($asset.size) — refusing to extract" }
+if ((Get-FileHash C:\gpn\gpn-windows.zip -Algorithm SHA256).Hash.ToLower() -ne $asset.sha256.ToLower()) { throw "sha256 mismatch — refusing to extract" }
+Expand-Archive C:\gpn\gpn-windows.zip -DestinationPath C:\gpn\bin.pending -Force
+powershell -NoProfile -ExecutionPolicy Bypass -File C:\gpn\bin.pending\install.ps1<span data-ref-arg></span></code></pre>
         <button class="btn small ghost no-print" type="button" data-copy="#join-win-quick">Copy</button>
       </div>
 
