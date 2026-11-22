@@ -8,6 +8,66 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 versions are [Semantic Versioning](https://semver.org/spec/v2.0.0.html), with
 the GPN-specific meaning of each level documented in `docs/updates.md`.
 
+## [0.3.70] - 2026-11-22
+
+Bumped from 0.3.69 (`scripts/bump-version.py patch`).
+
+**Finality told honestly, and entry onboarding fixed where it actually broke.** The chain has
+no finality gadget — `chain_getFinalizedHead` answers with the genesis hash — so the API now
+publishes the depth that *is* final in practice instead of a field that says nothing. And the
+fifth machine's onboarding failure is traced to its real cause: the entry proof was rejected
+at a difficulty boundary and reported to the operator as a bogus signature error.
+
+### Added
+- **Settlement depth is published; `finalized` no longer implies a gadget** (row 240).
+  `network.json`, `/api/network` and a new `GET /api/finality` expose `settlement_depth: 288`
+  (≈72 min at 15 s blocks) and `finalized_head: null` instead of the genesis hash. The docs
+  warn that `chain_getFinalizedHead` returns genesis, a test asserts the warning, and one
+  curl example shows how to check a block is 288 deep (design:
+  `docs/design-settlement-finality.md`).
+- **The GRANDPA revisit condition is written down** (row 241), so finality is adopted on
+  evidence rather than mood: ≥7 independent operators with keys we do not hold across ≥4
+  admin domains, a published validator-set change procedure, survival of any single
+  operator's loss, and a finality-stall alarm. Referenced from the settlement design.
+
+### Changed
+- **Entry onboarding re-checks difficulty immediately before submit and re-mines instead of
+  failing once** (row 244). On a proof rejection the client re-reads the live difficulty,
+  re-mines up to twice, and reports `re-mined against the newer target` with both targets
+  and both nonces — closing the 45-block ADJUST race between the client's last check and the
+  pool's precheck.
+- **A rejected entry proof is no longer reported as a bad signature** (row 243).
+  `validate_unsigned` mapped every `precheck_pow` failure to `InvalidTransaction::BadProof`,
+  which the node renders as `{"code":1010,"data":"Transaction has a bad signature"}` — the
+  exact string that sent two investigations the wrong way. It now maps to
+  `InvalidTransaction::Custom(n)` with a defined meaning (`entry proof rejected: below
+  target` / `gpu already used` / `limits`).
+- **The unsigned entry path is fixed so a zero-balance machine can onboard** (row 242). The
+  fifth box mined a valid proof (195M hashes at 3.7 MH/s) and the submission died with
+  `entry-submit-rejected: {"code":1010,"data":"Transaction has a bad signature"}`; the
+  unsigned form encodes as version byte 4 against 0x84 signed, so the fault was in how the
+  call is built. Done when a fresh 0-balance account registers through
+  `register_provider_entry_unsigned` on the live chain with the submitted hex and inclusion
+  block pasted.
+
+### Fixed
+- **The release cut no longer leaves a window where the asset 404s or the manifest describes
+  the previous build** (row 245). The cut uploads under a temporary name, verifies it, then
+  renames/replaces in one step; `releases.json` is written only after the asset is anonymously
+  readable with the matching sha, and the cut asserts `anonymous GET == 206` and
+  `manifest sha == asset sha` before any surface advertises the version.
+- **The stranger-verify check is credential-free and filename-exact** (row 246). §8 ticked
+  green against a URL that was returning 404 to anonymous callers. The check now runs with no
+  token and no cache (`curl -sL -r 0-1024 -o /dev/null -w '%{http_code}'` must be 206),
+  compares the manifest filename against the release's actual asset names, and fails the
+  release if either is wrong — with the command and output pasted in the checklist.
+- **The one-command Windows install detects a failed download instead of silently
+  reinstalling the old build** (row 247). The snippet now uses `curl.exe -fL`, aborts on a
+  non-zero exit or a file smaller than the manifest's size, verifies the zip's sha256 against
+  `releases.json` before extracting, and `install.ps1` refuses to install when its own version
+  is older than the manifest's latest. This is the reproduction of a fresh install reporting
+  0.3.64 while the manifest served 0.3.68.
+
 ## [0.3.69] - 2026-11-22
 
 Bumped from 0.3.68 (`scripts/bump-version.py patch`).
