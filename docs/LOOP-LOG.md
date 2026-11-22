@@ -1,3 +1,10 @@
+## 07:41 PT release loop — ticked §5 windows build (0.3.68) [no triage]
+
+- **A0 CI:** no run exists for `origin/main` HEAD `ea8a68b` (docs-only, `paths-ignore` working as designed). Last code SHA `1bc9488b` = CI run `45024973751` **success**. Nothing red.
+- **Box ticked:** §5 `release-windows.yml` run `45035780136` `completed/success`, `head_sha=1bc9488bb7fc`, job 14:59:34Z→15:25:37Z (26m03s); steps 8/10/16/18/21/22/23 all success. Asset `gpn-windows.zip` 248,806,119 bytes, updated 15:25:31Z, `sha256:42d59058f7f8c5733379d67b3024dbeeed37aa5f33b482c1a11607cd04784cc4`, plus `gpn-windows.zip.bundle` 9049 B. Repo private → cosign keyless path, provenance gate passed before publish.
+- Next box: §5 "Same SHA on both runs" (linux run 45035777994 and windows run 45035780136 both `1bc9488bb7fc`).
+- Commit: docs-only, no CI.
+
 ## 07:20 PT release loop — ticked §5 linux build (0.3.68) [no triage]
 
 - **A0 CI:** no run exists for `origin/main` HEAD `fe87650` (docs-only, `paths-ignore` working as designed). Last code SHA `1bc9488b` = CI run `45024973751` **success**. Nothing red.
