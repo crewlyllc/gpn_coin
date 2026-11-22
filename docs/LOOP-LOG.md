@@ -1,3 +1,42 @@
+## 03:18 PT — 0.3.67 §7–§10b worked: versions live everywhere, node self-updated, and box 1 found blocking itself [TRIAGE]
+
+- **A0**: CI run 45013609816 on `cf42692` was `in_progress` (started 10:40Z) — noted, not awaited.
+- **§7 DONE (4/4).** Cut already finished at 02:44 (`released 0.3.67`). Ticked:
+  `network.json` `latest_version` = `0.3.67` (`git show origin/main:network.json`, last touched by the
+  publish commit); `releases.json` polled twice 10 s apart ⇒ `0.3.67` both (`curl`).
+- **§7b DONE (4/4) — the site was stale and is now fixed.** `website/download.html` still said
+  `Current signed release: 0.3.66`, and `docs/{run-a-node,downloads}.html` carried
+  `release 0.3.65 — checked 2026-11-21`; also `docs/downloads.md` said `release 0.3.64`. Commit
+  `8bdc95c` set all of them to 0.3.67. Live re-poll after the Cloudflare deploy: `/download` ⇒
+  `0.3.67`, `/docs/run-a-node` ⇒ `0.3.67`, `/docs/downloads` ⇒ `0.3.67`. GitHub `linux-latest` /
+  `windows-latest` and the `crewlyllc` mirror hold identical names/sizes/digests; capability box
+  `n/a` (233–236 add no capability). Gotcha recorded: `download.html` 301s to `/download`, so a bare
+  `curl` reads 0 bytes and looks like "no version on the page".
+- **§8 DONE (3/3)** as a stranger: both assets downloaded anonymously with plain `curl -sL` from the
+  manifest's public URLs in this run — `sha256` `c83b0915…` (340,612,929 B) and `19065d12…`
+  (248,806,172 B), byte-equal to `releases.json`. Header `content-length` matched before the bodies.
+- **§9 DONE (4/4) — a node updated itself.** `systemctl --user start gpn-update.service` (the unit's
+  own `gpn_update --apply`, not a hand copy) took this host 0.3.66 → 0.3.67: `confirm: process=up
+  rpc=yes 28s version=0.3.67` → `confirmed 0.3.67 is running`; child pid 303157 → 609421;
+  `gpn-node --version` ⇒ `0.3.67`; `current.previous` ⇒ 0.3.66 retained; attempt ledger
+  `outcome: confirmed`, `release_id` = the published linux digest, `attempts: 1`. Peers held 3 for
+  5½ min after the restart (best #344540 → #344549), zero `Reason:` lines, no isolated/forked.
+- **§10 1/3 — the Windows half cannot be proven yet, and the cause is our own gate. [TRIAGE → 237]**
+  Box 1 `C:\gpn\update.log` 02:50:10–11: `check: latest 0.3.67` then
+  `deferred: system is shutting down - a reboot is pending (PendingFileRenameOperations is non-empty)`,
+  `wrapper exit 75`, `the node was NOT stopped and nothing was installed`. That reason is false:
+  uptime 11d 15h, CBS `RebootPending` False, WU `RebootRequired` False, and the 118 PFRO entries are
+  dead debris (`C:\Config.Msi\1a942.rbf`, Brave `Temp\…\old_chrome.exe`, Dropbox `UpdaterSetup.exe`).
+  So #236's gate reads a *pending reboot* as a *shutdown in progress* and box 1 can never update
+  again. Filed as row **237 (NEW)** with the narrowed-gate fix and a test case; question in
+  `NEEDS-TRIAGE.md` (reboot now vs ship the narrowed gate first → recommend the latter, one reboot
+  then).
+- **§10b DONE (2/2)** — `docs/releases/timing/0.3.67.json` written (`total_s: 765`); slowest real step
+  is box 1's 58–69 min update cadence, which an on-demand "run one cycle" entry point would collapse
+  to ~3 s.
+- Checklist 48/52. Remaining: §10 box 1 (after 237), §10 box 3 (rows → DONE), §0b filing. Docs-only
+  commits here start no CI (paths-ignore), which is why the website fix was pushed separately.
+
 ## 02:47 PT — 0.3.67 PUBLISHED: the cut finished in ~4 min and §7 box 2 is ticked
 
 - **§7 box 2 ticked — `release-cut.sh --timeout 300` exit 0, `released 0.3.67`.** Timeline from
