@@ -43,15 +43,15 @@ def normalise(text: str) -> str:
     return t[:64]
 
 
-def commits(path: str):
-    """(timestamp, sha) for every commit that touched the file, oldest first.
+def commits(paths):
+    """(timestamp, sha) for every commit that touched any of the paths, oldest first.
 
     No `--follow`: git only follows renames from one end, and combining it with
     `--reverse` silently returned a single commit (2026-11-20, 0.3.64 reported
     "no ticked boxes found in history" while `git log` plainly listed 9 commits).
     These checklists are never renamed, so plain `git log` is both correct and enough;
     default order is newest-first, so reverse in Python instead of via git."""
-    log = git("log", "--format=%H %cI", "--", path)
+    log = git("log", "--format=%H %cI", "--", *paths)
     out = []
     for line in log.stdout.splitlines():
         sha, _, when = line.partition(" ")
@@ -63,11 +63,21 @@ def commits(path: str):
     return out
 
 
-def snapshot(path: str, sha: str):
+def snapshot(paths, sha: str):
     """The file's full box state at one commit — diffs are useless here, because unchanged
-    boxes appear only as context and a generator rewrite restates everything at once."""
-    blob = git("show", f"{sha}:{path}")
-    if blob.returncode != 0:
+    boxes appear only as context and a generator rewrite restates everything at once.
+
+    `paths` is a list because filing moves the checklist from docs/releases/<v>.md to
+    docs/releases/archive/<v>.md: a release read after filing must see BOTH histories, or
+    every tick that happened before the move is invisible (2026-11-22: 0.3.67 reported a
+    single 0 s step because only the rename commit matched). The first path that exists at
+    that commit is read."""
+    blob = None
+    for path in paths:
+        blob = git("show", f"{sha}:{path}")
+        if blob.returncode == 0:
+            break
+    if blob is None or blob.returncode != 0:
         return {}, {}
     boxes, sections = {}, {}
     cur = "(preamble)"
@@ -87,10 +97,10 @@ def snapshot(path: str, sha: str):
     return boxes, sections
 
 
-def analyse(path: str):
+def analyse(paths):
     first_seen, ticked_at, section_of = {}, {}, {}
-    for ts, sha in commits(path):
-        boxes, sections = snapshot(path, sha)
+    for ts, sha in commits(paths):
+        boxes, sections = snapshot(paths, sha)
         for key, done in boxes.items():
             first_seen.setdefault(key, ts)
             section_of.setdefault(key, sections.get(key, "?"))
@@ -120,12 +130,15 @@ def main():
 
     base = "docs/releases/archive" if args.archive else "docs/releases"
     path = f"{base}/{args.version}.md"
-    try:
-        open(path).close()
-    except OSError:
+    # The file may have been filed already: read both the working location and the archive,
+    # so a release is analysable before and after the move.
+    paths = [path]
+    alt = f"docs/releases/{args.version}.md" if args.archive else f"docs/releases/archive/{args.version}.md"
+    paths.append(alt)
+    if not any(__import__("os").path.exists(p) for p in paths):
         sys.exit(f"no such checklist: {path}")
 
-    first_seen, ticked_at, section_of = analyse(path)
+    first_seen, ticked_at, section_of = analyse(paths)
     if not ticked_at:
         sys.exit(f"{path}: no ticked boxes found in history")
 
