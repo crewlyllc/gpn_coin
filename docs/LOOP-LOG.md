@@ -1,3 +1,13 @@
+## 09:02 PT release loop — ticked §6 artifact scan + `--version` (0.3.68, both boxes) [no triage]
+
+- **A0 CI:** `origin/main` HEAD `bc724d657e34` → `GET /actions/runs?head_sha=bc724d657e34a8a08f68852f74df45372d0f9599` `total_count: 0` (docs-only commit `bc724d6` touches `docs/LOOP-LOG.md` + `docs/releases/0.3.68.md`; `paths-ignore` working as designed). Nothing red, nothing queued.
+- **Boxes ticked (§6, 2):**
+  - *Scan the artifact for the change's literals*: re-downloaded the **published** assets from the mirror URL; sha256 matched the manifest exactly (`gpn-linux.tar.gz` 340,605,647 B `7be88a2e…c0f0`, `gpn-windows.zip` 248,806,119 B `42d59058…84cc4`). 237's `a reboot is pending (…) - logged only, does not defer` (`install.ps1:1399`), 238's `<RunLevel>HighestAvailable</RunLevel>` (`:2160`) / `runs at RunLevel=Highest` (`:2276`) / well-formedness warning (`:2230`) present in **both** assets' `install.ps1`. The zip copy is CRLF-converted and after `tr -d '\r'` hashes to `a322cc4f…5d4334` = `git show 1bc9488b:install.ps1`, `diff` clean ⇒ the shipped installer is the fix, not a stale one.
+  - *`--version`*: extracted `gpn-node` (107,866,744 B) → **`gpn-node 0.3.68`**, matching `Cargo.toml` and `releases.json`.
+- **Ordering defect recorded, not hidden:** the assets were cut at `published_at 2026-11-22T16:08:01Z`, so §6 ran after §7's publish. §5 attestation existed for the published digest (`cosign verify-blob` ⇒ `Verified OK`) before the cut, so the published bytes are the attested build — but the checklist order was violated and is written into the box notes.
+- Next box: §7 "Refuse to cut unless §5's attestation checks passed" (already published — tick with the ordering evidence) then `release-cut` / `network.json` / `releases.json` twice.
+- Commit: docs-only, no CI.
+
 ## 08:44 PT release loop — ticked §5 attestation end-to-end (0.3.68) [no triage]
 
 - **A0 CI:** `origin/main` HEAD `86df377aa118` → `GET /actions/runs?head_sha=86df377aa118…` `total_count: 0` (docs-only; `paths-ignore` intact). Last code SHA `1bc9488b` CI run `45024973751` success. Nothing red.
