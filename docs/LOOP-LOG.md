@@ -1,3 +1,23 @@
+## 15:05 PT 0.3.70 bundle OPENED — rows 240-247, checklist generated, box 1 next run
+- A0: main HEAD `f327ef0` — 0 CI runs for that sha (docs-only commit; `paths-ignore` working as intended,
+  so "no run" is correct, not a gap). No failure to act on.
+- B preconditions re-checked: `docs/releases/archive/0.3.69.md` has 0 unticked boxes (49 ticked),
+  `releases.json` serves `0.3.69` (published 22:19:19Z), node `:9944 system_version` ⇒ `"0.3.69"`.
+  All 0.3.69 bundled rows already COMPLETE — nothing left to mark.
+- C: bundled ALL NEW rows (none left over): **240** settlement depth 288 + `finalized_head: null`,
+  **241** GRANDPA revisit condition, **242** unsigned entry rejected as bad signature (zero-balance
+  onboarding), **243** `BadProof` → `Custom(n)` with a real meaning, **244** re-check difficulty +
+  re-mine before submit, **245** atomic release cut, **246** credential-free filename-exact
+  stranger-verify, **247** Windows installer detects a failed download.
+- `bump-version.py patch` ⇒ **0.3.70** (15 manifests, 14 lockfile entries, `network.json`), CHANGELOG
+  section written (Added/Changed/Fixed with the measured strings and the row ids).
+- `docs/releases/0.3.70.md` generated: 8 in-progress boxes, 7 blocked rows referenced.
+- Commit `3075cd4`, pushed once. Next run starts box 1 (240).
+- NOTE: `scripts/git-hooks/pre-commit` is modified in the working tree (release-lock rewrite on top of
+  the single-writer guard) — not mine, not related to this bundle, deliberately NOT committed. If CI
+  force-checks-out the runner work dir it will be lost; flagging so whoever wrote it can land it.
+- No [TRIAGE] items.
+
 ## 14:40 PT 0.3.69 PUBLISHED, DEPLOYED, PROVEN and FILED — row 239 COMPLETE
 - A0: main HEAD `870ddda`, CI run 45075851892 `in_progress` 4 min ⇒ noted, not waited on.
 - §5: asked GitHub once about the handle from the 13:31 run — `release-windows.yml` **45072558357**
