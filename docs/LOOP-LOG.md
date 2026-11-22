@@ -1,3 +1,30 @@
+## 16:20 PT — 0.3.66 §5 build pair dispatched on one SHA (both runs in flight) [no triage]
+
+- **A0**: `GET /commits/main` ⇒ `1b9ded2116dd…` (**docs-only**: checklist §4 tick + LOOP-LOG);
+  `?head_sha=1b9ded2116dd…` ⇒ `total_count: 0` before this run — expected under `ci.yml`
+  `paths-ignore`, not a fault. Last code sha `0a7f2e5b…` is already CI-green (run 44958227352).
+- **Boxes worked — §5's first four:**
+  - per-item Windows evidence: **n/a with a stated reason** — no item in this bundle (230/231/232)
+    has Windows-specific behaviour, so there is nothing per-item to assert, and no workflow was
+    dispatched to pretend otherwise. Collected the SSH baseline §9 will need instead:
+    `scripts/box1.sh` ⇒ `(Get-Process gpn-node).Path` = `C:\gpn\data\update\current\gpn-node.exe`,
+    `--version` = `gpn-node.exe 0.3.65`.
+  - `release-linux-selfhosted.yml` ⇒ run **44966033883**, dispatched 00:19:12Z.
+  - `release-windows.yml` ⇒ run **44966053558**, dispatched 00:19:28Z.
+  - same SHA: both `head_sha 1b9ded2116dd632269e2c4d62e79e348fcb1949a`, ref tag
+    `build/1b9ded2116dd` (created via API, 201, pointing at main HEAD). Runners were
+    `online busy=False` for both at dispatch time (`DESKTOP-USBUADL`, `openclawassist`).
+  - attestation ordering: `.github/workflows/release-windows.yml` sign :698 → provenance gate :720
+    (no `if:`) → publish :748; repo `private: true` ⇒ keyless cosign path, as the box requires.
+- **Not waited on.** Both builds are 40-75 min; run ended at the handle, per the dispatch rule.
+- **Still open**: item 231 `AWAITING-OWNER` (spec-53 enactment needs the offline sudo key D5; the
+  live chain still answers specVersion 52). **Re-announced [TRIAGE] — see the 231 entry in
+  `docs/NEEDS-TRIAGE.md`; it has now gone unanswered across three runs.**
+- **Next run**: read both run ids once. `success` ⇒ continue to §5's attestation-digest box (claim
+  the windows sha256 from `releases.json` / the run's package step, then
+  `cosign verify-blob` against the published bundle); `failure` ⇒ read the failing job's log, quote
+  the line, classify, fix.
+
 ## 15:1x PT — 0.3.66 §4 CI-green box ticked: run 44958227352 success on 0a7f2e5 [no triage]
 
 - **A0**: `GET /commits/main` ⇒ `454ab07f…` (docs-only: checklist §3/§4 ticks + LOOP-LOG);

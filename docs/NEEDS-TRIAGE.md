@@ -61,3 +61,7 @@ Format: `- [ ] <item id> — <question> | options: A … B … | recommend: … 
       matched to the live chain, the change is one weight annotation (no storage migration, no
       constant change), and doing it now is what makes "joining costs nothing" true on the network
       rather than just in git. | raised 2026-11-21 15:0x PT (loop run, 0.3.66 §3b item 231)
+      **RE-ANNOUNCED 2026-11-21 16:20 PT** (4th run touching 0.3.66 §5): still unanswered, and
+      0.3.66's binary half is now built and in flight — the only thing standing between "free
+      registration" in git and free registration on the network is this key decision. Recommendation
+      unchanged: **A**.
