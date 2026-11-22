@@ -1,3 +1,39 @@
+## 20:56 PT — A0 was a red CI, and the red was two of our own assertions (233-236), now fixed
+
+- **A0 read the failure, did not park it.** `origin/main` HEAD at start = `711a123` (docs commit,
+  `?head_sha=` full-40 ⇒ no run, correct under `ci.yml` paths-ignore). The code commit it describes,
+  `e9e2890`, had run **44984299924**; job list showed `Build + unit tests (linux)` **failure** at
+  2026-11-22T04:48:14Z while `fmt + clippy` (success, 04:19Z) and `secret-scan` (success, 04:20Z)
+  were green. So this run's box was the red, per the A0 rule.
+- **Exact failing lines** (job 137092055714, step 13 "Autostart installers (Windows + Linux, reversible)"):
+  `FAIL .../scripts/tests/test-update-exit-cause.ps1 contains non-ASCII bytes (breaks Windows PowerShell
+  5.1 parsing)` and `FAIL a failure dialog can be shown before the node is restarted`. Classified: **our
+  tests** — no shipped code was implicated, and steps 4-12 (node build/test, agent build/test, gpn_update
+  CLI, launcher identity, wallet provisioning, fast-sync guards, referral capture) all passed.
+- **Cause 1 — the encoding bug again.** Box 234's new test carried seven comment lines of U+2500
+  box-drawing characters. Windows PowerShell 5.1 decodes a script's bytes with the ANSI codepage, so
+  those UTF-8 bytes shift the literal; this is the exact class that cost run 44728980382 its release.
+  Fixed by replacing the runs with ASCII `-`; `grep -P '[^\x00-\x7F]'` now returns nothing (0 non-ASCII
+  bytes) and the repository's own ASCII guard passes.
+- **Cause 2 — a stale locator, not a real regression.** `test-autostart-installers.sh` found the
+  restart-after-apply by the literal `schtasks /Run /TN $NodeTask`. Box 233 moved that call inside
+  `Start-NodeAfterStop`, so the only remaining literal is the recovery fallback at `install.ps1:2082` —
+  which sits *after* the failure dialog in source order, so the assertion failed while the ordering it
+  guards was intact (`Start-NodeAfterStop 'after apply'` = 1940, `Show-UpdateFailure $apply` = 1959).
+  The locator now accepts either the literal or `Start-NodeAfterStop`; the invariant (a modal dialog
+  must never keep the node down) is unchanged and still asserted.
+- **Verified locally, not inferred**: `bash scripts/tests/test-autostart-installers.sh` ⇒
+  `all autostart/installer assertions passed`, with `ok test-update-exit-cause.ps1 is ASCII-only`,
+  `ok restarts AFTER --apply`, `ok restarts before showing a failure dialog (a modal box cannot keep the
+  node down)`; `pwsh ... test-update-exit-cause.ps1` ⇒ `RESULT: PASS (all checks)`;
+  `cargo fmt --all -- --check` exit 0 in both `gpn-node` and `gpn-agent` (fresh run this turn).
+- **Pushed once**: `88f2eea` (tests only, `711a123..88f2eea main`). CI run **44987167844** dispatched by
+  that push, `pending` at 04:55:47Z — handle written into §4's last box, not waited on.
+- **§4 "CI green on that exact SHA" stays open** with the failure quoted and the fix handle recorded;
+  the next run reads 44987167844's conclusion and ticks it. §3b is DONE (233-236 all ticked); §3 DONE.
+- No blocker, no [TRIAGE] this run — 231 is unchanged (owner-held offline sudo key) and nothing new
+  needs a decision.
+
 ## 20:45 PT — 0.3.67 §3 and three §4 boxes ticked; the CI for the code SHA is in flight, box 1 (build) is next
 
 - **A0**: `origin/main` HEAD at start = `1669436c…b090` (box 4/236 tick commit). Its run list is
