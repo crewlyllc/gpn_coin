@@ -1,3 +1,27 @@
+## 23:5x PT — §2 "a call site exists" ticked by mechanical sweep, not by a hand-picked list
+
+- **A0**: `origin/main` HEAD `d631c43` (docs-only) → `?head_sha=` full-40 ⇒ `total_count: 0`, correct
+  under `paths-ignore`. The code/release sha `88f2eea` has run **44987167844**, API-read this turn:
+  `completed success`, 2026-11-22T04:55:47Z → 06:52:37Z. CI is green on the release commit.
+- **Working tree was stale again**: local HEAD `df75123` vs `origin/main` `d631c43` (2 commits behind).
+  `git pull --ff-only` first, then worked — the SS2/SS3 ticks were already there.
+- **Box worked — §2 "A call site exists for anything new" (line 228).** Instead of listing the new
+  symbols by hand (the way election/self-heal got missed), swept mechanically:
+  - `install.ps1`: 74 `function` definitions, every name referenced outside its own definition line ⇒
+    **0 defined-but-uncalled**.
+  - `exit_report.rs` 24 non-test fns, `gpn_node.rs` 128 non-test fns ⇒ all referenced (only `#[test]`
+    handlers are unreferenced, filtered by attribute).
+  - The bundle's own symbols with their production call sites: `Start-NodeAfterStop` def 1757 →
+    calls 1927/1940/2004/2037/2053/2082; `Get-LoaderExit` 1321→1998; `Get-ExitCauseNote` 1284→1986;
+    `Get-ShutdownState` 1367→1911 (before `Stop-NodeTree` at 1921); `Show-UpdateDeferred` 1041→2017;
+    Rust `classify_shutdown_event` 1978→2026, `record_shutdown_meaning` 2072→2028/2038.
+  - note: the single bare `& schtasks /Run /TN $NodeTask` is inside the `Start-NodeAfterStop` catch
+    (documented last-resort fallback), not an uncalled path.
+- **Next run**: first unticked box is §2 "Nothing new is off by default behind a flag nobody sets."
+  then §2 "the change is in the tree you are about to release", then §4's CI box (already evidenced by
+  44987167844) and §5 (dispatch both platform builds on `88f2eea`, write handles, end the run).
+- No blocker, no [TRIAGE].
+
 ## 23:45 PT — §2 box 3 ticked: full affected suites run in full (785 lib + 34 bin rust, 8/8 script suites) [no triage]
 
 - **A0**: `origin/main` HEAD `72ad930` (docs-only ⇒ `?head_sha=72ad930…` `total_count: 0`, correct under
