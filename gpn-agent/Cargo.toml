@@ -75,6 +75,9 @@ windows-sys = { version = "0.59", features = [
     "Win32_System_Console",
     # GlobalMemoryStatusEx (total RAM advertised on the /status heartbeat, #W48)
     "Win32_System_SystemInformation",
+    # GetSystemMetrics(SM_SHUTTINGDOWN) — tell a real machine shutdown from a
+    # console teardown (#234, gpn_node console-control handler)
+    "Win32_UI_WindowsAndMessaging",
 ] }
 
 [dev-dependencies]

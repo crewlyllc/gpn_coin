@@ -1243,12 +1243,34 @@ function Stop-GpnFamily {
 
 # The node's own evidence: the newest last-exit.json record and the log tail.
 function Get-StartEvidence {
-  $exitPath = if ($env:GPN_EXIT_LOG) { $env:GPN_EXIT_LOG } else { Join-Path $env:USERPROFILE '.gpn\last-exit.json' }
   $lastExit = ''
   try { $lastExit = (@(Get-Content -LiteralPath $exitPath -Tail 1 -ErrorAction Stop) -join "`n") } catch { }
   $tail = @()
   try { $tail = @(Get-Content -LiteralPath (Join-Path $InstallDir 'node.log') -Tail 40 -ErrorAction Stop) } catch { }
   return @{ LastExit = $lastExit; Tail = $tail }
+}
+
+# #234: name the cause instead of stopping at "no process ever appeared". The
+# node's own ledger (last-exit.json) now distinguishes a console teardown from a
+# machine shutdown, so a failed start can say what actually happened.
+#
+# A record written before this update cycle began is NOT evidence about this
+# attempt, so anything older than $Since is ignored rather than quoted.
+function Get-ExitCauseNote {
+  param($Evidence, [long]$Since = 0)
+  if (-not $Evidence) { return '' }
+  if (-not $Evidence.LastExit) { return '' }
+  try {
+    $j = $Evidence.LastExit | ConvertFrom-Json
+  } catch { return '' }
+  if (-not $j -or -not $j.kind) { return '' }
+  $ts = 0
+  try { $ts = [long]$j.ts_unix } catch { $ts = 0 }
+  if ($Since -gt 0 -and $ts -gt 0 -and $ts -lt $Since) { return '' }
+  $note = 'the node recorded ' + [string]$j.kind
+  if ($j.code -ne $null -and [string]$j.code -ne '') { $note = $note + ' (exit ' + [string]$j.code + ')' }
+  if ($j.detail -and ([string]$j.detail).Trim()) { $note = $note + ': ' + ([string]$j.detail).Trim() }
+  return $note
 }
 
 # #209: positive evidence that security software stopped the build. Same rules
@@ -1672,6 +1694,9 @@ try {
 
 try {
   Write-Log 'update check started'
+  # #234: baseline for "a record written during this attempt". Seconds, so it
+  # survives a rotated or truncated ledger (unlike a byte offset).
+  $cycleStartUnix = [long]([DateTime]::UtcNow - [DateTime]'1970-01-01').TotalSeconds
 
   # Identity of this boot, for the updater's once-per-release attempt record.
   # Empty on failure, which makes the record fail open rather than block forever.
@@ -1817,6 +1842,13 @@ try {
   }
 
   $failureLine = 'signal=' + $confirm.Signal + ' after ' + $confirm.ElapsedSecs + 's - ' + $confirm.Reason
+  # #234: the confirm reason is a symptom ("no process ever appeared"); the
+  # node's own record names the cause. Quote it when this attempt produced one.
+  $causeNote = Get-ExitCauseNote (Get-StartEvidence) $cycleStartUnix
+  if ($causeNote) {
+    $failureLine = $failureLine + '; ' + $causeNote
+    Write-Log ('confirm cause: ' + $causeNote)
+  }
   Write-Log ('NOT CONFIRMED: ' + $failureLine)
   Write-Log 'rolling back to the previous version and restarting it - a box must not be left on a build that does not come up'
   $rb = Invoke-Rollback

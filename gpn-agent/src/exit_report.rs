@@ -117,6 +117,24 @@ impl ExitKind {
         code: WINDOWS_CONSOLE_CLOSE,
         slug: "console-closed",
     };
+    /// #234 — a `CTRL_SHUTDOWN_EVENT` arrived while `GetSystemMetrics(
+    /// SM_SHUTTINGDOWN)` was 0, i.e. the OS was **not** shutting down: the
+    /// console this process was attached to was destroyed under it. Our own
+    /// update stop (`taskkill /T /F`) does exactly that, so a healthy box that
+    /// was updating used to be diagnosed as "the machine is shutting down"
+    /// (5th machine, 2026-11-21). A distinct slug is the point: the log and
+    /// `last-exit.json` must name the teardown, not a shutdown.
+    pub const CONSOLE_TEARDOWN: ExitKind = ExitKind {
+        code: WINDOWS_CONSOLE_CLOSE,
+        slug: "console-teardown",
+    };
+    /// #234 — a `CTRL_SHUTDOWN_EVENT` arrived while `SM_SHUTTINGDOWN` was
+    /// non-zero: the machine really is going down. Nothing to fix; recorded so
+    /// the next reader can tell it apart from a console teardown.
+    pub const SYSTEM_SHUTDOWN: ExitKind = ExitKind {
+        code: 0,
+        slug: "system-shutdown",
+    };
     /// 75 — the launcher saw the same fatal failure 3 times in 10 minutes and
     /// stopped restarting (a restart loop is its own silent failure).
     pub const CRASH_LOOP: ExitKind = ExitKind {
@@ -153,6 +171,22 @@ pub const CONSOLE_CLOSED_DETAIL: &str = "the console this node was started from 
 /// inheriting one.
 pub const CONSOLE_CLOSED_REMEDIATION: &str =
     "start it detached (the installer does this) or run it as a scheduled task";
+
+/// #234 — what a console teardown actually was, in one sentence.
+pub const CONSOLE_TEARDOWN_DETAIL: &str =
+    "the console this node was attached to was destroyed (a console teardown, not a machine \
+     shutdown): GetSystemMetrics(SM_SHUTTINGDOWN) returned 0";
+
+/// #234 — a teardown is the stop path working as designed, so there is nothing
+/// to repair; the fix is to stop mistaking it for a fault.
+pub const CONSOLE_TEARDOWN_REMEDIATION: &str =
+    "nothing to fix: the process was stopped through its console (our own update/stop path does \
+     this). Start the node detached so it does not share a console with the updater";
+
+/// #234 — a real machine shutdown needs no repair either; it is recorded only so
+/// that it is not confused with a teardown.
+pub const SYSTEM_SHUTDOWN_REMEDIATION: &str =
+    "nothing to fix: the machine was shutting down. The node starts again on the next boot";
 
 impl std::fmt::Display for ExitKind {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -488,6 +522,8 @@ pub fn default_fix(kind: ExitKind) -> &'static str {
              the card is not disabled in Device Manager"
         }
         ExitKind::CONSOLE_CLOSED => CONSOLE_CLOSED_REMEDIATION,
+        ExitKind::CONSOLE_TEARDOWN => CONSOLE_TEARDOWN_REMEDIATION,
+        ExitKind::SYSTEM_SHUTDOWN => SYSTEM_SHUTDOWN_REMEDIATION,
         ExitKind::VC_RUNTIME => {
             "install the Microsoft Visual C++ runtime: winget install --id \
              Microsoft.VCRedist.2015+.x64 -e"

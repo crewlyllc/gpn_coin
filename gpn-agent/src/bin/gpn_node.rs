@@ -1950,15 +1950,53 @@ const NODE_EXIT_NOT_DIALABLE: i32 = 78;
 // still ends up attached to a console, it should say so and, where the OS still
 // allows it, keep running.
 
+/// What a `CTRL_SHUTDOWN_EVENT` actually means (#234).
+///
+/// Windows delivers this one control event for two unrelated situations: the
+/// machine is really going down, and the console this process is attached to was
+/// destroyed under it. Our own update stop (`taskkill /T /F` on the whole tree,
+/// #206) does the second one — so a perfectly healthy box that was updating was
+/// diagnosed as "the machine is shutting down", which is what misled the
+/// diagnosis of the 5th machine on 2026-11-21.
+///
+/// The OS answers the question itself: `GetSystemMetrics(SM_SHUTTINGDOWN)` is
+/// non-zero only while a session is actually ending. No heuristics, no guessing
+/// from our own stop having run.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ShutdownMeaning {
+    /// The OS says the session is ending. Nothing to fix.
+    MachineShutdown,
+    /// The console was torn down under us while the OS was *not* shutting down.
+    ConsoleTeardown,
+}
+
+/// Classify a `CTRL_SHUTDOWN_EVENT` from `GetSystemMetrics(SM_SHUTTINGDOWN)`.
+///
+/// Kept free of `cfg(windows)` so the rule is testable on every platform: the
+/// handler is Windows-only, the decision is not.
+#[cfg_attr(not(windows), allow(dead_code))]
+pub fn classify_shutdown_event(sm_shuttingdown: i32) -> ShutdownMeaning {
+    if sm_shuttingdown != 0 {
+        ShutdownMeaning::MachineShutdown
+    } else {
+        ShutdownMeaning::ConsoleTeardown
+    }
+}
+
 /// Windows: install a handler for console control events.
 ///
 /// - `CTRL_CLOSE_EVENT` (window closed) and `CTRL_LOGOFF_EVENT` (user logged
 ///   off): log, record a `console-closed` reason in `last-exit.json` (so the
 ///   launcher can explain the stop even if Windows terminates us anyway), and
 ///   return TRUE.
-/// - `CTRL_SHUTDOWN_EVENT`: log first, then return TRUE. Windows terminates a
-///   process for this event regardless of the return value; TRUE only stops
-///   further handlers and lets the shutdown proceed promptly.
+/// - `CTRL_SHUTDOWN_EVENT`: ask the OS which event this is (#234).
+///   `SM_SHUTTINGDOWN != 0` means the machine is going down — log it and return
+///   TRUE (Windows terminates a process for this event regardless; TRUE only
+///   stops further handlers and lets the shutdown proceed promptly).
+///   `SM_SHUTTINGDOWN == 0` means the machine is *not* shutting down and the
+///   console was destroyed under us — record `console-teardown` in
+///   `last-exit.json` and say so, instead of printing a shutdown message that
+///   misleads every future diagnosis.
 /// - Everything else (`CTRL_C_EVENT`, `CTRL_BREAK_EVENT`) is left to the normal
 ///   path: Ctrl-C must still stop the node gracefully.
 #[cfg(windows)]
@@ -1966,6 +2004,7 @@ fn install_console_control_handler() {
     use windows_sys::Win32::System::Console::{
         SetConsoleCtrlHandler, CTRL_CLOSE_EVENT, CTRL_LOGOFF_EVENT, CTRL_SHUTDOWN_EVENT,
     };
+    use windows_sys::Win32::UI::WindowsAndMessaging::{GetSystemMetrics, SM_SHUTTINGDOWN};
 
     unsafe extern "system" fn handler(event: u32) -> i32 {
         match event {
@@ -1982,10 +2021,35 @@ fn install_console_control_handler() {
                 1
             }
             CTRL_SHUTDOWN_EVENT => {
-                asciiprintln!(
-                    "[supervisor] CTRL_SHUTDOWN_EVENT: the machine is shutting down - allowing \
-                     termination"
-                );
+                // SAFETY: GetSystemMetrics is a side-effect-free query.
+                let gate = unsafe { GetSystemMetrics(SM_SHUTTINGDOWN) };
+                match classify_shutdown_event(gate) {
+                    ShutdownMeaning::MachineShutdown => {
+                        record_shutdown_meaning(
+                            exit_report::ExitKind::SYSTEM_SHUTDOWN,
+                            &format!("the machine is shutting down (SM_SHUTTINGDOWN={gate})"),
+                        );
+                        asciiprintln!(
+                            "[supervisor] CTRL_SHUTDOWN_EVENT: the machine is shutting down \
+                             (SM_SHUTTINGDOWN={gate}) - allowing termination"
+                        );
+                    }
+                    ShutdownMeaning::ConsoleTeardown => {
+                        record_shutdown_meaning(
+                            exit_report::ExitKind::CONSOLE_TEARDOWN,
+                            &format!(
+                                "{} (SM_SHUTTINGDOWN={gate}); the usual cause is our own update \
+                                 stop tearing down the console tree",
+                                exit_report::CONSOLE_TEARDOWN_DETAIL
+                            ),
+                        );
+                        asciiprintln!(
+                            "[supervisor] CTRL_SHUTDOWN_EVENT: this is a CONSOLE TEARDOWN, not a \
+                             machine shutdown (SM_SHUTTINGDOWN={gate}) - the console this node was \
+                             attached to was destroyed, most likely by our own update stop"
+                        );
+                    }
+                }
                 1
             }
             _ => 0,
@@ -2000,6 +2064,14 @@ fn install_console_control_handler() {
              window may stop this node - start it detached"
         );
     }
+}
+
+/// #234 — leave both the distinction and its cause in `last-exit.json` while the
+/// handler still has its few seconds.
+#[cfg(windows)]
+fn record_shutdown_meaning(kind: exit_report::ExitKind, detail: &str) {
+    let r = exit_report::new_report(kind, detail, exit_report::default_fix(kind));
+    let _ = exit_report::record_at(&exit_report::default_path(), &r);
 }
 
 /// Leave a reason while the console-close handler still has its few seconds.
@@ -5593,6 +5665,66 @@ mod tests {
         assert!(reports[0].remediation.contains("detached"));
         assert_eq!(reports[1].kind, "console-closed");
         assert!(reports[1].detail.contains("heartbeat"));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // ── #234: a console teardown is not a machine shutdown ───────────────────
+
+    /// The discriminator must be the OS's own answer, and both readings must be
+    /// distinct. Before #234 the handler printed "the machine is shutting down"
+    /// for every `CTRL_SHUTDOWN_EVENT`, so an update that tore down the console
+    /// tree looked like a machine shutdown (5th machine, 2026-11-21).
+    #[test]
+    fn a_console_teardown_is_not_a_machine_shutdown() {
+        assert_eq!(
+            classify_shutdown_event(0),
+            ShutdownMeaning::ConsoleTeardown,
+            "SM_SHUTTINGDOWN=0 means the OS is NOT shutting down -> teardown"
+        );
+        assert_eq!(
+            classify_shutdown_event(1),
+            ShutdownMeaning::MachineShutdown,
+            "SM_SHUTTINGDOWN=1 is a real session end"
+        );
+    }
+
+    /// Both readings must survive in `last-exit.json` as different slugs with a
+    /// readable cause, so a support engineer can tell them apart after the fact.
+    #[test]
+    fn teardown_and_shutdown_get_distinct_slugs_in_the_exit_ledger() {
+        let dir = td("exit-shutdown-meaning");
+        let path = dir.join("last-exit.json");
+
+        for (kind, detail) in [
+            (
+                exit_report::ExitKind::CONSOLE_TEARDOWN,
+                exit_report::CONSOLE_TEARDOWN_DETAIL,
+            ),
+            (
+                exit_report::ExitKind::SYSTEM_SHUTDOWN,
+                "the machine is shutting down (SM_SHUTTINGDOWN=1)",
+            ),
+        ] {
+            let r = exit_report::new_report(kind, detail, exit_report::default_fix(kind));
+            exit_report::record_at(&path, &r).expect("record the shutdown meaning");
+        }
+
+        let reports = exit_report::read_reports(&path);
+        assert_eq!(reports.len(), 2);
+        assert_eq!(reports[0].kind, "console-teardown");
+        assert_eq!(reports[1].kind, "system-shutdown");
+        assert_ne!(
+            reports[0].kind, reports[1].kind,
+            "one slug for both events is the defect"
+        );
+        assert!(
+            reports[0].detail.contains("not a machine shutdown"),
+            "the teardown record must say what it is not: {}",
+            reports[0].detail
+        );
+        assert!(reports[0].remediation.contains("nothing to fix"));
+        assert!(reports[1].remediation.contains("nothing to fix"));
 
         let _ = std::fs::remove_dir_all(&dir);
     }
