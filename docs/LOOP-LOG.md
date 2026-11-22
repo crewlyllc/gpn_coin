@@ -1,3 +1,44 @@
+## 10:30 PT release loop — queue exhausted; opened + bundled row 239 (/providers phantom rows) as 0.3.69 [no triage]
+
+**A0 CI:** `origin/main` was `aba6477` (`git fetch` + `rev-parse` agree); `GET /actions/runs?head_sha=aba6477…`
+(full 40-char) ⇒ `total_count: 0` — docs-only commit, `paths-ignore` as designed. The one live run
+`45043060386` (`c7f52f5e`) is `in_progress` since 16:18Z: jobs `secret-scan`, `fmt + clippy`,
+`Build + unit tests (linux)` all **success** (linux 17:26→17:51Z), `Build + unit tests (windows,
+self-hosted)` still running step 7 (started 18:04Z). Progressing, not stale ⇒ not cancelled, not waited on.
+
+**B — 0.3.68 verified from the machine, third run in a row:** `releases.json` ⇒ `0.3.68`
+(published 16:08:01Z), `system_version` on `:9944` ⇒ `0.3.68`, `system_health` ⇒ peers 3 / not syncing.
+`docs/releases/archive/0.3.68.md` 50 ticked / 0 unticked, `releases/INDEX.md` has the row, rows 237/238
+carry `COMPLETE 0.3.68`. Queue parse: 0 `IN-PROGRESS`, 0 `NEW` ⇒ C had an empty set.
+
+**Found instead of idling — row 239 opened with live evidence:** `GET :8092/providers` returned
+**7 rows for 5 providers**. Five carry an address; two are placeholders (`address: ""`, `peer_id: null`,
+`healthy: false`, `capabilities: []`, `latency_ms: 9999`) for `http://gpn-testnet.duckdns.org:8093/status`
+and `http://23.241.109.255:8093/status`. Both URLs belong to machines already in the registry:
+`getent hosts gpn-testnet.duckdns.org` ⇒ `142.129.54.88`, which is the `/ip4` of the live `5ENqSp5Q…`
+row, and `23.241.109.255` is box 1 (`5HgbpiTY…`). #147's *serves-everything* half is genuinely fixed
+(capabilities `[]`, not `default_capabilities()`); the double-count half is not. Cause read in the code:
+`dedupe_rows` (`gpn_scheduler.rs:1727`) keeps an address-less placeholder unless a live row's
+`known_hosts()` covers the same host, and it cannot — this host's live row has `status_url
+http://127.0.0.1:8093`, box 1's has `pull://5HgbpiTY…` with `multiaddrs: []`, so the URL host never
+matches; the `chain_addr` map built in `refresh()` (`:1772`) knows the owning account and is never
+consulted for placeholders.
+
+**C — bundled:** row 239 `NEW → IN-PROGRESS`, `bump-version.py patch` ⇒ **0.3.69** (15 manifests + 14
+lockfile entries + `network.json`), CHANGELOG section written (no TODO left), checklist generated
+(`docs/releases/0.3.69.md`, 50 boxes, 1 in-progress / 7 blocked). Commit `c81edb5` pushed once
+(`aba6477..c81edb5`). Next run works box 1.
+
+**Also checked, no action:** cadence gate live ⇒ `RESULT: PASS` (mean 12.86 s, max 51.85 s, clause 1
+0 violations, clause 2 6 gaps >3× mean / 0 unexplained, 217/218 acceptance met). Provider log healthy
+(one `job 1795366838955` served, one transient `local /status unreadable` at 08:34). `:8093` is not
+publicly forwarded (duckdns from this host and from box 1 both time out; LAN 200) — by design,
+`docs/run-a-node.md:1137` says inbound 8093 is optional and pull transport needs none, so not a defect.
+
+**Open in `docs/NEEDS-TRIAGE.md`, unchanged:** 194 (box-3 fork venue — recommend B, retire live half),
+231 (may the loop enact spec 53 — recommend A, 6 runs open), self-heal/IPv6 (recommend `/etc/gai.conf`
+IPv4 precedence; standing rule forbids the auditor editing DNS). No new decision this run.
+
 ## 09:58 PT release loop — queue exhausted; 0.3.68 re-verified; closed stale triage item 237 [TRIAGE: 194, 231, self-heal/IPv6 still open]
 
 **A0 CI:** `git ls-remote origin main` ⇒ `cd3db547f815`. `GET /actions/runs?head_sha=cd3db547…` ⇒ `total_count: 0`
