@@ -1,3 +1,33 @@
+## 10:56 PT release loop — 0.3.69 §1/§2 done: row 239 code landed (owner-aware dedupe + `unreachable_endpoints`) [no triage]
+
+**A0 CI:** `origin/main` = `6a4c3aaab37be9b208cc70905e7d45fa558a5eef` (`git fetch` + `GET /commits/main`
+agree). `GET /actions/runs?head_sha=6a4c3aa…` (full 40-char) ⇒ `total_count: 0` — that tip is the
+`docs: loop log 10:30 PT` commit, and `paths-ignore` covers `**/*.md`, so no run is correct, not a fault.
+No run to act on ⇒ straight to A.
+
+**A — 0.3.69 checklist, first unticked work: row 239.** Code half implemented, test-first:
+- test named the measured defect: box 1's live row is `pull://5HgbpiTY…` with `multiaddrs: []`, so the
+  placeholder `http://23.241.109.255:8093/status` shares no host with it and `dedupe_rows` kept both.
+- RED: `cargo test --bin gpn_scheduler a_placeholder_owned_by_a_live_account` with the owner arm
+  disabled ⇒ `assertion left == right failed: one machine, one provider row / left: 2 / right: 1`,
+  `test result: FAILED. 0 passed; 1 failed`.
+- FIX: `dedupe_rows_owned(out, chain_owner)` drops an address-less placeholder when
+  `ProviderEndpoints` says its URL belongs to an account that already has a live row; `refresh()` passes
+  the `chain_addr` map it already built. New `providers_payload()` splits identity-less rows out of
+  `providers` into top-level `unreachable_endpoints: [{url, last_error, reachable}]`, so no consumer
+  (site, dashboard, `gpn_status`) can count a down endpoint as a machine.
+- GREEN: `cargo test --bin gpn_scheduler` ⇒ `105 passed; 0 failed`; `cargo fmt --check` ⇒ clean;
+  clippy `--release --all-targets` with CI's exact allow-list + `-D warnings` ⇒ `Finished release profile`.
+- Call sites: `1720 dedupe_rows_owned(&mut out, &chain_addr)` in `refresh()`, `6165
+  providers_payload(&reg)` in the `(Method::Get, ["providers"])` arm.
+
+**Ticked:** `docs/releases/0.3.69.md` §1 (3/3) and §2 (6/6), each with pasted output. §3b row 239 box
+stays unticked on purpose: its done-when requires the live `GET :8092/providers` ⇒ 5 rows, which needs
+this build deployed (§9/§10).
+
+**Next run:** §4 push/CI (this commit is a code change, so it DOES start CI; verify green on the exact
+SHA), then §5 build both platforms — dispatch and END, no waiting.
+
 ## 10:30 PT release loop — queue exhausted; opened + bundled row 239 (/providers phantom rows) as 0.3.69 [no triage]
 
 **A0 CI:** `origin/main` was `aba6477` (`git fetch` + `rev-parse` agree); `GET /actions/runs?head_sha=aba6477…`

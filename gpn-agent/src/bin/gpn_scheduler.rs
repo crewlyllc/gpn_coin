@@ -1676,6 +1676,81 @@ fn unreachable_placeholder(status_url: String) -> Provider {
     }
 }
 
+/// One `/providers` row for a registry entry that has an identity.
+fn provider_json(p: &Provider) -> serde_json::Value {
+    json!({
+    "status_url": p.status_url, "address": p.address, "gflops": p.gflops,
+    "gflops_source": p.gflops_source,
+    "gflops_verified": p.gflops_source.eq_ignore_ascii_case("attested-idle"),
+    "models": p.models,
+    "active": p.active, "capacity": p.capacity, "latency_ms": p.latency_ms,
+    "vram_mb": (p.vram_mb > 0).then_some(p.vram_mb),
+    "ram_mb": (p.ram_mb > 0).then_some(p.ram_mb),
+    "gpu_class": p.gpu_class, "tflops": p.tflops,
+    "capabilities": p.capabilities,
+    // Row 222: the routing view is the matrix, not the flat list:
+    // a consumer can see which models serve which word on this
+    // box, and the AP's own gate is the same object.
+    "tasks": p.task_matrix.tasks,
+    "task_models": p.task_matrix.models,
+    "task_limits": p.task_matrix.limits,
+    // An endpoint that never answered has no identity and no
+    // capability claim: `capabilities` is empty and this is
+    // false, so no consumer can read it as a provider (#147).
+    "reachable": p.reachable,
+    "peer_id": p.peer_id, "multiaddrs": p.p2p_multiaddrs,
+    "p2p_port": p.p2p_port,
+    // Row 226: the referral code is NOT published here. This route is
+    // public, and "node → code" is exactly the third-party attribution
+    // the operator-only rule forbids: a scraper could rebuild the whole
+    // leaderboard from it. The code is internal state; an operator reads
+    // their own count via the signed `GET /api/referrals`, the admin
+    // reads the registry with `gpn-referrals --all` on this host.
+    "reachability": p.reachability,
+    "gateway": p.gateway,
+    "healthy": p.last_seen.is_some(),
+    // A provider the chain says cannot pay an `accept_job` fee is
+    // advertised here (an operator must be able to SEE the box and
+    // why it gets no work) but is never routed any. `null` when
+    // the account could not be read — unknown is not "funded".
+    "unfunded": p.unfunded,
+    // #W78: this box's own peer count (`null` = unknown). The
+    // directory shows "peered" from this, not from whether the
+    // node happens to peer with the access point.
+    "peers": p.peers,
+    // #201: the build the box reported about itself, so "did
+    // that unmanaged node update?" is answerable from the
+    // network. `null` = it did not say.
+    "version": p.version,
+    "git_sha": p.git_sha,
+    "source": p.source
+    })
+}
+
+/// The body of `GET /providers`.
+///
+/// Row 239: an entry with no address is an endpoint that did not answer, not a
+/// provider — publishing it inside `providers` made the directory say 7 where 5
+/// machines exist, and every consumer (site, dashboard, `gpn_status`) inherited
+/// the over-count. The operational signal is kept, in a field that cannot be
+/// mistaken for a provider.
+fn providers_payload(reg: &[Provider]) -> serde_json::Value {
+    let mut providers = Vec::new();
+    let mut unreachable = Vec::new();
+    for p in reg {
+        if p.address.is_empty() {
+            unreachable.push(json!({
+                "url": p.status_url,
+                "last_error": "did not answer /status",
+                "reachable": false
+            }));
+        } else {
+            providers.push(provider_json(p));
+        }
+    }
+    json!({ "providers": providers, "unreachable_endpoints": unreachable })
+}
+
 /// The host part of a `http://host:port/status` URL (lowercased, port stripped).
 fn url_host(url: &str) -> Option<String> {
     let rest = url.split("://").nth(1).unwrap_or(url);
@@ -1725,17 +1800,44 @@ fn known_hosts(p: &Provider) -> Vec<String> {
 ///    the same box seen twice — a live entry must never be duplicated by the
 ///    placeholder for the URL it is registered under (#147).
 fn dedupe_rows(out: &mut Vec<Provider>) {
+    dedupe_rows_owned(out, &std::collections::HashMap::new());
+}
+
+/// `dedupe_rows`, plus the chain's own answer to "whose endpoint is this?".
+///
+/// The host-based rule cannot see through a transport difference: box 1's live
+/// row is registered as `pull://5HgbpiTY…` with no multiaddrs, while the
+/// placeholder for the same machine says `http://23.241.109.255:8093/status` —
+/// no host in common. `ComputeMarketplace::ProviderEndpoints` does know the
+/// owner, so a placeholder whose URL is registered by an account that already
+/// has a live row is that row's machine, not a second provider (row 239).
+fn dedupe_rows_owned(
+    out: &mut Vec<Provider>,
+    chain_owner: &std::collections::HashMap<String, String>,
+) {
     out.sort_by_key(|p| p.latency_ms);
     let covered: std::collections::HashSet<String> = out
         .iter()
         .filter(|p| !p.address.is_empty())
         .flat_map(known_hosts)
         .collect();
+    let live_addrs: std::collections::HashSet<String> = out
+        .iter()
+        .filter(|p| !p.address.is_empty())
+        .map(|p| p.address.clone())
+        .collect();
     let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
     out.retain(|p| {
         if p.address.is_empty() {
             // No identity: keep it only as a first-class "this URL is down"
-            // row, never as a second copy of a host we already measure.
+            // row, never as a second copy of a host we already measure — or of
+            // an account the chain says owns this endpoint and that we already
+            // measure under some other URL (row 239).
+            if let Some(owner) = chain_owner.get(&p.status_url) {
+                if live_addrs.contains(owner) {
+                    return false;
+                }
+            }
             return !known_hosts(p).iter().any(|h| covered.contains(h));
         }
         seen.insert(p.address.clone())
@@ -1812,8 +1914,10 @@ fn refresh(
         }
 
         // 3. De-duplicate by provider address (a node listed both statically and
-        //    on-chain must not be counted twice). Keep the lowest-latency entry.
-        dedupe_rows(&mut out);
+        //    on-chain must not be counted twice). Keep the lowest-latency entry,
+        //    and drop a down-endpoint placeholder whose on-chain owner is a
+        //    provider we already measure (row 239: 7 rows for 5 providers).
+        dedupe_rows_owned(&mut out, &chain_addr);
 
         // 4. Merge capabilities delivered by providers' own pull polls (#46
         //    Phase 3 step 2). This is the ONLY way a NAT'd/CGNAT provider can
@@ -6058,53 +6162,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
                 (Method::Get, ["providers"]) => {
                     let reg = registry.lock().unwrap();
-                    json!({ "providers": reg.iter().map(|p| json!({
-                    "status_url": p.status_url, "address": p.address, "gflops": p.gflops,
-                    "gflops_source": p.gflops_source,
-                    "gflops_verified": p.gflops_source.eq_ignore_ascii_case("attested-idle"),
-                    "models": p.models,
-                    "active": p.active, "capacity": p.capacity, "latency_ms": p.latency_ms,
-                    "vram_mb": (p.vram_mb > 0).then_some(p.vram_mb),
-                    "ram_mb": (p.ram_mb > 0).then_some(p.ram_mb),
-                    "gpu_class": p.gpu_class, "tflops": p.tflops,
-                    "capabilities": p.capabilities,
-                    // Row 222: the routing view is the matrix, not the flat list:
-                    // a consumer can see which models serve which word on this
-                    // box, and the AP's own gate is the same object.
-                    "tasks": p.task_matrix.tasks,
-                    "task_models": p.task_matrix.models,
-                    "task_limits": p.task_matrix.limits,
-                    // An endpoint that never answered has no identity and no
-                    // capability claim: `capabilities` is empty and this is
-                    // false, so no consumer can read it as a provider (#147).
-                    "reachable": p.reachable,
-                    "peer_id": p.peer_id, "multiaddrs": p.p2p_multiaddrs,
-                    "p2p_port": p.p2p_port,
-                    // Row 226: the referral code is NOT published here. This route is
-                    // public, and "node → code" is exactly the third-party attribution
-                    // the operator-only rule forbids: a scraper could rebuild the whole
-                    // leaderboard from it. The code is internal state; an operator reads
-                    // their own count via the signed `GET /api/referrals`, the admin
-                    // reads the registry with `gpn-referrals --all` on this host.
-                    "reachability": p.reachability,
-                    "gateway": p.gateway,
-                    "healthy": p.last_seen.is_some(),
-                    // A provider the chain says cannot pay an `accept_job` fee is
-                    // advertised here (an operator must be able to SEE the box and
-                    // why it gets no work) but is never routed any. `null` when
-                    // the account could not be read — unknown is not "funded".
-                    "unfunded": p.unfunded,
-                    // #W78: this box's own peer count (`null` = unknown). The
-                    // directory shows "peered" from this, not from whether the
-                    // node happens to peer with the access point.
-                    "peers": p.peers,
-                    // #201: the build the box reported about itself, so "did
-                    // that unmanaged node update?" is answerable from the
-                    // network. `null` = it did not say.
-                    "version": p.version,
-                    "git_sha": p.git_sha,
-                    "source": p.source
-                })).collect::<Vec<_>>() })
+                    providers_payload(&reg)
                 }
                 // -- GET /api/referrals — an operator's OWN count (row 226) --------------
                 //
@@ -9795,6 +9853,70 @@ mod tests {
         dedupe_rows(&mut out4);
         assert_eq!(out4.len(), 1);
         assert_eq!(out4[0].status_url, "http://fast/status");
+    }
+
+    /// Row 239: box 1's live row is `pull://5HgbpiTY…` with no multiaddrs, so the
+    /// placeholder for `http://23.241.109.255:8093/status` shares no host with it.
+    /// The chain's `ProviderEndpoints` map knows that endpoint belongs to the same
+    /// account, and that is what must collapse the duplicate — measured live as
+    /// "7 rows for 5 providers".
+    #[test]
+    fn a_placeholder_owned_by_a_live_account_is_not_a_second_provider() {
+        let mut live = prov("5HgbpiTY", "pull://5HgbpiTY", 500, "llama3.2:1b");
+        live.p2p_multiaddrs = vec![];
+        let ph = unreachable_placeholder("http://23.241.109.255:8093/status".into());
+        let mut owners = std::collections::HashMap::new();
+        owners.insert(
+            "http://23.241.109.255:8093/status".to_string(),
+            "5HgbpiTY".to_string(),
+        );
+
+        // Without the chain's answer the host rule cannot see it (that is the bug).
+        let mut host_only = vec![ph.clone(), live.clone()];
+        dedupe_rows(&mut host_only);
+        assert_eq!(
+            host_only.len(),
+            2,
+            "host rule alone cannot attribute this URL"
+        );
+
+        let mut out = vec![ph, live];
+        dedupe_rows_owned(&mut out, &owners);
+        assert_eq!(out.len(), 1, "one machine, one provider row");
+        assert_eq!(out[0].address, "5HgbpiTY");
+
+        // An endpoint whose owner has NO live row is still reported as down.
+        let mut owners_unowned = std::collections::HashMap::new();
+        owners_unowned.insert(
+            "http://203.0.113.9:8093/status".to_string(),
+            "5NotSeen".to_string(),
+        );
+        let mut out2 = vec![unreachable_placeholder(
+            "http://203.0.113.9:8093/status".into(),
+        )];
+        dedupe_rows_owned(&mut out2, &owners_unowned);
+        assert_eq!(
+            out2.len(),
+            1,
+            "a down endpoint nobody measures stays visible"
+        );
+    }
+
+    /// Row 239: `/providers` may not publish an identity-less endpoint as a
+    /// provider. It is reported under `unreachable_endpoints` instead, where no
+    /// consumer can count it as a machine.
+    #[test]
+    fn an_unreachable_endpoint_is_not_published_inside_providers() {
+        let live = prov("5ENq", "http://127.0.0.1:8093/status", 1, "llama3.2:1b");
+        let ph = unreachable_placeholder("http://gpn-testnet.duckdns.org:8093/status".into());
+        let body = providers_payload(&[live, ph]);
+        assert_eq!(body["providers"].as_array().unwrap().len(), 1);
+        assert_eq!(body["unreachable_endpoints"].as_array().unwrap().len(), 1);
+        assert_eq!(
+            body["unreachable_endpoints"][0]["url"],
+            "http://gpn-testnet.duckdns.org:8093/status"
+        );
+        assert_eq!(body["providers"][0]["address"], "5ENq");
     }
 
     fn prov(addr: &str, url: &str, latency_ms: u64, model: &str) -> Provider {
