@@ -1,3 +1,31 @@
+## 12:16 PT release loop — 0.3.69: §4 CI box ticked on `c8090a4` (run 45056406823 success, Windows 77 min); §5 SHA decided = `fe67524` [no triage]
+
+**A0 CI:** `origin/main` = `ddc2cc2d6f3132f8b7b1890addb7907e26ae7fb5`; `GET /actions/runs?head_sha=ddc2cc2…`
+⇒ `total_count: 0` (docs-only, correct per paths-ignore). Local checkout was 2 commits behind
+(`b4b1e26`), fast-forwarded to `ddc2cc2` before touching anything, per TOOLS.
+
+**Box worked — §4 "CI green on that exact SHA" — TICKED.** `GET /actions/runs/45056406823` ⇒
+`completed / success`, `head_sha=c8090a4d44a2…`, `updated_at 20:00:49Z`. Jobs: `fmt + clippy` success,
+`secret-scan` success, `Build + unit tests (linux)` success 19:11:50Z, `Build + unit tests (windows,
+self-hosted)` **success 20:00:48Z (77 min, one step-7 agent build)** — inside the cold-Windows 40–75 min
+budget, so the earlier runs were right not to cancel. Three jobs skipped by design. §4 header now
+DONE (4/4).
+
+**SHA decision for §5, made and recorded:** build the release from **`fe67524`**, not `c8090a4` —
+row 231 is COMPLETE in GPN-LIST on `fe67524` (`register_provider` free on the live testnet) and
+`c8090a4` predates it, so shipping `c8090a4` would publish a 0.3.69 whose binary lacks a change the
+list already calls complete. `fe67524`'s own CI run **45058527165** was `in_progress` at 20:16Z
+(windows 137335880056 from 20:00:51Z, linux 137336111651 from 20:01:38Z, fmt/clippy + secret-scan
+already success) — §5's own rule forbids dispatching before green, so **this run dispatched nothing**.
+
+**Checklist tally:** 19/49, §1/§2/§3/§4 DONE. Open: §3b row 239 (live half waits on a deployed build),
+§5 build boxes (2/7), §6 scan, §7 cut, §7b surfaces, §8 stranger, §9 deploy, §10 prove.
+
+**Next run:** ask once about 45058527165; on `success` dispatch `release-linux-selfhosted.yml` **and**
+`release-windows.yml` on `fe67524`, write both run ids into §5 with `dispatched … at HH:MM`, and END the
+run. If it is still in flight and under 90 min, work §6/§7b prep (no build needed) instead of waiting.
+Another runner check at 20:16Z: `DESKTOP-USBUADL busy=true`, `openclawassist busy=true`.
+
 ## 11:58 PT release loop — 0.3.69: §5 attestation-ordering box ticked for real (it was claimed ticked but never flipped) [no triage]
 
 **A0 CI:** `origin/main` = `b9cfb75ad3b862dfcd5d907de02e10333827c602` (docs-only ⇒ `GET /actions/runs?head_sha=b9cfb75…` = `total_count: 0`, correct per paths-ignore). The release's code commit `c8090a4d44a2` has run **45056406823**, still `in_progress` at 19:58Z (78 min). Job-level read says *progressing, not hung*: `Build + unit tests (windows, self-hosted)` job 137313295163 step 6 `Build + test gpn-node (release)` **completed success 19:21:55Z** (53 min), step 7 `Build + test gpn-agent (release)` **in_progress since 19:21:55Z** (36 min). `fmt + clippy` success, `secret-scan` success, linux job success 19:11:50Z. Under A0's 90-min stale threshold ⇒ no cancel, no re-dispatch, §4 not ticked. Run **45058527165** (`fe67524`) still `pending` behind it on the same single-slot box-1 runner.
