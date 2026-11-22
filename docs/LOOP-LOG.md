@@ -1,3 +1,12 @@
+## 19:26 PT — 0.3.67 box 1 (row 233) done: replacement starts after the tree is gone, detached, and logs the parent
+
+- **A0**: `origin/main` HEAD at start = `4e7a606` ("loop log") — docs-only, `?head_sha=` full-40 ⇒ no run, correct under `ci.yml` paths-ignore. The code-touching sha `c7d33de` (0.3.67 bump) has CI run **44978223917** `in_progress` since 02:54Z; under the 90-min threshold and no build/publish box open, so not awaited.
+- **Row 233 implemented** in `install.ps1`'s `$UpdateWrapperTemplate`: new `Start-NodeAfterStop` — re-checks `Wait-NodeExit` before launching, starts through `schtasks /Run` (parent = Task Scheduler service) with a detached `Win32_Process.Create(wscript hidden-launch.vbs)` fallback, and logs `start (<why>): <how> at <time> - stopped tree gone at <time>, node pid N parent <name>`. All five start sites use it (after apply, refused stop, rollback, rollback retry, crash recovery). Before: a bare `& schtasks /Run` with no ordering record and no liveness re-check (`git show HEAD:install.ps1:1706`).
+- **Test** `scripts/tests/test-update-start-after-stop.ps1` (15 checks): PASS under pwsh 7.4.6 locally and under **Windows PowerShell 5.1 on box 1** (`RESULT: PASS (all checks)`); `test-update-confirm.ps1` still 0 failures; `install.ps1` parses with 0 errors; file remains pure ASCII.
+- **Live on box 1** (real node, not a simulation): new wrapper installed at `C:\gpn\update-and-restart.ps1` (backup `.bak-233`); `update.log` shows `19:22:14 taskkill gpn_node.exe: SUCCESS` (7 pids) → `19:22:16 start (live 233 proof): schtasks (Task Scheduler service) … node pid 41048 parent cmd.exe` → `19:24:19 CONFIRMED: 0.3.66 is running … after 124 s`. `LIVE233 RESULT: PASS` — the start is strictly after the last taskkill SUCCESS and the new node's parent is the hidden launcher, not the stopped console.
+- **Still open for 233**: the same proof from a *release-driven* apply (0.3.66 → 0.3.67). That is §5–§7 work on the 0.3.67 artifact, not something to fake now. Rows 234/235/236 remain unticked (next run starts at box 2).
+- **No blocker, no [TRIAGE] this run** — 231 is unchanged (owner-held offline sudo key) and is not re-raised as new information.
+
 ## 19:05 PT — 0.3.66 confirmed closed; 0.3.67 bundled (rows 233–236, the teardown class) [TRIAGE: 231 unchanged]
 
 - **A0**: `origin/main` = `82f8a1b8c463c379928de6f09f0a45d18cef0d59` ("list: fix the teardown class,

@@ -1590,6 +1590,74 @@ function Stop-NodeTree {
   return $false
 }
 
+# #233: the replacement must be started from a context that is NOT the one that
+# is dying, and only once the stopped tree is completely gone.
+#
+# 5th machine, 2026-11-21: an update's new node died at load with 0xC000026B
+# (`STATUS_DLL_INIT_FAILED_LOGOFF` -- "the window station is shutting down") on a
+# box that was NOT shutting down, and a start -> rollback -> fail loop followed.
+# Two properties remove that class:
+#   1. the start happens only after no gpn* process remains (checked here as well
+#      as in Stop-NodeTree: an early start inherits a dead console and fails on
+#      the ports/exe lock, and the confirm then blames the new build);
+#   2. the new tree's parent is the Task Scheduler service (schtasks /Run) or the
+#      WMI provider (Win32_Process.Create), never this wrapper's console.
+# update.log records the stop time, the start time and the new process's real
+# parent, so the ordering is checkable after the fact instead of inferred.
+function Start-NodeAfterStop {
+  param([string]$Why = 'update', [int]$WaitSeconds = 60)
+  if (-not (Wait-NodeExit $WaitSeconds)) {
+    Write-Log ('start refused (' + $Why + '): gpn processes are still present after ' + $WaitSeconds + ' s - a second tree would fight the first')
+    return $false
+  }
+  $stoppedAt = Get-Date
+  $ok = $false
+  $how = 'none'
+  & schtasks /Run /TN $NodeTask 2>&1 | Out-Null
+  $rc = $LASTEXITCODE
+  if ($rc -eq 0) {
+    $ok = $true
+    $how = 'schtasks (Task Scheduler service)'
+  } else {
+    Write-Log ('schtasks /Run exited ' + $rc + ' - falling back to a detached wscript start')
+    $hidden = Join-Path $InstallDir 'hidden-launch.vbs'
+    try {
+      $r = Invoke-CimMethod -ClassName Win32_Process -MethodName Create -Arguments @{
+        CommandLine      = "wscript.exe `"$hidden`""
+        CurrentDirectory = $InstallDir
+      } -ErrorAction Stop
+      if ($r -and [int]$r.ReturnValue -eq 0) {
+        $ok = $true
+        $how = 'Win32_Process.Create (wscript pid ' + [int]$r.ProcessId + ')'
+      } else {
+        Write-Log ('detached start refused: Win32_Process.Create returned ' + $r.ReturnValue)
+      }
+    } catch { Write-Log ('detached start failed: ' + $_.Exception.Message) }
+  }
+  if (-not $ok) {
+    Write-Log ('start FAILED (' + $Why + '): neither schtasks nor a detached wscript start launched the node')
+    return $false
+  }
+  # Record what actually happened. The new node's parent is the proof that it did
+  # not inherit this wrapper's console.
+  $nodePid = 0
+  $parent = 'unknown'
+  for ($i = 0; $i -lt 20; $i++) {
+    $p = @(Get-Process -ErrorAction SilentlyContinue | Where-Object { $_.ProcessName -match '^gpn[-_]?node' } | Select-Object -First 1)
+    if ($p.Count -gt 0 -and $p[0]) { $nodePid = $p[0].Id; break }
+    Start-Sleep -Milliseconds 500
+  }
+  if ($nodePid -gt 0) {
+    try {
+      $pi = Get-CimInstance Win32_Process -Filter ('ProcessId=' + $nodePid) -ErrorAction Stop
+      $pp = Get-CimInstance Win32_Process -Filter ('ProcessId=' + $pi.ParentProcessId) -ErrorAction Stop
+      $parent = $pp.Name
+    } catch { }
+  }
+  Write-Log ('start (' + $Why + '): ' + $how + ' at ' + (Get-Date).ToString('yyyy-MM-dd HH:mm:ss') + ' - stopped tree gone at ' + $stoppedAt.ToString('yyyy-MM-dd HH:mm:ss') + ', node pid ' + $nodePid + ' parent ' + $parent)
+  return $true
+}
+
 # One updater at a time: two instances would extract into the same versions
 # directory and race on the `current` junction. The task also sets
 # MultipleInstances=IgnoreNew, but a manual run can still overlap.
@@ -1692,7 +1760,7 @@ try {
     # install untouched instead.
     Write-Log 'REFUSING to apply: gpn processes survived the stop, so the new build could not start.'
     Write-Log 'The install is unchanged and the current build keeps running. Cause: an elevated node (-RL HIGHEST) that this non-elevated task cannot kill; reboot, or run the update from an elevated shell.'
-    & schtasks /Run /TN $NodeTask 2>&1 | Out-Null
+    [void](Start-NodeAfterStop 'restore after a refused stop' 10)
     Show-UpdateFailure 1 'stop the node for the update' 'the node could not be stopped, so nothing was installed and this build keeps running'
     exit 1
   }
@@ -1703,13 +1771,11 @@ try {
 
   # ALWAYS start the node again -- even when the update failed. Restarting
   # before any dialog also means a modal message box can never keep it down.
-  & schtasks /Run /TN $NodeTask 2>&1 | Out-Null
-  $runRc = $LASTEXITCODE
-  if ($runRc -eq 0) {
-    Write-Log 'GPN-Node started'
-  } else {
-    Write-Log ('could not start GPN-Node (schtasks /Run exited ' + $runRc + ') - start it by hand: schtasks /Run /TN GPN-Node')
-    Show-UpdateFailure $runRc 'start GPN-Node' 'the node was stopped for the update but could not be started again'
+  # #233: only after the old tree is provably gone, and detached from this
+  # wrapper's console.
+  if (-not (Start-NodeAfterStop 'after apply')) {
+    Write-Log 'could not start GPN-Node - start it by hand: schtasks /Run /TN GPN-Node'
+    Show-UpdateFailure 1 'start GPN-Node' 'the node was stopped for the update but could not be started again'
   }
 
   if ($apply -eq 3) {
@@ -1764,7 +1830,7 @@ try {
     Write-Log 'the node survived the stop for the rollback - ending the worker tree'
     if (-not (Stop-NodeTree 10)) { Write-Log 'WARNING: the node is still running; the rollback restart may not take effect' }
   }
-  & schtasks /Run /TN $NodeTask 2>&1 | Out-Null
+  [void](Start-NodeAfterStop 'rollback' 30)
   $back = Get-ExpectedVersion
   # Rollback confirmation is a plain gate: the single remediation was already
   # spent on the new build, and the rule is one per update.
@@ -1780,7 +1846,7 @@ try {
   Write-Log ('rollback did not confirm: signal=' + $script:ConfirmSignal + ' - ' + $script:ConfirmReason + '; starting ' + $back + ' once more and leaving it')
   & schtasks /End /TN $NodeTask 2>&1 | Out-Null
   [void](Stop-NodeTree 30)
-  & schtasks /Run /TN $NodeTask 2>&1 | Out-Null
+  [void](Start-NodeAfterStop 'rollback retry' 30)
   $backRes2 = Confirm-Running -Expect $back -WindowSecs $ConfirmFirstStartSecs -CeilingSecs $ConfirmCeilingSecs
   if ($backRes2) {
     Write-Log ('CONFIRMED after the second rollback start: ' + $backRes2.Version + ' is running after ' + $backRes2.ElapsedSecs + ' s')
@@ -1809,8 +1875,8 @@ catch {
   # Stop-NodeTree left the box with no node at all). Make it mechanical.
   Write-Log ('UNEXPECTED: ' + $_.Exception.Message)
   Write-Log ('at: ' + $_.InvocationInfo.PositionMessage)
-  try { & schtasks /Run /TN $NodeTask 2>&1 | Out-Null } catch { }
-  Write-Log 'GPN-Node started (recovery from an unexpected error)'
+  try { [void](Start-NodeAfterStop 'recovery from an unexpected error' 10) } catch { try { & schtasks /Run /TN $NodeTask 2>&1 | Out-Null } catch { } }
+  Write-Log 'GPN-Node start attempted (recovery from an unexpected error)'
   exit 1
 }
 finally {
