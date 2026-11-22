@@ -20,3 +20,4 @@ the checklist's last box is ticked and the version is published.
 | 0.3.58 | 2026-11-17 | 203, 204 | archive/0.3.58.md |
 | 0.3.59 | 2026-11-18 | 161 | archive/0.3.59.md |
 | 0.3.66 | 2026-11-22 | 230, 231 (source; enactment pending), 232 | archive/0.3.66.md |
+| 0.3.67 | 2026-11-22 | 233, 234, 235, 236 | archive/0.3.67.md |

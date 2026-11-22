@@ -1,3 +1,21 @@
+## 03:22 PT — 0.3.67 COMPLETE and filed; box 1 unblocked and now runs 0.3.67
+
+- **A0**: no CI run exists for main `7436384` (docs-only checklist commit, paths-ignore) — nothing awaited.
+- **§10 box 1 (the last real box) DONE — on box 1, with the released wrapper.** Two environment defects had to be
+  cleared before the change could be observed, both recorded as rows rather than worked around silently:
+  - **237 (stale PFRO)**: 118 dead `PendingFileRenameOperations` entries made #236's gate defer every cycle.
+    Exported to `C:\gpn\pfro-backup-2026-11-22.reg` (2,601,782 B) and removed. The gate then let the cycle run.
+  - **238 (NEW — elevation mismatch)**: `GPN-Update` ran `RunLevel=Limited` while `GPN-Node` runs `Highest`, so
+    the updater could not stop the node (`Access is denied - it may be elevated`), and it correctly refused:
+    `REFUSING to apply: gpn processes survived the stop` … node stayed up on 0.3.66, no rollback. Set the task
+    principal to `Highest` (`before=Limited after=Highest`).
+  - Then: `03:17:30 taskkill … SUCCESS` -> `03:17:42 installed 0.3.67` -> `03:17:44 start … parent cmd.exe`
+    -> `03:19:48 CONFIRMED: 0.3.67 is running … after 123 s`. `C:\gpn\data\update\current\gpn-node.exe
+    --version` = `gpn-node.exe 0.3.67`.
+- **Rows 233/234/235/236 -> COMPLETE 0.3.67** with that evidence; 237 stays NEW (code half: narrow the gate).
+- **Filed**: checklist moved to `docs/releases/archive/0.3.67.md`, `INDEX.md` row added, §0b boxes ticked.
+- **0.3.67 is now finished**: every box ticked, published, and reported running by a node on each platform.
+
 ## 03:09 PT — 0.3.67 §7–§10b worked: versions live everywhere, node self-updated, and box 1 found blocking itself [TRIAGE]
 
 - **A0**: CI run 45013609816 on `cf42692` was `in_progress` (started 10:40Z) — noted, not awaited.
