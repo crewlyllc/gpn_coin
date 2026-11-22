@@ -1,3 +1,17 @@
+## 06:12 PT — 0.3.68 §4: four lanes green, Windows job alive and progressing (rustc at 6:12 AM on box 1); no box ticked [no triage]
+
+- **A0**: `origin/main` HEAD `0490257` (docs-only) ⇒ no run expected. Release SHA `1bc9488bb7fc` run **45024973751**
+  still `in_progress` (created 12:57:57Z, 74 min at read time), `updated_at 13:18:26Z`.
+- **Lanes**: `fmt + clippy` success, `secret-scan` success, `Build + unit tests (linux)` success (26/26 steps incl. step 7
+  `Test gpn-agent (non-GPU)`), GPU/macOS/audit skipped by design. **Windows `137220923278`**: step 6 `Build + test gpn-node (release)`
+  **success**, now at step 7 `Build + test gpn-agent (release)`.
+- **Liveness proven, not assumed** (read-only SSH to box 1, safe during a build job): `cargo` running since 05:55:16,
+  two `rustc` processes started 06:11:49 and 06:12:01, runner `DESKTOP-USBUADL` `online busy=True`. The job is compiling, not hung.
+- **No box ticked** — the first unticked box is §4 "CI green on that exact SHA: … **Windows build**"; 4 of 5 concluded.
+  Run age 74 min < 90-min stale threshold: nothing cancelled, nothing re-dispatched, per the dispatch rule nothing waited on.
+- **Next run**: read 45024973751 once. `success` ⇒ tick §4, then dispatch `release-linux-selfhosted.yml` + `release-windows.yml`
+  for `1bc9488`, write run ids into §5 boxes, end the run. `failure` ⇒ quote the Windows failing step's line, classify, fix.
+
 ## 05:51 PT — 0.3.68 §4: linux CI green on 1bc9488 (the prune-timer failure does not reproduce); Windows job still building [no triage]
 
 - **A0**: `origin/main` HEAD `52a36c5e` (docs-only) ⇒ `head_sha` query `total_count: 0` — `paths-ignore` intact.
