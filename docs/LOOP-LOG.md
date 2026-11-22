@@ -1,3 +1,27 @@
+## 00:3x PT — flag box + §4 CI-green ticked; release sha 88f2eea is green on all three required platforms
+
+- **A0**: `origin/main` HEAD `195022dd` (docs-only) → full-40 `?head_sha=` ⇒ `total_count: 0`, correct
+  under `paths-ignore`. No failure to act on.
+- **Box 1 — §2 "Nothing new is off by default behind a flag nobody sets" (line 229).** Swept, not eyeballed:
+  - crate has **no `[features]` table** — the 8 `features` hits in `gpn-agent/Cargo.toml` are all
+    dependency features (`tokio` full, `serde` derive, `libp2p` tcp/noise/yamux/dns/tokio/websocket, …);
+  - `grep -c 'cfg(feature'` in `gpn_node.rs` / `exit_report.rs` ⇒ `0` / `0`; 0 `AtomicBool`/`static bool`
+    gates on added lines;
+  - `install.ps1` diff vs pre-change `78684d8`: **0** added `$env:` reads, **0** added `[switch]` params.
+    The only new params are `Get-ShutdownState`'s injectable probes (`:1368`, default `$null`) — and
+    `$null` means the *real* probe runs (`:1372-1382` `GetSystemMetrics(0x2000)`, `:1384-1398`
+    PendingFileRenameOperations / CBS RebootPending / WU RebootRequired);
+  - the call is straight-line: `$sd = Get-ShutdownState` at `:1911`, before `Stop-NodeTree 60` `:1921`;
+    Rust arm `CTRL_SHUTDOWN_EVENT => { let gate = …GetSystemMetrics(SM_SHUTTINGDOWN); match
+    classify_shutdown_event(gate) }` at `gpn_node.rs:2024-2045` with nothing in front of it.
+- **Box 2 — §4 "CI green on that exact SHA".** Run **44987167844** on `88f2eea` ⇒ `completed success`
+  (04:55:47Z → 06:52:37Z). Per job: secret-scan success; fmt+clippy success; linux success (step 13
+  `Autostart installers` green — the assertion `88f2eea` fixed); **Windows self-hosted success**
+  (05:34:50Z → 06:52:37Z, 77.8 min). macOS/GPU-testnet/audit `skipped` as on every push.
+- **Release sha is `88f2eea`.** Checklist commit `d799410` is docs-only ⇒ no run expected.
+- **Next run**: first unticked box is §2 "The change is in the tree you are about to release", then §5
+  (Windows final build via runner + linux build), §6, §7. Nothing needs Jeremy; no [TRIAGE].
+
 ## 23:5x PT — §2 "a call site exists" ticked by mechanical sweep, not by a hand-picked list
 
 - **A0**: `origin/main` HEAD `d631c43` (docs-only) → `?head_sha=` full-40 ⇒ `total_count: 0`, correct
