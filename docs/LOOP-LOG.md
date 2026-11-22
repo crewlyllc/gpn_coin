@@ -1,3 +1,19 @@
+## 05:31 PT — 0.3.68 §4 still waiting on a conclusion; 1bc9488's CI half is green, both build jobs in flight [no triage]
+
+- **A0**: `origin/main` HEAD `a07ee2f` (docs-only) ⇒ `head_sha` query `total_count: 0` — `paths-ignore` intact.
+  Release SHA `1bc9488bb7fc` run **45024973751**: `in_progress`, created 12:57:57Z (~34 min at read time). Not waited on.
+- **Job-level read at 13:31Z**: `fmt + clippy` **success** (`137220923136`, 13:16:37→13:17:06);
+  `secret-scan` **success** (`137220923314`, 13:17:07→13:17:18);
+  `Build + unit tests (windows, self-hosted)` `137220923278` in_progress;
+  `Build + unit tests (linux)` `137221062985` in_progress since 13:18:25.
+  Runners API: `DESKTOP-USBUADL busy=true`, `openclawassist busy=true` — single-slot contention, not a fault.
+- **No box ticked this run, deliberately.** The first unticked box is §4 "CI green on that exact SHA",
+  which can only be answered by that run's conclusion; §5–§7 are ordered behind it (the release build must
+  follow green CI on the same SHA), so dispatching a release now would violate §0 sequencing. Run is 34 min
+  old, well under the 90-minute stale-release threshold — nothing to cancel, nothing to re-dispatch.
+- **Next run**: read 45024973751's conclusion. If `failure` — quote the failing step's own error line and
+  classify (code / test / environment / upstream) before touching any box.
+
 ## 05:12 PT — 0.3.68 §5 SSH-evidence box ticked; 45018066004's red explained (prune timer), its successor still queued [no triage]
 
 - **A0**: main HEAD `180e227` (docs-only) ⇒ `total_count: 0` runs, `paths-ignore` intact.
