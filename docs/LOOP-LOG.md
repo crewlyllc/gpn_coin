@@ -1,3 +1,30 @@
+## 16:41 PT — 0.3.66 §5: linux build success + published; linux half of §6 verified, windows run still in flight [no triage]
+
+- **A0**: `origin/main` = `2c28424c…` (docs-only: the §5 dispatch commit); `?head_sha=2c28424c…` ⇒
+  `total_count: 0` — expected under `ci.yml` `paths-ignore`. The code sha in flight, `1b9ded2116dd…`,
+  is already CI-green (run 44958227352). Checkout was detached at `1b9ded2`, one docs commit behind ⇒
+  reset to `origin/main` before touching anything.
+- **Asked once, did not wait**: linux run **44966033883** ⇒ `completed / success` (00:19:12Z →
+  00:34:41Z, 15.5 min; every step green incl. `publish GitHub Release (rolling 'linux-latest')`).
+  Windows run **44966053558** ⇒ `in_progress` at 00:38Z, 19 min in. Per the dispatch rule that is a
+  handle, not a wait, so the run ends here.
+- **Work done while windows builds — the linux half of §6, from the published bytes.** Downloaded the
+  real asset (777346783, 340,399,822 B, sha256 `547a1d21…` = API digest, uploaded 00:31:52Z) and
+  read its binaries: `gpn_node 0.3.66 (spec 53, 1b9ded2)`, `gpn-node 0.3.66`; strings show item 232
+  positives present (`Registering costs nothing on any path` ×1,
+  `register_provider_entry_unsigned` ×8) and the false language absent (`paid registration`, `paid
+  path`, `deposit GPN`, `fund the wallet` all ×0); item 230's renderer present in `gpn_update`
+  (`first output:`, `node log:`, `child: `). §6 boxes left **unticked** and marked PARTIAL — the
+  boxes cover both platforms and the windows zip does not exist yet.
+- **Gotcha recorded in the checklist**: the bundle's `gpn-node` is the *chain* node; the agent
+  onboarding binary is `gpn_node` (underscore). Scanning `gpn-node` for the new strings reads as a
+  false "missing" — it cost a detour this run.
+- **Still open**: item 231 `AWAITING-OWNER` (spec-53 enactment needs offline sudo key D5; live chain
+  answers specVersion 52) — see `docs/NEEDS-TRIAGE.md`, unanswered across runs.
+- **Next run**: read run 44966053558 once. Green ⇒ cosign-verify the published zip, tick §5's
+  attestation + verifier boxes, finish §6 for windows, then §7 `release-cut.sh --timeout 300`
+  (dispatch, write the handle, end). Red ⇒ quote the failing step and fix the cause.
+
 ## 16:20 PT — 0.3.66 §5 build pair dispatched on one SHA (both runs in flight) [no triage]
 
 - **A0**: `GET /commits/main` ⇒ `1b9ded2116dd…` (**docs-only**: checklist §4 tick + LOOP-LOG);
