@@ -1,3 +1,19 @@
+## 00:40 PT — §2 last box ticked ('the change is in the tree about to be released'); §2 closed 6/6
+
+- **A0**: `origin/main` HEAD `401ad10e069b9bd27148ef1e57a9fe54c17374eb` (LOOP-LOG docs commit) →
+  `?head_sha=401ad10…` ⇒ `total_count: 0` — correct under `paths-ignore`. Nothing to act on.
+- **Box — §2 "The change is in the tree you are about to release" (was the only unticked box in §2).**
+  - `git log --oneline -3 -- install.ps1` ⇒ `e9e2890` (236), `78684d8` (235), `74a17a6` (234);
+    `gpn_node.rs`/`exit_report.rs` top commit `74a17a6`.
+  - Symbols present in HEAD itself (not just history): `install.ps1` 15 hits over
+    `Start-NodeAfterStop|Get-LoaderExit|Get-ExitCauseNote|Get-ShutdownState|Show-UpdateDeferred`;
+    `gpn_node.rs` 7 hits `classify_shutdown_event|record_shutdown_meaning`; `exit_report.rs`
+    `:129 slug: "console-teardown"`, `:136 slug: "system-shutdown"`.
+  - `git diff --stat 88f2eea HEAD -- install.ps1 gpn-agent/src gpn-agent/Cargo.toml scripts/` ⇒ **empty**;
+    `git merge-base --is-ancestor 88f2eea HEAD` ⇒ true. The tree about to be released is byte-identical
+    in code to `88f2eea`, the sha CI run 44987167844 built green.
+- **Next run**: §5 box 1 (release-linux-selfhosted.yml) — dispatch and END the run per the dispatch rule.
+
 ## 00:3x PT — flag box + §4 CI-green ticked; release sha 88f2eea is green on all three required platforms
 
 - **A0**: `origin/main` HEAD `195022dd` (docs-only) → full-40 `?head_sha=` ⇒ `total_count: 0`, correct
