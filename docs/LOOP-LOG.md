@@ -1,3 +1,30 @@
+## 18:20 PT — 0.3.66 closed at 51/51; the only open item is 231's on-chain enactment (owner key) [TRIAGE]
+
+- **A0**: `origin/main` = `2ffa0100d96e91e81b28cee955f7b32c951adfc9` ("0.3.66: record live site
+  confirmation and the CI run handle", docs-only) ⇒ `?head_sha=` for it returns `total_count: 0`,
+  correct under `ci.yml` paths-ignore. The *code-touching* sha from last run, `42b032a2…`
+  (`website/download.html`, not paths-ignored), has CI run **44973607092** — `pending` since
+  01:54:22Z (~22 min). Not awaited: under the 90-minute threshold and no build/publish box is open.
+- **State audit before working**: `gpn-agent/Cargo.toml 0.3.66`; `https://gpncoin.ai/releases.json`
+  ⇒ `version 0.3.66, published_at 2026-11-22T01:41:06Z`; the running node answers
+  `POST :9944 system_version` ⇒ **`0.3.66`**; `system_health` ⇒ 3 peers, `isSyncing: false`, head
+  `0x539eb` (342,507). So rule B's three gates for 0.3.66 are met for the rows already closed
+  (230, 232 COMPLETE in `42b032a`).
+- **GPN-LIST has no `NEW` and no `TODO` rows**: the single IN-PROGRESS row is **231**
+  (`register_provider` fee-free). Rule C therefore does not apply — nothing new is bundled this run.
+- **Box worked — 0.3.66 §3b box 231**, ticked `blocked — <reason>` so the release is not held hostage:
+  the staged artifact is real and is the *only* thing left — `wasm/gpn_runtime_spec53_free_registration
+  .compact.compressed.wasm`, 534,023 B, `sha256 d5c1b69a32f3735da4e7e62384bac154fdfa191dbfdfd7f1d41bd
+  33546a3419f`; live `state_getRuntimeVersion` at 18:18 PT still answers **`specVersion 52`**, so the
+  chain itself confirms the fix is not applied. `gpn-node/scripts/build-spec53-wasm.sh` says in its own
+  header that it does not apply the artifact and "the testnet sudo key is Jeremy's offline key, so this
+  machine cannot enact it" — a capability limit, not a missing tool I can install. Checklist is now
+  **51/51**.
+- **Row 231 marked `AWAITING-OWNER`** in its evidence column with the same facts, pointing at
+  `docs/NEEDS-TRIAGE.md` §231 (question, options A/B/C, recommendation A ≈ 2 min with key D5). This is
+  the third run it has been raised; it is the only thing standing between 231 and COMPLETE.
+- **Nothing else was fixed-and-parked**: the second open triage item (self-heal IPv6 fetch failure,
+  needs `/etc/gai.conf` — DNS change the standing rules reserve for the owner) is untouched by design.
 ## 17:56 PT — 0.3.66 RELEASED: cut, published, self-updated, observed [TRIAGE: 231 enactment still owner-gated]
 
 - **A0**: `origin/main` HEAD `06f4cb6` (docs-only) ⇒ `?head_sha=` gives `total_runs: 0`, correct under
