@@ -1,3 +1,20 @@
+## 02:47 PT — 0.3.67 PUBLISHED: the cut finished in ~4 min and §7 box 2 is ticked
+
+- **§7 box 2 ticked — `release-cut.sh --timeout 300` exit 0, `released 0.3.67`.** Timeline from
+  `/tmp/cut67.log`: version 0.3.67 from the bundle stamp; commit `88f2eea74788…`, `CI green for
+  88f2eea`; 3b gate `OK: 0.3.67 artifacts verified on linux, windows — 5 marker(s) present in
+  each`; mirror digests verified for the linux tarball (`c83b0915…`), the windows zip (`19065d12…`)
+  **and** the provenance bundle (`8776e50d…`); signed manifest `version=0.3.67 min_version=0.1.0`,
+  `sha256 of releases.json: a5b1c357…bd2f`, key `78015fab541c9a62…`; publish commit `cf42692`
+  (`7b78111..cf42692`); live poll `live manifest is 0.3.67`; anonymous re-download matched the
+  signed manifest for both platforms; `release-lock: released (0.3.67)`.
+- Independent check after the fact (not the script's own word): `curl https://gpncoin.ai/releases.json`
+  ⇒ `live version 0.3.67`; `~/.gpn/release-in-flight` is gone, so no stale lock is left behind.
+- The cut warned that `scripts/git-hooks/pre-commit` is dirty in the working tree (another session)
+  and excluded it correctly — left untouched, not mine.
+- Next run: §7 box 3 (`network.json` `latest_version` = 0.3.67), box 4 (manifest served twice 10 s
+  apart), then §7b surfaces (download.html, docs/run-a-node, seeds.json, GitHub releases).
+
 ## 02:42 PT — §7 box 1 ticked (attestation gate by hand) and the cut dispatched, not awaited
 
 - **A0**: `origin/main` HEAD `7a43e60235fa4798c7951e63d510340b0b0d0342` == local HEAD at start.
