@@ -226,6 +226,12 @@ fn route(
 
     match path {
         "/api/chain" => json_response(&handle.block_on(chain_summary(ex)).to_string(), 200),
+        // #240: the explorer is where a stranger first meets `finalized`. Answer
+        // it truthfully — depth, not a genesis hash dressed up as finality.
+        "/api/finality" => json_response(
+            &gpn_agent::network_directory::finality_doc().to_string(),
+            200,
+        ),
         "/api/feed" => json_response(&handle.block_on(chain_summary(ex)).to_string(), 200),
         "/api/effective-feed" => {
             // The authoritative on-chain Phase-C bond-weighted median alone.

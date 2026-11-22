@@ -2302,7 +2302,14 @@ owner-only permissions. Put the token in <code>GPN_ASSIGN_TOKEN</code> (or the s
 <code>EnvironmentFile</code>), and keep the config file <code>chmod 600</code>.</p>
 </blockquote>
 <h3 id="sync-robustness-defaults-why-your-node-wont-wedge">Sync-robustness defaults (why your node won't wedge)</h3>
-<p>GPN has <strong>no finality gadget</strong> — the finalized head stays at <code>#0</code>. That breaks
+<p>GPN has <strong>no finality gadget</strong> — the finalized head stays at <code>#0</code>, i.e.
+<code>chain_getFinalizedHead</code> returns genesis; use depth. Settlement is <strong>288 blocks</strong>
+(≈72 min at 15 s): a shallower block can still be reorged. Check depth, not finality —</p>
+<pre><code>curl -s http://127.0.0.1:9944 -H 'content-type: application/json' \
+  -d '{"jsonrpc":"2.0","id":1,"method":"chain_getHeader","params":[]}' \
+| python3 -c 'import json,sys; h=int(json.load(sys.stdin)["result"]["number"],16); n=346372; print(h, "settled" if h-n &gt;= 288 else "not settled ("+str(288-(h-n))+" to go)")'
+GET https://gpncoin.ai/api/finality   # {"mode":"depth","confirmations":288,"finalized_head":null}</code></pre>
+<p>That breaks
 both of the things a node normally leans on to sync, so <code>gpn_node</code> bakes in the
 one reliable combination (<strong>on by default, overridable via <code>GPN_NODE_ARGS</code> /
 <code>node_args</code></strong>):</p>

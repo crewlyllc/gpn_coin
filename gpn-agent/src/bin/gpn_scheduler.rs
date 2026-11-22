@@ -6174,6 +6174,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 // use this route to probe whether a code exists. The answer carries a
                 // count and timestamps only — never an address. The whole registry is
                 // available to the admin only as `gpn-referrals --all` on this host.
+                // GET /api/finality — settlement as DEPTH (#240) -----------------
+                //
+                // This chain has no finality gadget, so `chain_getFinalizedHead`
+                // is genesis forever. A caller asking "is this block final?" gets
+                // a truthful answer — "there is no final head; settle at 288
+                // blocks" — instead of a genesis hash dressed up as finality.
+                // Static by design: it must answer even when the chain RPC is
+                // down, because it describes the protocol, not the tip.
+                (Method::Get, ["api", "finality"]) => gpn_agent::network_directory::finality_doc(),
                 (Method::Get, ["api", "referrals"]) => {
                     let code = query_param(&url, "code")
                         .map(pct_decode)

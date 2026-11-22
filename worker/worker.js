@@ -1305,6 +1305,7 @@ async function rateLimit(env, ip, bucket, max, windowSeconds) {
  *   GET  /api/mode               -> GET  /mode
  *   GET  /api/providers          -> GET  /providers
  *   GET  /api/network            -> GET  /network
+ *   GET  /api/finality          -> GET  /api/finality (settlement: mode=depth, 288 blocks)
  *   GET  /api/v1/models          -> GET  /v1/models
  *   GET  /api/jobs/<id>          -> GET  /job/<id>
  *   POST /api/v1/chat/completions -> POST /v1/chat/completions
@@ -1358,6 +1359,12 @@ async function handleApi(request, env, path) {
   } else if (route === "/providers") {
     upstream = "/providers";
     cache = "public, max-age=30";
+  } else if (route === "/finality") {
+    // Settlement is depth, not finality (#240). A protocol fact, not a live
+    // reading: cache it like a document and answer it even while the AP's
+    // chain RPC is down.
+    upstream = "/api/finality";
+    cache = "public, max-age=300";
   } else if (route === "/v1/models" || route === "/models") {
     upstream = "/v1/models";
     cache = "public, max-age=60";

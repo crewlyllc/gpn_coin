@@ -1349,6 +1349,32 @@ test("GET /api/network proxies the AP's live document unchanged", async () => {
   assert.equal(seen[0].path, "/network");
 });
 
+test("GET /api/finality proxies the AP's settlement document (null finalized head)", async () => {
+  // #240: the public surface must answer "depth, not finality" — a caller that
+  // asks for finality gets null, never a genesis hash.
+  const seen = [];
+  const doc = {
+    mode: "depth",
+    confirmations: 288,
+    settlement_depth: 288,
+    settlement_time_secs: 4320,
+    settlement_time_human: "≈72 min at 15 s",
+    finalized_head: null,
+    note: "this chain has no finality gadget: chain_getFinalizedHead returns genesis; use depth",
+  };
+  const env = { __test_ap_transport: stubAp(jsonReply(200, doc), seen) };
+  const res = await worker.fetch(
+    new Request("https://gpncoin.ai/api/finality", { headers: { "cf-connecting-ip": "203.0.113.61" } }),
+    env,
+    { waitUntil() {} },
+  );
+  assert.equal(res.status, 200);
+  assert.deepEqual(await res.json(), doc);
+  assert.equal(seen.length, 1);
+  assert.equal(seen[0].method, "GET");
+  assert.equal(seen[0].path, "/api/finality");
+});
+
 test("GET /api/network is a JSON 502 (never HTML) when the AP is unreachable", async () => {
   const res = await worker.fetch(
     new Request("https://gpncoin.ai/api/network"),

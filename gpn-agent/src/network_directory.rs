@@ -19,6 +19,51 @@
 
 use serde_json::{json, Value};
 
+// ---- settlement depth (#240) -----------------------------------------------
+//
+// This chain has no finality gadget. `chain_getFinalizedHead` answers with the
+// genesis hash forever, so "finalized" is not a fact about a payment — it is a
+// fact about the absence of GRANDPA. Publishing it unqualified is the same
+// failure class as every other "publish a fallback as a fact" bug here.
+//
+// The contract we do publish is DEPTH: a block is settled at
+// `settlement_depth` confirmations, and a shallower block can still be reorged
+// (`MAX_REORG_DEPTH` in the node bounds exactly that). Design:
+// `docs/design-settlement-finality.md`.
+
+/// Confirmations after which a block is treated as settled.
+pub const SETTLEMENT_DEPTH_BLOCKS: u64 = 288;
+/// The testnet block interval the human-readable equivalent is derived from.
+pub const BLOCK_TIME_SECS: u64 = 15;
+/// The same depth in seconds.
+pub const SETTLEMENT_DEPTH_SECS: u64 = SETTLEMENT_DEPTH_BLOCKS * BLOCK_TIME_SECS;
+
+/// `≈72 min at 15 s` — derived from the constants so it cannot drift.
+pub fn settlement_depth_human() -> String {
+    format!(
+        "≈{} min at {} s",
+        SETTLEMENT_DEPTH_SECS / 60,
+        BLOCK_TIME_SECS
+    )
+}
+
+/// The body of `GET /api/finality`, and the `finality` field of `/network`.
+///
+/// `finalized_head` is **null**, never a hash: answering with the genesis hash
+/// would be technically true and practically a lie.
+pub fn finality_doc() -> Value {
+    json!({
+        "mode": "depth",
+        "confirmations": SETTLEMENT_DEPTH_BLOCKS,
+        "settlement_depth": SETTLEMENT_DEPTH_BLOCKS,
+        "settlement_time_secs": SETTLEMENT_DEPTH_SECS,
+        "settlement_time_human": settlement_depth_human(),
+        "finalized_head": Value::Null,
+        "note": "this chain has no finality gadget: chain_getFinalizedHead returns genesis; use depth",
+        "settled_rule": "settled when head - block >= settlement_depth; a shallower block can still be reorged",
+    })
+}
+
 /// One AP-registered provider, flattened for publication.
 #[derive(Debug, Clone, Default)]
 pub struct DirProvider {
@@ -625,6 +670,14 @@ pub fn build_full(
             "chain_only_now": chain_only_count,
         },
         "stale": stale,
+        // #240: settlement is depth, and the finalized head is null. Both are
+        // published on every directory response so a caller cannot get the
+        // chain's optimistic "finalized" without the qualification.
+        "settlement_depth": SETTLEMENT_DEPTH_BLOCKS,
+        "settlement_time_secs": SETTLEMENT_DEPTH_SECS,
+        "settlement_time_human": settlement_depth_human(),
+        "finalized_head": Value::Null,
+        "finality": finality_doc(),
     });
     if let Some(e) = onchain_error {
         doc["chain_registered_error"] = json!(e);
@@ -1230,5 +1283,50 @@ mod tests {
         );
         // The chain placeholders are listed but never counted as providers.
         assert_eq!(doc["counts"]["chain_only_now"], 1);
+    }
+
+    /// #240: settlement is DEPTH, not finality. This chain has no finality
+    /// gadget, so `chain_getFinalizedHead` is genesis forever. The directory
+    /// must publish the depth and a null finalized head — never the genesis
+    /// hash dressed up as "final".
+    #[test]
+    fn network_document_publishes_settlement_depth_and_no_fake_finality() {
+        let doc = build_full(
+            "2026-11-22T00:00:00Z",
+            Some(SELF),
+            Ok(vec![BOX1.into()]),
+            &[provider(BOX1, true, "http://127.0.0.1:8093")],
+            &seeds_typical(),
+            Some(Ok(vec!["5Addr".into()])),
+            30333,
+        );
+        assert_eq!(
+            doc["settlement_depth"], 288,
+            "settlement_depth must be published: {doc}"
+        );
+        assert_eq!(doc["settlement_time_secs"], 288 * 15);
+        assert_eq!(doc["settlement_time_human"], "≈72 min at 15 s");
+        assert!(
+            doc["finalized_head"].is_null(),
+            "finalized_head must be null, never a block hash: {doc}"
+        );
+        assert_eq!(doc["finality"]["mode"], "depth", "{doc}");
+        assert_eq!(doc["finality"]["confirmations"], 288, "{doc}");
+    }
+
+    /// The standalone document answers a caller who wants a boolean, and it
+    /// answers honestly: there is no final head to give them.
+    #[test]
+    fn finality_document_is_depth_not_a_boolean() {
+        let f = finality_doc();
+        assert_eq!(f["mode"], "depth");
+        assert_eq!(f["confirmations"], 288);
+        assert_eq!(f["settlement_depth"], 288);
+        assert!(f["finalized_head"].is_null(), "{f}");
+        assert!(
+            f["note"].as_str().unwrap().contains("no finality gadget"),
+            "{f}"
+        );
+        assert_eq!(f["settlement_time_human"], "≈72 min at 15 s");
     }
 }

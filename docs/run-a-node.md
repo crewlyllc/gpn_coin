@@ -1998,9 +1998,35 @@ the next runtime upgrade (`shared/artifacts/project7/staged/gflops-floor-v1.md`)
 > `GPN_ASSIGN_TOKEN` (or the service `EnvironmentFile`); keep the config file
 > `chmod 600`. Signed pulls need no secret at all — just the wallet key.
 
+### Settlement — depth, not finality
+
+GPN has **no finality gadget**: `chain_getFinalizedHead` returns genesis; use depth.
+`chain_getFinalizedHead` is the genesis block forever, so any tool that waits for
+"final" waits for nothing. What settles a payment is **depth**:
+
+- **288 blocks** (≈72 min at 15 s) — published as `settlement_depth` in
+  `network.json` and `GET /api/network`.
+- `GET /api/finality` → `{"mode":"depth","confirmations":288,
+  "settlement_time_human":"≈72 min at 15 s","finalized_head":null,
+  "note":"this chain has no finality gadget …"}`. `finalized_head` is **null**,
+  never a block hash.
+- A block shallower than 288 can still be reorged (`MAX_REORG_DEPTH` = 288 in
+  the node). Check depth, not a boolean:
+
+```sh
+# is block 346372 settled? (settled when head - block >= 288)
+curl -s http://127.0.0.1:9944 -H 'content-type: application/json' \
+  -d '{"jsonrpc":"2.0","id":1,"method":"chain_getHeader","params":[]}' \
+| python3 -c 'import json,sys; h=int(json.load(sys.stdin)["result"]["number"],16); n=346372; print(h, "settled" if h-n >= 288 else "not settled ("+str(288-(h-n))+" blocks to go)")'
+```
+
+A finality gadget is only adopted when independent operators exist — the exact
+conditions are in `docs/design-settlement-finality.md` §4.
+
 ### Sync-robustness defaults (why your node won't wedge)
 
-GPN has **no finality gadget** — the finalized head stays at `#0`. That breaks
+GPN has **no finality gadget** — the finalized head stays at `#0` (i.e.
+`chain_getFinalizedHead` returns genesis; use depth, 288 blocks). That breaks
 both of the things a node normally leans on to sync, so `gpn_node` bakes in the
 one reliable combination (**on by default, overridable via `GPN_NODE_ARGS` /
 `node_args`**):

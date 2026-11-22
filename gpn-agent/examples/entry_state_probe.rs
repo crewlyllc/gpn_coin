@@ -63,12 +63,27 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .unwrap_or_else(|| "ws://127.0.0.1:9944".to_string());
     let client = signer::connect(&endpoint).await?;
     let head: subxt::utils::H256 = async {
-        let body = serde_json::json!({"id":1,"jsonrpc":"2.0","method":"chain_getBlockHash","params":[]});
-        let http = endpoint.replacen("ws://", "http://", 1).replacen("wss://", "https://", 1);
-        let v: serde_json::Value = reqwest::Client::new().post(&http).json(&body).send().await.ok()?.json().await.ok()?;
+        let body =
+            serde_json::json!({"id":1,"jsonrpc":"2.0","method":"chain_getBlockHash","params":[]});
+        let http = endpoint
+            .replacen("ws://", "http://", 1)
+            .replacen("wss://", "https://", 1);
+        let v: serde_json::Value = reqwest::Client::new()
+            .post(&http)
+            .json(&body)
+            .send()
+            .await
+            .ok()?
+            .json()
+            .await
+            .ok()?;
         let s = v["result"].as_str()?.to_string();
-        Some(subxt::utils::H256::from_slice(&hex::decode(s.trim_start_matches("0x")).ok()?))
-    }.await.ok_or("no head hash")?;
+        Some(subxt::utils::H256::from_slice(
+            &hex::decode(s.trim_start_matches("0x")).ok()?,
+        ))
+    }
+    .await
+    .ok_or("no head hash")?;
     println!("head block {head:?}");
     let at = client.storage().at(head);
 
@@ -81,7 +96,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let v = value_at(&at, p, e).await;
         println!(
             "{p}.{e} = {}",
-            v.as_deref().map(hex::encode).unwrap_or_else(|| "<none>".into())
+            v.as_deref()
+                .map(hex::encode)
+                .unwrap_or_else(|| "<none>".into())
         );
     }
     for (p, e) in [

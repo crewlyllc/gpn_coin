@@ -8,10 +8,10 @@
 //!
 //! Run: `cargo run --example unsigned_entry_probe -- ws://127.0.0.1:9944`
 
-use subxt::tx::Payload;
-use subxt::OnlineClient;
 #[allow(unused_imports)]
 use gpn_agent::chain::signer::GpnConfig;
+use subxt::tx::Payload;
+use subxt::OnlineClient;
 
 use gpn_agent::chain::signer;
 use gpn_agent::onboard::{register_provider_entry_unsigned_call, EntryParams, EntryPow};
@@ -86,10 +86,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let bytes = unsigned.encoded();
     println!("\nunsigned hex    = 0x{}", hex::encode(bytes));
     println!("  version byte  = 0x{:02x}", bytes[0]);
-    println!(
-        "  then pallet/call = 0x{:02x} 0x{:02x}",
-        bytes[1], bytes[2]
-    );
+    println!("  then pallet/call = 0x{:02x} 0x{:02x}", bytes[1], bytes[2]);
 
     let hexstr = format!("0x{}", hex::encode(bytes));
     let http = endpoint

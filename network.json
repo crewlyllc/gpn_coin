@@ -20,5 +20,7 @@
   "bootstrap_urls": [
     "https://gpncoin.ai/seeds.json"
   ],
+  "settlement_depth": 288,
+  "settlement_time_secs": 4320,
   "latest_version": "0.3.70"
 }

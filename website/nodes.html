@@ -219,8 +219,15 @@
         <pre><code>GPN_BOOTNODES_URL=https://gpncoin.ai/seeds.json gpn-node</code></pre>
         <p class="small muted" style="margin:12px 0 0">Endpoints (all CORS-enabled, cached for 60 s):</p>
         <pre><code>GET https://gpncoin.ai/api/network     # live: peer ids, providers, counts, offline seeds
+GET https://gpncoin.ai/api/finality    # settlement: mode=depth, confirmations=288, finalized_head=null
 GET https://gpncoin.ai/seeds.json      # dial targets (deduped, with a live flag per node)
 GET https://gpncoin.ai/bootnodes.txt   # one dialable multiaddr per line</code></pre>
+        <p class="small muted" style="margin:12px 0 0"><strong>Settlement is depth, not finality.</strong>
+          There is no finality gadget on this chain, so <code>chain_getFinalizedHead</code>
+          returns genesis; use depth — a block is settled at <code>settlement_depth</code>
+          (288 blocks, ≈72 min at 15 s), and <code>/api/finality</code> answers
+          <code>{"mode":"depth","confirmations":288,"finalized_head":null}</code>.
+          A block shallower than 288 can still be reorged.</p>
         <p class="small muted" style="margin:12px 0 0"><code>/api/network</code> is the live view behind this page:
           <code>peer_ids</code> is what <code>system_peers</code> sees, <code>counts</code> has
           <code>peers_live</code> / <code>serving_ai</code> (provider registrations the AP can lease) /
