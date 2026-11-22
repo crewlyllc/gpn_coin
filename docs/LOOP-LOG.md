@@ -1,3 +1,26 @@
+## 04:00 PT — 0.3.68 §1–§3 proved and ticked (tests re-run + fail-before on the pre-change installer); §4 waits on the CI run it just started [no triage]
+
+- **A0**: CI run **45018066004** on `ab3c502` is the run for main HEAD — at check time `queued`,
+  then claimed at 11:58–11:59Z (`secret-scan` + `windows build` in progress, `fmt + clippy` queued).
+  No conclusion yet ⇒ per A0 not awaited, and §4's CI box stays unticked. It sat queued 24 min, which
+  is runner contention (single slot), not a fault.
+- **§1 DONE (3/3), §2 DONE (6/6)** — every re-run this turn on `ab3c502` under pwsh 7.4.6, not inferred:
+  `test-update-shutdown` / `test-update-defer` / `test-update-exit-cause` / `test-update-start-after-stop`
+  / `test-update-task-elevation` all `RESULT: PASS (all checks)`, `test-update-confirm` `FAILURES: 0`,
+  `test-autostart-installers.sh` `all autostart/installer assertions passed`.
+- **fail-before re-produced**, against `git show ad06dff:install.ps1` copied into `/tmp/fb238`:
+  `test-update-shutdown.ps1` ⇒ `FAILURES: 7` (`FAIL C PFRO-only is NOT deferred  why=a reboot is
+  pending (118 PendingFileRenameOperations entries)`); `test-update-task-elevation.ps1` ⇒
+  `could not find function Get-TaskRunLevel in /tmp/fb238/install.ps1` (`grep -c
+  Assert-UpdateTaskElevation` ⇒ 0). The old installer had no elevation check at all.
+- **§3 DONE (4/4)**: `bump-version.py --check` ⇒ `lockstep: 15 manifest(s) and 14 lockfile entr(ies)
+  agree`, `gpn version: 0.3.68`; CHANGELOG `0.3.68` section has no `_TODO_`; seed parity
+  `cargo test --test shipped_bootnodes` ⇒ `4 passed; 0 failed`.
+- **Next run**: read run 45018066004's conclusion. Green ⇒ §4 CI box, then dispatch the two §5 builds
+  (linux-selfhosted + windows on box 1's runner) and end the run with the handles written into the
+  boxes. Red ⇒ quote the failing line and fix it. **§3b's on-box proof needs the shipped 0.3.68
+  installer** (both changes are installer-side), so it rides the deploy in §9, not a hand-run script.
+
 ## 03:4x PT — 0.3.67 closed by the previous run; 0.3.68 BUNDLED (rows 237 + 238: the two gates that stopped Windows updates) [no triage]
 
 - **A0**: no CI run exists for main `ad06dff` at check time (`head_sha=` → 0); the last push was docs-only
