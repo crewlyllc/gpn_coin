@@ -1,3 +1,17 @@
+## 23:28 PT — §2 box 2 ticked: fmt clean + clippy green with CI's exact allow-list (my first attempt used the wrong flags; that was the cause of the 33 errors) [no triage]
+
+- **A0**: HEAD `f42c915`, `?head_sha=f42c915…` is docs-only ⇒ no run. Release CI run **44987167844**
+  (`88f2eea`) already recorded by the previous run as **success** (linux+windows+lint green).
+- **Box ticked**: §2 `- [ ] cargo fmt --check clean; clippy with CI's -D warnings clean.`
+  In detached worktree `/tmp/rel67` @ `f42c915`, toolchain 1.98.1:
+  `cargo fmt --check` ⇒ exit 0, no diff; `cargo clippy --release --all-targets -- <ci.yml CLIPPY_ALLOWS> -D warnings`
+  ⇒ `Finished release profile [optimized] target(s) in 11.18s`, no errors (only upstream `subxt v0.37.0`
+  future-incompat note, which CI prints too).
+- **Failure diagnosed, not parked**: attempt 1 ran plain `cargo clippy --all-targets -- -D warnings` and reported
+  33 `type_complexity`/etc. errors. Cause = my command omitted the documented `CLIPPY_ALLOWS` allow-list that
+  `ci.yml` passes (29 `-A` entries); the code was never at fault. Re-ran with the list parsed out of `ci.yml`.
+- **Blockers**: none. **Triage**: none.
+
 ## 23:55 PT — §2 opened: "the test passes" ticked with a same-turn run of all five pwsh suites + rust suites on the release tree; run 44987167844 went GREEN (linux+windows+fmt/clippy) [no triage]
 
 - **A0**: `origin/main` HEAD `68d7116` (docs-only checklist commit ⇒ `total_count: 0` under
