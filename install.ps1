@@ -2146,14 +2146,17 @@ $UpdateTaskXml = @'
       <!-- HighestAvailable, NOT LeastPrivilege. This task's first job is to stop
            GPN-Node, and GPN-Node is registered with -RL HIGHEST: a
            medium-integrity updater cannot terminate a high-integrity process.
-           Box 1, 2026-11-17 07:11:39 -- every gpn process answered
+           Box 1, 2026-11-17 07:11:39: every gpn process answered
            "could not be terminated. Reason: Access is denied.", the wrapper
            logged REFUSING to apply and the box could never update itself while
            the node was up (the one successful cycle, 05:45, only worked because
            an earlier crash had left the node stopped). The installer that writes
-           this XML is elevated -- it registers GPN-Node with HIGHEST -- so the
+           this XML is elevated (it registers GPN-Node with HIGHEST), so the
            request is grantable; a standard account still falls back to the
-           Startup-shortcut loop when registration is refused. -->
+           Startup-shortcut loop when registration is refused. A double hyphen
+           inside an XML comment is not well-formed XML, and schtasks then
+           answers rc=1 on every box: 2026-11-22, that is exactly why the task
+           could never be re-registered at Highest until this line was fixed. -->
       <RunLevel>HighestAvailable</RunLevel>
     </Principal>
   </Principals>
@@ -2211,6 +2214,20 @@ function Register-UpdateTask {
   if ($foreignUpdate) {
     Warn "$UpdateTask belongs to the install at '$foreignUpdate' -- NOT touching it (this install is $InstallDir)"
     Warn 'This install will not auto-update until the other install is removed or its task is renamed.'
+    return $false
+  }
+
+  # A malformed task XML must fail here with the parser's own words, not as
+  # schtasks rc=1 (which reads like a permissions problem). Box 1, 2026-11-22:
+  # a "--" inside the XML comment below made every registration attempt rc=1,
+  # so this task was never re-registered at Highest and the box silently fell
+  # back to the Startup loop -- the exact defect item 238 was opened for.
+  try {
+    $doc = New-Object System.Xml.XmlDocument
+    $doc.LoadXml($xmlText)
+    [void]$doc.SelectSingleNode("/*[local-name()='Task']/*[local-name()='Principals']/*[local-name()='Principal']/*[local-name()='RunLevel']")
+  } catch {
+    Warn "the $UpdateTask task XML is not well-formed XML ($($_.Exception.Message)) -- fix install.ps1; not registering a broken definition"
     return $false
   }
 

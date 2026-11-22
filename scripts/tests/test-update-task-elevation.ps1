@@ -99,6 +99,31 @@ $freshVerify = $raw.LastIndexOf('[void](Assert-UpdateTaskElevation)')
 Ok 'G the deploy-only path verifies the task level' ($deployVerify -gt $installPath) 'deploy path missing verification'
 Ok 'G the fresh-install path verifies the task level' ($freshVerify -gt $deployVerify) 'install path missing verification'
 
+# ---- H: the rendered task XML is well-formed XML --------------------------
+# Box 1, 2026-11-22: a "--" inside the XML comment made schtasks /Create /XML
+# answer rc=1 on every box, so GPN-Update was never re-registered at Highest and
+# the box fell back to the Startup loop. A string check cannot see that; parsing
+# the rendered document can.
+$xmlStart = $raw.IndexOf("`$UpdateTaskXml = @'")
+$xmlEnd = $raw.IndexOf("'@", $xmlStart)
+$xmlRender = ''
+if ($xmlStart -ge 0 -and $xmlEnd -gt $xmlStart) {
+  $xmlRender = $raw.Substring($xmlStart + "`$UpdateTaskXml = @'".Length, $xmlEnd - $xmlStart - "`$UpdateTaskXml = @'".Length)
+  $xmlRender = $xmlRender.TrimStart().Replace('__SCRIPT__', 'C:\gpn\update-and-restart.ps1').Replace('__USER__', 'BOX\user')
+}
+$parseErr = ''
+try {
+  $doc = New-Object System.Xml.XmlDocument
+  $doc.LoadXml($xmlRender)
+} catch { $parseErr = $_.Exception.Message }
+Ok 'H the rendered update-task XML is well-formed' ($parseErr -eq '') ("parse error: " + $parseErr)
+$lvl = ''
+if ($parseErr -eq '') {
+  $lvl = [string]$doc.SelectSingleNode("/*[local-name()='Task']/*[local-name()='Principals']/*[local-name()='Principal']/*[local-name()='RunLevel']").InnerText
+}
+Ok 'H the parsed principal asks for HighestAvailable' ($lvl -eq 'HighestAvailable') ("RunLevel='" + $lvl + "'")
+Ok 'H the installer validates the XML before registering' ($raw.Contains('$doc.LoadXml($xmlText)')) 'parse guard missing'
+
 # ---- the extracted code stays pure ASCII (Windows PowerShell 5.1) ---------
 $nonAscii = 0
 $fnStart = $raw.IndexOf('function Assert-UpdateTaskElevation')
