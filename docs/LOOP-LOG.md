@@ -1,3 +1,36 @@
+## 19:05 PT — 0.3.66 confirmed closed; 0.3.67 bundled (rows 233–236, the teardown class) [TRIAGE: 231 unchanged]
+
+- **A0**: `origin/main` = `82f8a1b8c463c379928de6f09f0a45d18cef0d59` ("list: fix the teardown class,
+  not just this instance"), a docs-only commit (1 file: `GPN-LIST.md`) ⇒ `?head_sha=` full-40
+  returns `total_count: 0`, correct under `ci.yml` paths-ignore. Nothing waited on.
+- **0.3.66 verified released, not assumed**: `releases.json` serves `0.3.66` (published
+  2026-11-22T01:41:06Z), the running node answers `system_version` ⇒ `"0.3.66"`, and the checklist is
+  archived 51/51 (`docs/releases/archive/0.3.66.md`). So B was satisfied and C was the right rung.
+- **231's status was wrong and is corrected, not silenced**: the row said `IN-PROGRESS` while its
+  source half had shipped in 0.3.66 and its only remaining step is an owner-held offline key — that
+  status is what made C unreachable for six runs. Verified the capability limit rather than repeating
+  the claim: `gpn-node/node/src/chain_spec.rs:67` `testnet_sudo_key()` = `5HHSuw…PjuMn`, live
+  `Sudo.Key` storage = `0xacc828cd12728ec7841ff70d1bccd0775a25c23c5bf518702777977c17089440`, and
+  `state_getRuntimeVersion` still `52`. No key material for it exists on this host. Now
+  `AWAITING-OWNER` with that evidence in the row.
+- **Bundled 233/234/235/236** — the class behind the 5th machine's 0.3.66 → 0.3.64 → fail loop:
+  start the replacement only after the old tree is gone and detached from the dying console (233);
+  distinguish a console teardown from a real session end in the log, `last-exit.json` and the
+  message (234); classify NTSTATUS loader codes (`0xC000026B` `0xC0000142` `0xC0000135` `0xC000013A`
+  `0xC0000005`), retry once, then `deferred: environment did not allow the process to start` — never
+  roll back (235); refuse to begin while a shutdown/restart is pending (236).
+- **Version**: `scripts/bump-version.py patch` → **0.3.67**; `--check` ⇒ `lockstep: 15 manifest(s)
+  and 14 lockfile entr(ies) agree`; `network.json latest_version` 0.3.67; CHANGELOG section written
+  (0 `_TODO_` in the 0.3.67 block).
+- **Checklist**: `scripts/make-release-checklist.py 0.3.67` ⇒ `docs/releases/0.3.67.md` (4
+  in-progress in §3b). Commit `c7d33de`, one push (`82f8a1b..c7d33de`). This commit touches
+  `Cargo.toml`, so CI runs for it — not waited on.
+- **Next run**: start at 0.3.67 box 1 (§1 of the checklist). All four are Windows-side behaviour, so
+  the proofs are `scripts/box1.sh` + the update test suite, and the final binary is the only runner job.
+- **[TRIAGE] 231** — unchanged and unanswered (5th announcement). Spec-53 enactment needs Jeremy's
+  offline sudo key; `docs/NEEDS-TRIAGE.md` §231 carries the question, the three options and
+  recommendation A. Not re-raised as new information: nothing about it changed this run.
+
 ## 18:20 PT — 0.3.66 closed at 51/51; the only open item is 231's on-chain enactment (owner key) [TRIAGE]
 
 - **A0**: `origin/main` = `2ffa0100d96e91e81b28cee955f7b32c951adfc9` ("0.3.66: record live site
