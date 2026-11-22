@@ -1345,6 +1345,62 @@ function Get-LoaderExit {
     Line = ('deferred: environment did not allow the process to start (' + $m.Hex + ' ' + $m.Name + ') - ' + $m.Why) }
 }
 
+# #236: never BEGIN an update while Windows is going down.
+#
+# The 5th machine (2026-11-21) started an apply while the box was mid shutdown:
+# the node was stopped, the new build was installed, and its start was refused at
+# load with 0xC000026B (a closing window station) -- the only attempt of that boot,
+# spent on a start the OS was never going to allow. #235 makes that refusal
+# harmless; this check stops the cycle from being started at all.
+#
+# Everything here is a QUERY, never an action:
+#   SM_SHUTTINGDOWN              GetSystemMetrics(0x2000): a shutdown/logoff began
+#   PendingFileRenameOperations  a reboot is already owed to a file replacement
+#   CBS\RebootPending            servicing wants a reboot
+#   WindowsUpdate\...\RebootRequired   an update wants a reboot
+# `ExitWindowsEx` is the call that STARTS a shutdown, not a state query, so it
+# cannot be polled to learn whether one is in progress; SM_SHUTTINGDOWN is the
+# observable state it produces, and that is what is read here.
+#
+# Probes are injectable so the assertion test can stub the flag both ways without
+# shutting a machine down.
+function Get-ShutdownState {
+  param([scriptblock]$MetricsProbe = $null, [scriptblock]$RegistryProbe = $null)
+  $reasons = @()
+
+  $metrics = $null
+  if ($MetricsProbe) {
+    $metrics = & $MetricsProbe
+  } else {
+    try {
+      if (-not ('GpnUpdate.GpnShutdownMetrics' -as [type])) { Add-Type -Namespace 'GpnUpdate' -Name 'GpnShutdownMetrics' -MemberDefinition '[DllImport("user32.dll")] public static extern int GetSystemMetrics(int nIndex);' | Out-Null }
+      $metrics = [int]([GpnUpdate.GpnShutdownMetrics]::GetSystemMetrics(0x2000))
+    } catch { $metrics = 0 }
+  }
+  if ($metrics -ne $null -and [int]$metrics -ne 0) {
+    $reasons += 'SM_SHUTTINGDOWN: a shutdown or logoff is already in progress'
+  }
+
+  if ($RegistryProbe) {
+    foreach ($r in @(& $RegistryProbe)) { if ($r -and ([string]$r).Trim()) { $reasons += ([string]$r).Trim() } }
+  } else {
+    $sm = 'HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager'
+    try {
+      $pfro = @((Get-ItemProperty -LiteralPath $sm -Name PendingFileRenameOperations -ErrorAction Stop).PendingFileRenameOperations)
+      if ($pfro.Count -gt 0) { $reasons += 'a reboot is pending (PendingFileRenameOperations is non-empty)' }
+    } catch { }
+    if (Test-Path -LiteralPath 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Component Based Servicing\RebootPending') {
+      $reasons += 'a reboot is pending (CBS RebootPending)'
+    }
+    if (Test-Path -LiteralPath 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\WindowsUpdate\Auto Update\RebootRequired') {
+      $reasons += 'a reboot is pending (Windows Update RebootRequired)'
+    }
+  }
+
+  if ($reasons.Count -eq 0) { return @{ Pending = $false; Why = '' } }
+  return @{ Pending = $true; Why = ($reasons -join '; ') }
+}
+
 # #209: positive evidence that security software stopped the build. Same rules
 # as the Rust gate (gpn-agent/src/update.rs `detect_security_block`): a named
 # block in the evidence, a binary that is gone beside a directory that exists,
@@ -1846,6 +1902,17 @@ try {
   if ($check -ne 3) {
     Show-UpdateFailure $check 'update check' 'the signed manifest was rejected or could not be read'
     exit 1
+  }
+
+  # #236: if Windows is going down, the whole cycle is doomed -- the stop, the
+  # apply and the start all happen inside a session that is ending, and the
+  # start is what gets refused (0xC000026B). Leave the install alone, leave the
+  # node running, and let the next cycle after resume apply it normally.
+  $sd = Get-ShutdownState
+  if ($sd.Pending) {
+    Write-Log ('deferred: system is shutting down - ' + $sd.Why)
+    Write-Log 'the node was NOT stopped and nothing was installed - the next update cycle after the restart applies it normally'
+    exit 75
   }
 
   Write-Log 'update available - stopping GPN-Node before applying (Windows locks a running .exe)'
