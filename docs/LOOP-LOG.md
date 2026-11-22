@@ -1,5 +1,16 @@
 ## 12:16 PT release loop — 0.3.69: §4 CI box ticked on `c8090a4` (run 45056406823 success, Windows 77 min); §5 SHA decided = `fe67524` [no triage]
 
+## 12:52 PT 0.3.69 §5: linux release build dispatched on fe67524, windows held on CI
+- A0 CI: origin/main HEAD `3767b8a` = docs-only ⇒ 0 runs for that sha (correct, paths-ignore). Not a red.
+- Box worked: §5 `release-linux-selfhosted.yml` → dispatched **run 45068778999** at 20:51Z on tag
+  `build/fe6752429af6` (= `fe6752429af6bd7ae124d5416cf6bee3b8451df2`, last code commit; 0.3.69 in
+  Cargo.toml, network.json latest_version 0.3.69). Linux leg of that sha's CI green, linux runner idle.
+  Ended the run at dispatch per the no-wait rule.
+- Held, with reason in the box: `release-windows.yml` — `fe67524` Windows CI (run 45058527165) still
+  in_progress at step 7/8 (`Build + test gpn-agent`) and box-1 runner `busy=true`. Next run dispatches
+  windows on the same tag once that job is green.
+- Blockers: none. [TRIAGE] none.
+
 **A0 CI:** `origin/main` = `ddc2cc2d6f3132f8b7b1890addb7907e26ae7fb5`; `GET /actions/runs?head_sha=ddc2cc2…`
 ⇒ `total_count: 0` (docs-only, correct per paths-ignore). Local checkout was 2 commits behind
 (`b4b1e26`), fast-forwarded to `ddc2cc2` before touching anything, per TOOLS.
