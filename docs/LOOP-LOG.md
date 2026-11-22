@@ -1,3 +1,59 @@
+## 04:38 PT — 0.3.68 §3b/237 proved on box 1 under PowerShell 5.1; CI run 45018066004's linux job failed on a cache-prune race, cause found and fixed on the host [no triage]
+
+- **A0**: run 45018066004 (`ab3c502`) — `secret-scan` success, `fmt + clippy` success,
+  `Build + unit tests (linux)` **failure** at 12:20:46Z, `(windows, self-hosted)` still
+  in_progress. A concluded failing job ⇒ that was this run's box, so it was diagnosed
+  and fixed alongside §3b.
+- **§3b box 237 TICKED with box-1 evidence** (`docs/releases/0.3.68.md`, `GPN-LIST.md`):
+  `PendingFileRenameOperations` re-created on box 1 from `C:\gpn\pfro-backup-2026-11-22.reg`
+  as 118 multi-strings (even pairs) — the exact state that froze the updater; the shipped
+  `install.ps1` (sha256 `d5fc41f0…`) and `test-update-shutdown.ps1` (sha256 `55cfea48…`)
+  copied to `C:\gpn\tmp-237\`, hash-verified, and run under **Windows PowerShell 5.1**
+  (the task's own interpreter): `RESULT: PASS (all checks)`, `EXIT=0`, 27 ok, with
+  `live: pending=False why= notes=a reboot is pending (118 PendingFileRenameOperations entries) - logged only, does not defer`.
+  PFRO left non-empty on purpose so the §9/§10 deployed cycle exercises the note path.
+- **CI failure — classified ENVIRONMENT (our own maintenance timer), fixed:**
+  `error: failed to write /home/jeremyg/.ci-cache/gpn-agent-target/release/.fingerprint/gpn-agent-a73593bae3614032/invoked.timestamp — No such file or directory (os error 2)`
+  at 12:20:42Z. `journalctl --user -u gpn-ci-cache-prune.service` shows it started
+  **04:20:21 PT = 12:20:21Z** — 21 seconds earlier — and it was a bare
+  `find ~/.ci-cache -type f -mtime +7 -delete` + empty-dir delete, so it shredded fingerprint
+  files and then the directory cargo was writing into. No compile error anywhere in the log
+  (only warnings); steps 8-26 skipped.
+  Fix on the host: `gpn-ci-cache-prune.service` now runs `scripts/prune-ci-cache-daily.sh`,
+  which skips while `cargo`/`rustc`/`cc1`/`ld` are alive **or** any cache file was written in
+  the last 20 min, and only removes empty dirs that were already stale (never one this run
+  emptied). New self-test `scripts/tests/test-prune-ci-cache-daily.sh` → **RESULT: PASS (9 checks)**.
+  Unit wiring proved by running the unit with `GPN_CI_CACHE=/tmp/unit-test-cache`: journal shows
+  `[prune-ci-cache-daily] pruning files older than 7d under /tmp/unit-test-cache`, stale file gone.
+- **Re-run blocked, by design not by fault**: `POST /jobs/137200899218/rerun` ⇒ 403
+  "The workflow run containing this job is already running" (the windows job is still
+  in flight on the single-slot runner). **Next run**: when 45018066004 concludes, re-run the
+  linux job only (`POST /actions/jobs/137200899218/rerun`) and expect green — the cause was
+  outside the code and is gone.
+- **Pushed**: one docs-only commit (this log, `GPN-LIST.md` row 237 note, `0.3.68.md` §3b tick
+  + §4 note). Docs SHA starts no CI run; `ab3c502` remains the release's code commit and its run
+  is untouched. Nothing awaits Jeremy.
+
+## 04:11 PT — 0.3.68 §4 evidence gathered: docs commit started no build, code commit's CI is green on the fast jobs and still building; no push while it runs [no triage]
+
+- **A0**: main HEAD `17a706a` is a docs-only checklist commit ⇒ `GET /actions/runs?head_sha=17a706a08432…`
+  returns `total_count: 0` (paths-ignore working). The release's code commit `ab3c502` has one run,
+  **CI 45018066004**, `in_progress` at 12:11Z: `secret-scan` **success** (11:59Z), `fmt + clippy`
+  **success** (12:00Z), `Build + unit tests (linux)` in_progress (12:01Z), `Build + unit tests
+  (windows, self-hosted)` in_progress (11:58Z). No conclusion ⇒ not awaited (A0), §4's CI box stays unticked.
+- **§4 (3/4)**: docs-only-no-build ✓, one-docs-commit ✓, nothing-pushed-this-window ✓ — all
+  written into `docs/releases/0.3.68.md` with the API evidence above as notes. Deliberately
+  **not committed/pushed**: §0 forbids a push while CI runs for HEAD, and a push now would
+  supersede 45018066004, the very run §4 needs green.
+- **Box 1 measured this run (SSH, not CI)**: running process `C:\gpn\data\update\current\gpn-node.exe`
+  = **0.3.67**, started 03:17:43; `GPN-Update` and `GPN-Node` both `RunLevel=Highest`; `update.log`
+  carries the 237 defect being fixed — `02:50:11` / `03:05:54` `deferred: system is shutting down -
+  a reboot is pending (PendingFileRenameOperations is non-empty)` — and then the 03:17→03:19 cycle that
+  worked once the queue cleared (`taskkill … SUCCESS` ×7, `CONFIRMED: 0.3.67 is running … after 123 s`).
+  So §3b/§9/§10 proofs need 0.3.68 on that box; they are not tickable from 0.3.67.
+- **Next run**: read 45018066004's conclusion; if success, tick §4's CI box and dispatch the two
+  release builds (§5) with their run ids, then end. Nothing awaits Jeremy.
+
 ## 04:00 PT — 0.3.68 §1–§3 proved and ticked (tests re-run + fail-before on the pre-change installer); §4 waits on the CI run it just started [no triage]
 
 - **A0**: CI run **45018066004** on `ab3c502` is the run for main HEAD — at check time `queued`,
