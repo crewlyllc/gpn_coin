@@ -1,3 +1,19 @@
+## 06:32 PT — 0.3.68 §4: Windows job verified compiling (two rustc spawned at 06:32 PT), run age 94 min but NOT stale — nothing cancelled [no triage]
+
+- **A0**: `origin/main` HEAD `d3051e03f235` (docs-only) ⇒ `head_sha` query `total_count: 0`, `paths-ignore` intact, no run expected for it.
+  Release SHA `1bc9488bb7fc` run **45024973751**: `in_progress`, created `12:57:57Z`, API `updated_at 13:18:26Z`.
+- **Why the 90-minute stale rule did not fire**: run age is 94 min, but staleness is a claim about progress, not age.
+  Read-only SSH to box 1 at 06:32:17 PT (`scripts/box1.sh`) returned live compilers: `cargo 48112` started `6:16:24 AM`,
+  `rustc 43884` started `6:32:09 AM`, `rustc 46116` started `6:32:16 AM`, `Runner.Listener` count `1`.
+  Job `137220923278` step 7 `Build + test gpn-agent (release)` began `13:55:16Z`; a cold Windows agent release build is 40-75 min,
+  so 13:55+75 min ≈ `15:10Z` is its normal finish. Cancelling a build that spawned two rustc 8 seconds before the check would have thrown away ~40 min of work.
+- **Lanes on `1bc9488`**: `fmt + clippy` `137220923136` success · `secret-scan` `137220923314` success ·
+  `Build + unit tests (linux)` `137221062985` success (26/26 steps, incl. step 7 `Test gpn-agent (non-GPU)`) ·
+  Windows step 6 `Build + test gpn-node (release)` success `13:55:16Z`. GPU/macOS/audit skipped by design.
+- **No box ticked.** First unticked box is §4's green-on-exact-SHA line; 4 of 5 required lanes concluded. A tick on four of five is a claim without evidence.
+- **Next run**: read 45024973751's conclusion once. `success` ⇒ tick §4, dispatch `release-linux-selfhosted.yml` + `release-windows.yml` for
+  `1bc9488`, write both run ids into the §5 boxes, end the run. `failure` ⇒ quote the failing step's exact line, classify, fix the cause.
+
 ## 06:12 PT — 0.3.68 §4: four lanes green, Windows job alive and progressing (rustc at 6:12 AM on box 1); no box ticked [no triage]
 
 - **A0**: `origin/main` HEAD `0490257` (docs-only) ⇒ no run expected. Release SHA `1bc9488bb7fc` run **45024973751**
