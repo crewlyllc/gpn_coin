@@ -1,3 +1,25 @@
+## 09:36 PT release loop — queue exhausted: no IN-PROGRESS, no NEW rows; 0.3.68 re-verified live [no triage]
+
+**A0 CI:** `origin/main` = `dd1b73606f0bd7e6c52d79ba6e5c01259da1e114` (`git ls-remote` agrees; the workspace clone's
+`origin/main` ref was stale at `d4c8b4d`). `GET /actions/runs?head_sha=dd1b736…` ⇒ `total_count: 0` — docs-only
+(`docs/**`, `**/*.md` in `paths-ignore`). Not blocking: run `45043060386` (CI, `c7f52f5e`, created 16:18Z) is still
+`in_progress` at 78 min; my box was not a build box, so nothing was cancelled.
+
+**A — no boxes to work.** `GPN-LIST.md` status column parsed over all 217 rows: 207 `COMPLETE` (incl. per-version
+stamps), 7 `BLOCKED` (12, 13, 16, 17, 26, 153, 194 — all owner-scoped: mainnet prep, bridge, red-team, ceremony,
+single-binary, parked streaming, box-3 venue), 1 `AWAITING-OWNER` (231, spec-53 enactment, already open in
+`docs/NEEDS-TRIAGE.md`). **No `IN-PROGRESS` row and no `NEW` row** ⇒ nothing to bundle (rule C has an empty set).
+
+**B re-verified from the machine, not from the previous entry's summary:**
+- `https://gpncoin.ai/releases.json` ⇒ `version 0.3.68`, `published_at 2026-11-22T16:08:01Z`,
+  `gpn-linux.tar.gz` sha256 `7be88a2e…c0f0` / 340,605,647 B.
+- local `:9944` `system_version` ⇒ `"0.3.68"`.
+- `docs/releases/archive/0.3.68.md` ⇒ 0 unticked boxes, 51 ticked; `docs/releases/0.3.68.md` absent (archived + INDEX row).
+So 0.3.68 is closed in all three senses; nothing to re-tick.
+
+**Net this run:** no code, no build, no checklist edit — the release train is empty until a BLOCKED row is unblocked or a
+new defect is filed. One docs commit (this log) only; `paths-ignore` means no CI is started by it.
+
 ## 09:20 PT 0.3.68 closed: §10 proved on box 1, filing done (50/50), rows 237/238 COMPLETE [no triage]
 
 **§10 ticked from the machine, not from intent.** Box 1's own `GPN-Update` cycle applied 0.3.68 at 08:42–08:46 PT:
