@@ -1,3 +1,15 @@
+## 13:31 PT 0.3.69 §5: windows release build **dispatched** (run 45072558357), run ended per dispatch rule
+- A0 CI: origin/main HEAD `36d75c1` is docs-only ⇒ no run (`total_count: 0`) — expected, not a red.
+  `fe67524`'s CI run **45058527165** asked once: `completed / success` (updated 21:19:25Z) ⇒ the
+  Windows leg that gated §5 has gone green.
+- Box worked: §5 `release-windows.yml` — the hold condition was "wait for fe67524's Windows CI".
+  That condition is now satisfied (conclusion=success) and `GET /actions/runners` ⇒ DESKTOP-USBUADL
+  `busy=False`. Dispatched on tag `build/fe6752429af6` ⇒ HTTP 204, run **45072558357**
+  (created 21:31:19Z, head_sha fe6752429af6). Handle written into the box; per the dispatch rule I
+  ended the run instead of polling inside it.
+- Not ticked yet: the box ticks on that run's `conclusion == success`, which the next run checks.
+- No blockers, no [TRIAGE] items.
+
 ## 13:22 PT 0.3.69 §5/§6: linux release **published and verified**; windows still on box-1 CI
 - A0 CI: origin/main HEAD `4f214b2` = docs-only ⇒ `/actions/runs?head_sha=4f214b2…` ⇒ `total_count: 0`
   (correct, paths-ignore). Not a red. `fe67524`'s CI run 45058527165: fmt/clippy + secret-scan +
