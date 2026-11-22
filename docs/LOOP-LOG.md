@@ -1,3 +1,42 @@
+## 11:16 PT release loop — §5 attestation-ordering box verified statically (cosign path); CI on c8090a4 still on the Windows build [no triage]
+
+**A0 CI:** `origin/main` = local HEAD = `fe6752429af6` (fetched, `git rev-parse origin/main`). Its run
+**45058527165** (`head_sha=fe675242…`) is `status: pending`, `conclusion: null` ⇒ per A0 not a verdict,
+did not block, went to A. The release's own code commit `c8090a4d44a2` has run **45056406823**
+(created 18:40:22Z), re-asked at 19:17Z:
+
+- `fmt + clippy` **success** (all 11 guard/fmt/clippy steps green, both node and agent with `-D warnings`)
+- `secret-scan` **success**
+- `Build + unit tests (linux)` **success** (26 steps: builds, node+agent suites, launcher identity,
+  snapshot/referral/autostart/disk guards, site + join + chat proxy tests)
+- `Build + unit tests (windows, self-hosted)`: `Build + test gpn-node (release)` **in_progress** since
+  18:43:28Z ⇒ 34 min at 19:17Z. Cold Windows budget is 40-75 min ⇒ contention, not a fault, not stale.
+
+So §4 box 4 (*CI green on c8090a4*) still has no verdict and was **not** ticked; its note now carries the
+19:17Z per-job breakdown.
+
+**Box worked — §5 "the attestation step runs BEFORE publish, and a failed attestation blocks the
+release" — TICKED (no build needed, so the in-flight CI is irrelevant to it).** Evidence:
+`GET /repos/jeremyzguo/gpn_coin` ⇒ `visibility: private`, `private: true` ⇒ the repo is on the **cosign
+keyless** path (GitHub cannot persist attestations for user-owned private repos). In
+`.github/workflows/release-windows.yml`: `Check attestation availability` (:678) picks the method;
+`Attest build provenance` (:692) and `Sign release artifact keyless` (:698) are the only `if:`-guarded
+steps; `Provenance gate - refuse to publish an unsigned artifact` (:720) has **no `if:`** and throws on a
+missing bundle, a bundle <200 B, or a non-zero `cosign verify-blob --bundle … --certificate-identity-regexp
+'^https://github\.com/$GITHUB_REPOSITORY/\.github/workflows/release-windows\.yml@.*$'
+--certificate-oidc-issuer https://token.actions.githubusercontent.com`; `publish GitHub Release
+(rolling 'windows-latest')` is :748. Line 720 < line 748 is the substantive check (0.3.61's defect was the
+ordering, not the absence of a signing step).
+
+**Queue note for the next run:** HEAD moved four commits past the release commit (tip `fe67524`, row 231
+spec-53 enactment — no version bump, source-only probe tool), and its CI run 45058527165 is already
+`pending` behind 45056406823 on the same single-slot box-1 runner. A `release-windows` dispatch will queue
+behind both — that is contention, so do not call the runner down; check `/actions/runners` `busy`.
+
+**Next run:** ask once about 45056406823; on `conclusion == success` tick §4 box 4, then dispatch
+`release-linux-selfhosted.yml` + `release-windows.yml` from the release SHA, write both run ids into §5
+boxes 2-3, and end the run (do not wait on the builds).
+
 ## 10:59 PT release loop — 0.3.69 §5 Windows-evidence box ticked over SSH; CI on c8090a4 still building [no triage]
 
 **A0 CI:** `main` = `770ce6120f34a0ec1dfcc0273c15794398aabd00` (`GET /commits/main`, 18:51Z, design commit),
