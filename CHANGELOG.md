@@ -8,6 +8,42 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 versions are [Semantic Versioning](https://semver.org/spec/v2.0.0.html), with
 the GPN-specific meaning of each level documented in `docs/updates.md`.
 
+## [0.3.67] - 2026-11-21
+
+Bumped from 0.3.66 (`scripts/bump-version.py patch`).
+
+**An update no longer kills its own replacement, and a start the operating
+system refused is no longer treated as a bad build.** A fifth machine updated
+0.3.65 → 0.3.66, then rolled back to 0.3.64, then failed again; the only
+evidence was `0xC000026B` and `CTRL_SHUTDOWN_EVENT` on a machine that was not
+shutting down. Both signals were ours: the update's own console teardown, seen
+through a loader code the confirm gate did not know, escalated into a rollback
+loop.
+
+### Added
+- **A teardown-class start failure is classified, not rolled back (row 235).**
+  `0xC000026B` (STATUS_DLL_INIT_FAILED_LOGOFF), `0xC0000142` (DLL init failed),
+  `0xC0000135` (DLL not found), `0xC000013A` (CTRL+C exit) and `0xC0000005`
+  (access violation at load) are loader refusals: the environment would not let
+  the process start, which says nothing about the build. These are named in the
+  confirm message, retried once, and then reported as `deferred: environment
+  did not allow the process to start (0x…)` — never rolled back.
+
+### Changed
+- **The node is started from a context that survives the stop (row 233).** The
+  replacement is created only after the old tree is fully gone (`taskkill …
+  SUCCESS`) and detached from the console being torn down, so it cannot be born
+  into a closing window station. `update.log` records the start strictly after
+  the teardown.
+- **A console teardown is no longer reported as a machine shutdown (row 234).**
+  `CTRL_SHUTDOWN_EVENT` fires for our own stop as well; the distinction is now
+  logged, recorded in `last-exit.json`, and the confirm message names the actual
+  cause instead of `no process ever appeared`.
+- **An update does not begin while the system is stopping (row 236).** Before
+  the node is stopped, the wrapper checks for a pending shutdown/restart
+  (`GetSystemMetrics(SM_SHUTTINGDOWN)`, `PendingFileRenameOperations`) and logs
+  `deferred: system is shutting down`; the next cycle applies normally.
+
 ## [0.3.66] - 2026-11-21
 
 Bumped from 0.3.65 (`scripts/bump-version.py patch`).
