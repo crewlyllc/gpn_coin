@@ -1,0 +1,359 @@
+{
+  "version": "0.3.68",
+  "start": "2026-11-22T03:35:14-08:00",
+  "total_s": 17044,
+  "rows": [
+    {
+      "box": "Name the behaviour in one sentence, and the machine-observable t",
+      "section": "1. Test first (before any code is written)",
+      "ticked_at": "2026-11-22T03:59:35-08:00",
+      "since_start_s": 1461,
+      "step_s": 1461,
+      "sha": "17a706a08432f69e577d3eab7c8359f3b7d905d3"
+    },
+    {
+      "box": "Write the test that fails now. Paste the failing output. No fix ",
+      "section": "1. Test first (before any code is written)",
+      "ticked_at": "2026-11-22T03:59:35-08:00",
+      "since_start_s": 1461,
+      "step_s": 0,
+      "sha": "17a706a08432f69e577d3eab7c8359f3b7d905d3"
+    },
+    {
+      "box": "If the change cannot be tested, stop and tell Jeremy",
+      "section": "1. Test first (before any code is written)",
+      "ticked_at": "2026-11-22T03:59:35-08:00",
+      "since_start_s": 1461,
+      "step_s": 0,
+      "sha": "17a706a08432f69e577d3eab7c8359f3b7d905d3"
+    },
+    {
+      "box": "The test passes.",
+      "section": "2. Implement",
+      "ticked_at": "2026-11-22T03:59:35-08:00",
+      "since_start_s": 1461,
+      "step_s": 0,
+      "sha": "17a706a08432f69e577d3eab7c8359f3b7d905d3"
+    },
+    {
+      "box": "`cargo fmt --check` clean; clippy with CI's `-D warnings` clean.",
+      "section": "2. Implement",
+      "ticked_at": "2026-11-22T03:59:35-08:00",
+      "since_start_s": 1461,
+      "step_s": 0,
+      "sha": "17a706a08432f69e577d3eab7c8359f3b7d905d3"
+    },
+    {
+      "box": "Full affected suites run, not just the new test.",
+      "section": "2. Implement",
+      "ticked_at": "2026-11-22T03:59:35-08:00",
+      "since_start_s": 1461,
+      "step_s": 0,
+      "sha": "17a706a08432f69e577d3eab7c8359f3b7d905d3"
+    },
+    {
+      "box": "A call site exists for anything new",
+      "section": "2. Implement",
+      "ticked_at": "2026-11-22T03:59:35-08:00",
+      "since_start_s": 1461,
+      "step_s": 0,
+      "sha": "17a706a08432f69e577d3eab7c8359f3b7d905d3"
+    },
+    {
+      "box": "Nothing new is off by default behind a flag nobody sets.",
+      "section": "2. Implement",
+      "ticked_at": "2026-11-22T03:59:35-08:00",
+      "since_start_s": 1461,
+      "step_s": 0,
+      "sha": "17a706a08432f69e577d3eab7c8359f3b7d905d3"
+    },
+    {
+      "box": "The change is in the tree you are about to release:",
+      "section": "2. Implement",
+      "ticked_at": "2026-11-22T03:59:35-08:00",
+      "since_start_s": 1461,
+      "step_s": 0,
+      "sha": "17a706a08432f69e577d3eab7c8359f3b7d905d3"
+    },
+    {
+      "box": "`scripts/bump-version.py patch`",
+      "section": "3. Bump and record",
+      "ticked_at": "2026-11-22T03:59:35-08:00",
+      "since_start_s": 1461,
+      "step_s": 0,
+      "sha": "17a706a08432f69e577d3eab7c8359f3b7d905d3"
+    },
+    {
+      "box": "CHANGELOG section written",
+      "section": "3. Bump and record",
+      "ticked_at": "2026-11-22T03:59:35-08:00",
+      "since_start_s": 1461,
+      "step_s": 0,
+      "sha": "17a706a08432f69e577d3eab7c8359f3b7d905d3"
+    },
+    {
+      "box": "`scripts/bump-version.py --check` \u2192 `lockstep: 15 manifest(s) ag",
+      "section": "3. Bump and record",
+      "ticked_at": "2026-11-22T03:59:35-08:00",
+      "since_start_s": 1461,
+      "step_s": 0,
+      "sha": "17a706a08432f69e577d3eab7c8359f3b7d905d3"
+    },
+    {
+      "box": "Seed lists still agree across `network.json`, `seeds.json`, `ins",
+      "section": "3. Bump and record",
+      "ticked_at": "2026-11-22T03:59:35-08:00",
+      "since_start_s": 1461,
+      "step_s": 0,
+      "sha": "17a706a08432f69e577d3eab7c8359f3b7d905d3"
+    },
+    {
+      "box": "237",
+      "section": "3b. Items in this release  <!-- generator inserts them here, do NOT hand-edit -->",
+      "ticked_at": "2026-11-22T04:36:42-08:00",
+      "since_start_s": 3688,
+      "step_s": 2227,
+      "sha": "c8e1e7decbb42ae01cf95b25775c5c661a96f367"
+    },
+    {
+      "box": "A docs-only commit must not start a build",
+      "section": "4. Push (once)",
+      "ticked_at": "2026-11-22T04:36:42-08:00",
+      "since_start_s": 3688,
+      "step_s": 0,
+      "sha": "c8e1e7decbb42ae01cf95b25775c5c661a96f367"
+    },
+    {
+      "box": "Batch documentation edits into ONE commit. One commit per questi",
+      "section": "4. Push (once)",
+      "ticked_at": "2026-11-22T04:36:42-08:00",
+      "since_start_s": 3688,
+      "step_s": 0,
+      "sha": "c8e1e7decbb42ae01cf95b25775c5c661a96f367"
+    },
+    {
+      "box": "Nothing else pushed in the same window; no push while CI runs fo",
+      "section": "4. Push (once)",
+      "ticked_at": "2026-11-22T04:36:42-08:00",
+      "since_start_s": 3688,
+      "step_s": 0,
+      "sha": "c8e1e7decbb42ae01cf95b25775c5c661a96f367"
+    },
+    {
+      "box": "238",
+      "section": "3b. Items in this release  <!-- generator inserts them here, do NOT hand-edit -->",
+      "ticked_at": "2026-11-22T04:58:36-08:00",
+      "since_start_s": 5002,
+      "step_s": 1314,
+      "sha": "180e2277f4d63509577ef30a365d64a4fe82d279"
+    },
+    {
+      "box": "Per-item Windows evidence was collected over SSH (paste the Powe",
+      "section": "5. Build both platforms",
+      "ticked_at": "2026-11-22T05:12:49-08:00",
+      "since_start_s": 5855,
+      "step_s": 853,
+      "sha": "a07ee2f16d6a1d6ef58b5fccf12ca7162afcc707"
+    },
+    {
+      "box": "CI green on that exact SHA: fmt, clippy, secret-scan, Linux buil",
+      "section": "4. Push (once)",
+      "ticked_at": "2026-11-22T06:59:53-08:00",
+      "since_start_s": 12279,
+      "step_s": 6424,
+      "sha": "acf276f89fbffdcfe33bbba21f38640c435cb215"
+    },
+    {
+      "box": "`release-linux-selfhosted.yml` \u2192 `gpn-linux.tar.gz` on `linux-la",
+      "section": "5. Build both platforms",
+      "ticked_at": "2026-11-22T07:19:29-08:00",
+      "since_start_s": 13455,
+      "step_s": 1176,
+      "sha": "1e0eb5a1c2a4da44960d324f09222b0072d6a49a"
+    },
+    {
+      "box": "`release-windows.yml` on box 1's runner \u2192 `gpn-windows.zip` on `",
+      "section": "5. Build both platforms",
+      "ticked_at": "2026-11-22T07:39:28-08:00",
+      "since_start_s": 14654,
+      "step_s": 1199,
+      "sha": "090712f6e3e5f7e804d46602949bdc3b24e7f9cd"
+    },
+    {
+      "box": "Same SHA on both runs. macOS is not required and is not in the m",
+      "section": "5. Build both platforms",
+      "ticked_at": "2026-11-22T08:18:08-08:00",
+      "since_start_s": 16974,
+      "step_s": 2320,
+      "sha": "c7f52f5e25f3afae54b6a7b348040cc9abdc44c1"
+    },
+    {
+      "box": "The attestation step runs BEFORE the publish step, and a failed ",
+      "section": "5. Build both platforms",
+      "ticked_at": "2026-11-22T08:18:08-08:00",
+      "since_start_s": 16974,
+      "step_s": 0,
+      "sha": "c7f52f5e25f3afae54b6a7b348040cc9abdc44c1"
+    },
+    {
+      "box": "The attestation exists for the digest that is actually published",
+      "section": "5. Build both platforms",
+      "ticked_at": "2026-11-22T08:18:08-08:00",
+      "since_start_s": 16974,
+      "step_s": 0,
+      "sha": "c7f52f5e25f3afae54b6a7b348040cc9abdc44c1"
+    },
+    {
+      "box": "Verify the downloaded artifact with the verifier that matches th",
+      "section": "5. Build both platforms",
+      "ticked_at": "2026-11-22T08:18:08-08:00",
+      "since_start_s": 16974,
+      "step_s": 0,
+      "sha": "c7f52f5e25f3afae54b6a7b348040cc9abdc44c1"
+    },
+    {
+      "box": "Scan the built binaries for strings the change added. Use litera",
+      "section": "6. Verify the artifact BEFORE publishing",
+      "ticked_at": "2026-11-22T08:18:08-08:00",
+      "since_start_s": 16974,
+      "step_s": 0,
+      "sha": "c7f52f5e25f3afae54b6a7b348040cc9abdc44c1"
+    },
+    {
+      "box": "The binary's `--version` matches the version being released.",
+      "section": "6. Verify the artifact BEFORE publishing",
+      "ticked_at": "2026-11-22T08:18:08-08:00",
+      "since_start_s": 16974,
+      "step_s": 0,
+      "sha": "c7f52f5e25f3afae54b6a7b348040cc9abdc44c1"
+    },
+    {
+      "box": "Refuse to cut unless \u00a75's attestation checks passed. If the atte",
+      "section": "7. Cut and publish",
+      "ticked_at": "2026-11-22T08:18:08-08:00",
+      "since_start_s": 16974,
+      "step_s": 0,
+      "sha": "c7f52f5e25f3afae54b6a7b348040cc9abdc44c1"
+    },
+    {
+      "box": "`scripts/release-cut.sh --timeout 300`",
+      "section": "7. Cut and publish",
+      "ticked_at": "2026-11-22T08:18:08-08:00",
+      "since_start_s": 16974,
+      "step_s": 0,
+      "sha": "c7f52f5e25f3afae54b6a7b348040cc9abdc44c1"
+    },
+    {
+      "box": "`network.json` `latest_version` equals the published version.",
+      "section": "7. Cut and publish",
+      "ticked_at": "2026-11-22T08:18:08-08:00",
+      "since_start_s": 16974,
+      "step_s": 0,
+      "sha": "c7f52f5e25f3afae54b6a7b348040cc9abdc44c1"
+    },
+    {
+      "box": "`releases.json` serves the new version twice, ten seconds apart.",
+      "section": "7. Cut and publish",
+      "ticked_at": "2026-11-22T08:18:08-08:00",
+      "since_start_s": 16974,
+      "step_s": 0,
+      "sha": "c7f52f5e25f3afae54b6a7b348040cc9abdc44c1"
+    },
+    {
+      "box": "gpncoin.ai serves the new version",
+      "section": "7b. Every surface that names a version must be updated",
+      "ticked_at": "2026-11-22T08:18:08-08:00",
+      "since_start_s": 16974,
+      "step_s": 0,
+      "sha": "c7f52f5e25f3afae54b6a7b348040cc9abdc44c1"
+    },
+    {
+      "box": "GitHub carries the same version",
+      "section": "7b. Every surface that names a version must be updated",
+      "ticked_at": "2026-11-22T08:18:08-08:00",
+      "since_start_s": 16974,
+      "step_s": 0,
+      "sha": "c7f52f5e25f3afae54b6a7b348040cc9abdc44c1"
+    },
+    {
+      "box": "Both surfaces agree with each other and with the binaries",
+      "section": "7b. Every surface that names a version must be updated",
+      "ticked_at": "2026-11-22T08:18:08-08:00",
+      "since_start_s": 16974,
+      "step_s": 0,
+      "sha": "c7f52f5e25f3afae54b6a7b348040cc9abdc44c1"
+    },
+    {
+      "box": "Every capability added in this bundle is discoverable from gpnco",
+      "section": "7b. Every surface that names a version must be updated",
+      "ticked_at": "2026-11-22T08:18:08-08:00",
+      "since_start_s": 16974,
+      "step_s": 0,
+      "sha": "c7f52f5e25f3afae54b6a7b348040cc9abdc44c1"
+    },
+    {
+      "box": "Anonymous download of both assets from `gpncoin.ai` succeeds.",
+      "section": "8. Verify as a stranger would",
+      "ticked_at": "2026-11-22T08:18:08-08:00",
+      "since_start_s": 16974,
+      "step_s": 0,
+      "sha": "c7f52f5e25f3afae54b6a7b348040cc9abdc44c1"
+    },
+    {
+      "box": "sha256 and size match the manifest for both.",
+      "section": "8. Verify as a stranger would",
+      "ticked_at": "2026-11-22T08:18:08-08:00",
+      "since_start_s": 16974,
+      "step_s": 0,
+      "sha": "c7f52f5e25f3afae54b6a7b348040cc9abdc44c1"
+    },
+    {
+      "box": "Docs stamp and `downloads.md` show the same version; the live UR",
+      "section": "8. Verify as a stranger would",
+      "ticked_at": "2026-11-22T08:18:08-08:00",
+      "since_start_s": 16974,
+      "step_s": 0,
+      "sha": "c7f52f5e25f3afae54b6a7b348040cc9abdc44c1"
+    },
+    {
+      "box": "One node updates itself",
+      "section": "9. Deploy and confirm",
+      "ticked_at": "2026-11-22T08:18:08-08:00",
+      "since_start_s": 16974,
+      "step_s": 0,
+      "sha": "c7f52f5e25f3afae54b6a7b348040cc9abdc44c1"
+    },
+    {
+      "box": "The running process reports the new version (check `(Get-Process",
+      "section": "9. Deploy and confirm",
+      "ticked_at": "2026-11-22T08:18:08-08:00",
+      "since_start_s": 16974,
+      "step_s": 0,
+      "sha": "c7f52f5e25f3afae54b6a7b348040cc9abdc44c1"
+    },
+    {
+      "box": "Log shows `check \u2192 stop \u2192 download \u2192 swap \u2192 start \u2192 CONFIRMED <v",
+      "section": "9. Deploy and confirm",
+      "ticked_at": "2026-11-22T08:18:08-08:00",
+      "since_start_s": 16974,
+      "step_s": 0,
+      "sha": "c7f52f5e25f3afae54b6a7b348040cc9abdc44c1"
+    },
+    {
+      "box": "Previous version retained for rollback; a failed update leaves t",
+      "section": "9. Deploy and confirm",
+      "ticked_at": "2026-11-22T08:18:08-08:00",
+      "since_start_s": 16974,
+      "step_s": 0,
+      "sha": "c7f52f5e25f3afae54b6a7b348040cc9abdc44c1"
+    },
+    {
+      "box": "Peers hold >5 minutes; no new `Reason:` bans; no unexpected `gpn",
+      "section": "10. Prove the behaviour",
+      "ticked_at": "2026-11-22T08:19:18-08:00",
+      "since_start_s": 17044,
+      "step_s": 70,
+      "sha": "78fa10f09faf8ba78a4d3c615a1c2474ed5b8f67"
+    }
+  ]
+}
