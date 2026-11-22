@@ -1,3 +1,21 @@
+## 23:55 PT — §2 opened: "the test passes" ticked with a same-turn run of all five pwsh suites + rust suites on the release tree; run 44987167844 went GREEN (linux+windows+fmt/clippy) [no triage]
+
+- **A0**: `origin/main` HEAD `68d7116` (docs-only checklist commit ⇒ `total_count: 0` under
+  `paths-ignore`; no CI to read, correctly). Release sha stays `88f2eea`; its run **44987167844**
+  read once, not waited on: `secret-scan` ✅, `fmt + clippy` ✅, `Build + unit tests (linux)` ✅,
+  `Build + unit tests (windows, self-hosted)` ✅, overall **completed success 2026-11-22T06:52:37Z**.
+  That clears §4's CI box (to be ticked in order).
+- **Box worked — §2 "The test passes."** Re-ran everything on a detached worktree of the release
+  tree (`/tmp/rel67` at `68d7116`, so the single-slot runner's checkout was untouched): pwsh
+  `test-update-defer` PASS (44 checks), `test-update-exit-cause` PASS, `test-update-shutdown` PASS
+  (`ok I it leaves the node running`), `test-update-start-after-stop` PASS (`ok E: ... parent are
+  recorded`), `test-update-confirm` `FAILURES: 0`; bash `test-autostart-installers.sh` ⇒
+  `all autostart/installer assertions passed` EXIT=0; `cargo test --lib exit_report` ⇒ 11 passed,
+  `cargo test --bin gpn_node` ⇒ 34 passed, 0 failed. Ticked with that evidence.
+- **Next run**: §2 box 2 — `cargo fmt --check` + clippy `-D warnings` on the same tree, then the
+  remaining §2 boxes (full suites, call-site grep, no off-by-default flag, change present in tree).
+- No blocker, no [TRIAGE].
+
 ## 22:35 PT — §1 closed: the "cannot be tested" box is n/a, both pwsh suites re-run PASS this run; CI Windows job still building [no triage]
 
 - **A0**: `origin/main` HEAD `ac47db7` (docs-only ⇒ `?head_sha=` full-40 would give `total_count: 0`
