@@ -17,23 +17,32 @@ TEMPLATE = os.path.join(REPO, "docs", "UPDATE-CHECKLIST.md")
 OUTDIR = os.path.join(REPO, "docs", "releases")
 
 
-def items():
-    """Return [(id, title, acceptance)] for every IN-PROGRESS row."""
+# A row is `| id | status | text |` and MAY carry extra `|` columns/notes. The old
+# regex demanded a fifth pipe, so a row whose text contains no pipe at all was
+# silently dropped from the release checklist -- the item then never appeared as
+# a box and could not be worked (row 237, 2026-11-22). Split on the first two
+# pipes only and keep the rest of the row as the description.
+ROW_RE = re.compile(r"^\|\s*(\d+)\s*\|\s*([A-Z-]+)\s*\|\s*(.*?)\s*\|\s*$")
+
+
+def _rows(status):
     out = []
     for line in open(LIST):
-        m = re.match(r"\|\s*(\d+)\s*\|\s*IN-PROGRESS\s*\|\s*(.+?)\s*\|\s*(.+?)\s*\|", line)
-        if m:
-            out.append((m.group(1), m.group(2), m.group(3)))
+        m = ROW_RE.match(line.rstrip("\n"))
+        if not m or m.group(2) != status:
+            continue
+        text = m.group(3).replace("`|`", "|")
+        out.append((m.group(1), text, ""))
     return out
+
+
+def items():
+    """Return [(id, title, acceptance)] for every IN-PROGRESS row."""
+    return _rows("IN-PROGRESS")
 
 
 def blocked():
-    out = []
-    for line in open(LIST):
-        m = re.match(r"\|\s*(\d+)\s*\|\s*BLOCKED\s*\|\s*(.+?)\s*\|\s*(.+?)\s*\|", line)
-        if m:
-            out.append((m.group(1), m.group(2), m.group(3)))
-    return out
+    return _rows("BLOCKED")
 
 
 def main():

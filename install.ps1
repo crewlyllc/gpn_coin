@@ -2226,6 +2226,53 @@ function Register-UpdateTask {
   return $true
 }
 
+# #238: the update task must run at the node task's integrity level.
+#
+# Box 1, 2026-11-22 03:15 PT: `GPN-Update` was registered at RunLevel=Limited
+# (2026-11-01, an older installer) while `GPN-Node` runs at Highest. The
+# updater's Stop-NodeTree could not terminate the node ("Access is denied - it
+# may be elevated"), the wrapper correctly refused to apply, and the box stayed
+# on 0.3.66 while every check step succeeded -- a silent permanent non-updater.
+#
+# The XML has said HighestAvailable since 2026-11-17, so the XML is not the
+# proof: the LIVE task is. Ask the task after registering, replace it once if the
+# answer is lower, and say plainly if it is still lower.
+function Get-TaskRunLevel {
+  param([string]$Name)
+  try {
+    $t = Get-ScheduledTask -TaskName $Name -ErrorAction Stop
+    return [string]$t.Principal.RunLevel
+  } catch { return '' }
+}
+
+function Assert-UpdateTaskElevation {
+  param([scriptblock]$RunLevelProbe = $null, [scriptblock]$Reregister = $null)
+  $probe = $RunLevelProbe
+  if (-not $probe) { $probe = { param($n) Get-TaskRunLevel $n } }
+  $update = [string](& $probe $UpdateTask)
+  $node = [string](& $probe $NodeTask)
+  if (-not $update) {
+    Warn "could not read $UpdateTask's RunLevel (ScheduledTasks module unavailable?) -- cannot verify it can stop $NodeTask"
+    return $false
+  }
+  if ($update -ieq 'Highest') {
+    Say "$UpdateTask runs at RunLevel=Highest (can stop $NodeTask, RunLevel='$node')"
+    return $true
+  }
+  Warn "$UpdateTask runs at RunLevel=$update while $NodeTask runs at RunLevel='$node' -- the updater cannot stop the node it replaces"
+  Warn 'replacing the task once with the installer XML (/F), then re-asking'
+  $rr = $Reregister
+  if (-not $rr) { $rr = { Register-UpdateTask } }
+  [void](& $rr)
+  $again = [string](& $probe $UpdateTask)
+  if ($again -ieq 'Highest') {
+    Say "$UpdateTask now runs at RunLevel=Highest after re-registration"
+    return $true
+  }
+  Warn "STILL RunLevel=$again after re-registration -- this box will not auto-update while the node is elevated. Run install.ps1 from an elevated shell for this user."
+  return $false
+}
+
 # -- Update fallback: a Startup shortcut when Task Scheduler refuses ---------
 # 2026-11-08: on box 2 and box 4 (and box 1) `schtasks /Create` answers "Access
 # is denied" for a standard account, so GPN-Update never registers and the box
@@ -3221,6 +3268,7 @@ if ($UpdateTaskOnly) {
     Say 'falling back to the Startup-shortcut update loop'
     $ok = Write-UpdateFallback
   }
+  if ($ok) { [void](Assert-UpdateTaskElevation) }
   if ($WhatIf) { Write-Host '[whatif] would not start or stop the node' -ForegroundColor Cyan }
   try { Stop-Transcript | Out-Null } catch { }
   # This mode is best-effort BY DESIGN: it runs inside the release build, whose
@@ -3504,6 +3552,9 @@ if (-not (Register-UpdateTask)) {
   # Task Scheduler refused (standard account): fall back to a Startup shortcut so
   # this machine still updates itself instead of waiting for a human.
   [void](Write-UpdateFallback)
+} else {
+  # #238: registration succeeding is not proof the live task can stop the node.
+  [void](Assert-UpdateTaskElevation)
 }
 
 if (-not $NoStart) {

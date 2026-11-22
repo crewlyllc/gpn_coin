@@ -8,6 +8,37 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 versions are [Semantic Versioning](https://semver.org/spec/v2.0.0.html), with
 the GPN-specific meaning of each level documented in `docs/updates.md`.
 
+## [0.3.68] - 2026-11-22
+
+Bumped from 0.3.67 (`scripts/bump-version.py patch`).
+
+**The two gates that had silently stopped Windows boxes from ever updating.
+Box 1 could not update for two independent reasons: it read a leftover
+file-replacement queue as "the machine is shutting down", and its updater ran
+at a lower integrity level than the node it has to stop. Both are fixed in the
+installer and both now fail loudly instead of looking like a normal deferral.**
+
+### Fixed
+- **A stale `PendingFileRenameOperations` queue no longer defers the update
+  cycle (row 237).** `Get-ShutdownState` treated PFRO, CBS `RebootPending` and
+  WU `RebootRequired` as "a shutdown is in progress". They only mean "a reboot
+  is owed", and other installers leave them behind for days (118 dead entries on
+  box 1, naming `C:\Config.Msi\*.rbf`, Brave and Dropbox temp files). The
+  updater's own swap uses `MOVEFILE_DELAY_UNTIL_REBOOT`, so a successful update
+  created the marker that blocked the next one. Now only `SM_SHUTTINGDOWN`
+  defers; the reboot markers are logged as notes. `test-update-shutdown.ps1`
+  asserts PFRO-only and CBS+WU-only are not deferred (27 checks).
+- **The `GPN-Update` task is verified against the node's integrity level
+  (row 238).** Box 1's task was registered at `RunLevel=Limited` on 2026-11-01
+  while `GPN-Node` runs at `Highest`, so the updater could not stop the node
+  (`Access is denied - it may be elevated`) and refused to apply, leaving the
+  box on 0.3.66. Registration success is not proof: `Assert-UpdateTaskElevation`
+  reads the *live* tasks, replaces the update task once with the installer XML
+  if the level is lower, re-asks, and warns plainly if it is still lower. Both
+  installer paths (fresh install and `--update-task-only` deploy) call it.
+  `test-update-task-elevation.ps1` covers Highest, Limited-then-fixed,
+  Limited-twice and unreadable (18 checks).
+
 ## [0.3.67] - 2026-11-21
 
 Bumped from 0.3.66 (`scripts/bump-version.py patch`).

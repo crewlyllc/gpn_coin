@@ -1,3 +1,30 @@
+## 03:4x PT — 0.3.67 closed by the previous run; 0.3.68 BUNDLED (rows 237 + 238: the two gates that stopped Windows updates) [no triage]
+
+- **A0**: no CI run exists for main `ad06dff` at check time (`head_sha=` → 0); the last push was docs-only
+  (paths-ignore). Run `45016984083` from the timing-tool fix was `in_progress` — noted, not awaited.
+- **0.3.67 was completed by the 03:22 run** while this one was working: §10 observed on box 1, checklist
+  filed, rows 233–236 → COMPLETE, 237 left NEW (code half). So this run did not re-touch 0.3.67.
+- **C — bundled 0.3.68**, both remaining NEW rows, both implemented and tested here:
+  - **237** `Get-ShutdownState` now defers only on `SM_SHUTTINGDOWN`; PFRO/CBS/WU are returned as `Notes`
+    and logged (`note: a reboot is pending … - logged only, does not defer`). Rationale in code: the
+    updater's own swap uses MOVEFILE_DELAY_UNTIL_REBOOT, so a successful update created the marker that
+    would block the next one. `test-update-shutdown.ps1` rewritten for the new contract (PFRO-only and
+    CBS+WU-only NOT deferred, notes carried, notes log outside the deferral branch) → **RESULT: PASS
+    (all checks, 27)**.
+  - **238** new `Assert-UpdateTaskElevation` reads the LIVE `GPN-Update`/`GPN-Node` RunLevels, replaces
+    the update task once (`/F`) if it is lower, re-asks, and warns plainly if it is still lower; called
+    on both installer paths (fresh install + `--update-task-only`). New
+    `scripts/tests/test-update-task-elevation.ps1` → **RESULT: PASS (18 checks)**. `install.ps1`
+    parse-checks clean under pwsh 7.
+- **Tool bug fixed while bundling**: `make-release-checklist.py` required a fifth pipe, so a row whose
+  text contains no `|` was silently dropped from the checklist — row 237 would have been invisible to
+  the release. Now splits on the first two pipes only (`0.3.68`: 2 in-progress inserted).
+- `/usr/bin/python3 scripts/bump-version.py patch` → 0.3.68 (15 manifests + 14 lockfiles +
+  `network.json`), `--check` ⇒ `lockstep: 15 … agree`; CHANGELOG section written, no `_TODO_`.
+- **Next run**: work box 1 of `docs/releases/0.3.68.md`. §10's on-box proof needs the new
+  `update-and-restart.ps1` + a `RunLevel=Highest` task deployed to box 1 (both are installer-side, so
+  the shipped 0.3.68 install must regenerate them). Nothing else merges into main while 0.3.68 is in flight.
+
 ## 03:22 PT — 0.3.67 COMPLETE and filed; box 1 unblocked and now runs 0.3.67
 
 - **A0**: no CI run exists for main `7436384` (docs-only checklist commit, paths-ignore) — nothing awaited.
