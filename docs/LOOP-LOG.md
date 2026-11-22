@@ -1,3 +1,33 @@
+## 14:40 PT 0.3.69 PUBLISHED, DEPLOYED, PROVEN and FILED — row 239 COMPLETE
+- A0: main HEAD `870ddda`, CI run 45075851892 `in_progress` 4 min ⇒ noted, not waited on.
+- §5: asked GitHub once about the handle from the 13:31 run — `release-windows.yml` **45072558357**
+  `completed / success` (fe67524, 21:31→21:57Z). Downloaded the published zip (253,156,473 B,
+  `a7c0af21…`), `cosign verify-blob` ⇒ `Verified OK`, string-scanned it: same 3 row-239 literals as linux.
+- §7 cut: `release-cut.sh 0.3.69` ⇒ linux `c6eca129…` (347,001,144 B), windows `a7c0af21…`,
+  signed manifest commit `0d5db34`; `releases.json` serves 0.3.69 twice with identical bodies 10 s apart;
+  `network.json latest_version = 0.3.69`.
+- §7b found two live lies and fixed both: `/download` advertised "Current signed release: **0.3.68**"
+  from a hardcoded literal (now 0.3.69 + filled from releases.json at load, `ad40093`); the docs stamp
+  was 0.3.68/spec 52 (now spec 53/0.3.69/block 347,219, `5be2016`). `seeds.json` has **no version field** —
+  recorded as not-satisfiable rather than ticked.
+- §8: anonymous GETs 200 with the manifest sizes; release-cut's own credential-free re-download matched
+  both digests.
+- §9: **two nodes updated themselves** — box 1 by its own `gpn_update` loop (14:31:13 local: check →
+  stop → download 253.2 MB → `current -> versions/0.3.69 previous: 0.3.68` → start → confirm), and this
+  host via `gpn-update.service` (`confirm: process=up rpc=yes 22s version=0.3.69` → `confirmed 0.3.69
+  is running`). Note the trap: `C:\gpn\bin` was already 0.3.69 from the release workflow's deploy while
+  the *running* process was still 0.3.68 — the box's "check the process path first" is not pedantry.
+- §10: live `GET :8092/providers` on 0.3.69 ⇒ **2 rows (was 7)**, both real addresses, `git_sha fe67524`,
+  **0** empty-address placeholders, `unreachable_endpoints: []`. Peers 3, zero `Reason:` bans in the
+  20 min after restart. Row 239 marked COMPLETE with version + sha.
+- §10b: timing recorded (45/49 boxes, 21m17s of checklist time). Slowest step 59m21s = the two platform
+  builds serialized on purpose across two different runners; shorten by dispatching both legs off one tag.
+- Filed: `archive/0.3.69.md` (49/49) + an INDEX row. Checklist is fully ticked.
+- **For a later run (no owner decision needed):** `scripts/build-site-docs.py` emits `.html` hrefs and
+  canonical URLs while the deployed site uses extensionless paths — regenerating it rewrites every nav
+  link on 11 pages (I reverted that run and patched the stamp in place). Also box 1's updater needed
+  `taskkill /T /F` after a 60 s graceful-stop timeout; the update still landed.
+- No [TRIAGE] item; nothing needs Jeremy.
 ## 13:55 PT 0.3.69 §5 — duplicate run: linux box was already ticked by the 21:12Z run
 - This run found the linux box already ticked at HEAD (`36d75c1`/`111e4f7`); independent re-check of
   the same published asset (digest `c6eca129…12918b`, `gpn_node 0.3.69 (spec 53, fe67524)`)
