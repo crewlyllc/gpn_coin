@@ -15,6 +15,10 @@
 - **Rows 233/234/235/236 -> COMPLETE 0.3.67** with that evidence; 237 stays NEW (code half: narrow the gate).
 - **Filed**: checklist moved to `docs/releases/archive/0.3.67.md`, `INDEX.md` row added, §0b boxes ticked.
 - **0.3.67 is now finished**: every box ticked, published, and reported running by a node on each platform.
+- **Release-timing tool fixed**: after filing, `scripts/release-timing.py` read only the archive path and lost every
+  pre-rename tick (`total_s: 0`). It now reads both `docs/releases/<v>.md` and `archive/<v>.md`; re-run gives
+  `total_s: 30413` (8h27m), 52 rows, slowest step 1h02m (§1 name-the-behaviour). Commit `9139ddd`;
+  CI run **45016984083** dispatched by the push — noted, not awaited.
 
 ## 03:09 PT — 0.3.67 §7–§10b worked: versions live everywhere, node self-updated, and box 1 found blocking itself [TRIAGE]
 
