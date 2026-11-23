@@ -53,9 +53,12 @@ fn record(hash: [u8; 32]) -> AttestationRecord {
 /// (#205; the pool checks `pays_fee` per call, so accept alone was not enough)
 /// · 53 `register_provider` (call_index 0) is `Pays::No` — the last paid path
 /// to registration, so no registration path can charge a fee (#231).
+/// · 54 a refused unsigned entry is reported as its real reason
+/// (`InvalidTransaction::Custom(n)`) instead of `BadProof` => "Transaction has
+/// a bad signature" (#243).
 #[test]
 fn spec_version_matches_live_chain() {
-    assert_eq!(VERSION.spec_version, 53);
+    assert_eq!(VERSION.spec_version, 54);
 }
 
 /// `testnet-no-stake` actually flips the runtime constant to zero; the default

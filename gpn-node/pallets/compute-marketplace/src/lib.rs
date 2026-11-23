@@ -585,8 +585,15 @@ pub mod pallet {
                     // One hash against the live target + the entry limits. This
                     // is the anti-spam gate: without a valid proof the extrinsic
                     // is not admitted at all.
+                    //
+                    // Row 243: pass the *reason* through as a `Custom(code)`.
+                    // `BadProof` here was rendered by the RPC layer as
+                    // "Transaction has a bad signature", which sent two
+                    // investigations down a signature path that does not exist
+                    // (this call is unsigned). The codes are `EntryReject`'s and
+                    // the client maps them back to a sentence.
                     T::GpuEntry::precheck_pow(account, pow, gpu_info_hash)
-                        .map_err(|_| InvalidTransaction::BadProof)?;
+                        .map_err(|reject| InvalidTransaction::Custom(reject.code()))?;
                     // An unsigned extrinsic MUST provide at least one tag, or
                     // the pool rejects it ("No tags provided", 1019). The tag
                     // also makes a duplicate submission for the same account a
@@ -2372,6 +2379,10 @@ mod tests {
     thread_local! {
         static MOCK_ENTRY: std::cell::RefCell<Option<(u64, [u8; 32])>> =
             const { std::cell::RefCell::new(None) };
+        /// Row 243: lets a test make the pool-boundary precheck refuse with a
+        /// specific reason, so `validate_unsigned`'s mapping is testable.
+        static MOCK_PRECHECK_REJECT: std::cell::Cell<Option<pallet_gpu_attestation::EntryReject>> =
+            const { std::cell::Cell::new(None) };
     }
     pub struct MockGpuEntry;
     impl pallet_gpu_attestation::GpuEntryProvider<u64> for MockGpuEntry {
@@ -2393,8 +2404,11 @@ mod tests {
             _who: &u64,
             _pow: &pallet_gpu_attestation::EntryPow,
             _gpu_info_hash: &[u8; 32],
-        ) -> frame_support::dispatch::DispatchResult {
-            Ok(())
+        ) -> Result<(), pallet_gpu_attestation::EntryReject> {
+            MOCK_PRECHECK_REJECT.with(|c| match c.get() {
+                Some(reject) => Err(reject),
+                None => Ok(()),
+            })
         }
     }
 
@@ -2622,6 +2636,61 @@ mod tests {
         };
         assert_eq!(paid.get_dispatch_info().pays_fee, Pays::No);
         let _ = Weight::zero();
+    }
+
+    /// Row 243: a refused entry must reach the client as the **actual** reason,
+    /// not as `BadProof` (which the RPC layer renders as "Transaction has a bad
+    /// signature" — a signature fault on an unsigned call). Each `EntryReject`
+    /// code travels as `InvalidTransaction::Custom(n)`; the client maps the
+    /// number back to a sentence.
+    #[test]
+    fn entry_precheck_refusal_reports_its_real_reason() {
+        use pallet_gpu_attestation::EntryReject;
+        use sp_runtime::traits::ValidateUnsigned;
+        use sp_runtime::transaction_validity::{
+            InvalidTransaction, TransactionSource, TransactionValidityError,
+        };
+
+        let call = || Call::<Test>::register_provider_entry_unsigned {
+            account: BOB,
+            pow: sample_pow(),
+            challenge_response: [3u8; 32],
+            gpu_info_hash: [4u8; 32],
+            gpu_count: 1,
+            compute_gflops: 10_000,
+            requirements: default_reqs(),
+        };
+
+        new_test_ext().execute_with(|| {
+            // A proof below the target: the code the client needs to re-mine.
+            MOCK_PRECHECK_REJECT.with(|c| c.set(Some(EntryReject::ProofInvalid)));
+            assert_eq!(
+                MarketPallet::validate_unsigned(TransactionSource::External, &call()),
+                Err(TransactionValidityError::Invalid(
+                    InvalidTransaction::Custom(1)
+                )),
+                "a proof below target must be Custom(1), never BadProof"
+            );
+
+            // The per-block cap: transient, retry on the next block.
+            MOCK_PRECHECK_REJECT.with(|c| c.set(Some(EntryReject::LimitReached)));
+            assert_eq!(
+                MarketPallet::validate_unsigned(TransactionSource::External, &call()),
+                Err(TransactionValidityError::Invalid(
+                    InvalidTransaction::Custom(5)
+                )),
+                "an exhausted per-block cap must be Custom(5), never BadProof"
+            );
+
+            // And when nothing refuses, the unsigned extrinsic is admitted with
+            // a tag (the pool rejects untagged unsigned extrinsics, 1019).
+            MOCK_PRECHECK_REJECT.with(|c| c.set(None));
+            let ok = MarketPallet::validate_unsigned(TransactionSource::External, &call());
+            assert!(
+                ok.is_ok(),
+                "a passing precheck must still admit the entry: {ok:?}"
+            );
+        });
     }
 
     #[test]

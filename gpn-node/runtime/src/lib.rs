@@ -126,7 +126,11 @@ pub const VERSION: sp_version::RuntimeVersion = sp_version::RuntimeVersion {
     // 53: item 231 — `register_provider` (compute-marketplace call_index 0) is
     // `Pays::No`, so no registration path charges a fee. Requires set_code: the
     // bundled genesis WASM stays frozen at the launch version by design.
-    spec_version: 53,
+    // 54: item 243 — a refused unsigned entry reaches the client as its real
+    // reason (`InvalidTransaction::Custom(n)`) instead of `BadProof`, which the
+    // pool renders as "Transaction has a bad signature". Requires set_code; the
+    // genesis WASM stays frozen.
+    spec_version: 54,
     impl_version: 1,
     apis: RUNTIME_API_VERSIONS,
     transaction_version: 1,

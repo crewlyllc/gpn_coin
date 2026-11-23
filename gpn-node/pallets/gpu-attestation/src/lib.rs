@@ -178,11 +178,86 @@ pub trait GpuEntryProvider<AccountId> {
     /// proof against the live target and enforce the entry limits, without
     /// writing anything. Called from `validate_unsigned`, i.e. before dispatch,
     /// so a zero-cost extrinsic still cannot spam the block.
+    ///
+    /// The failure is an [`EntryReject`], not a `DispatchError`, on purpose
+    /// (row 243): the pool boundary has no dispatch error to report, so the
+    /// only thing it can pass on is a stable reason code. Returning
+    /// `DispatchResult` there forced `validate_unsigned` to collapse every
+    /// refusal into `InvalidTransaction::BadProof`, which the RPC layer renders
+    /// as "Transaction has a bad signature" — a signature fault that did not
+    /// happen, on a path with no signature at all.
     fn precheck_pow(
         who: &AccountId,
         pow: &EntryPow,
         gpu_info_hash: &[u8; 32],
-    ) -> frame_support::dispatch::DispatchResult;
+    ) -> Result<(), EntryReject>;
+}
+
+/// Why an unsigned entry was refused at the pool boundary (row 243).
+///
+/// Wire codes are **stable**: the client (`gpn-agent/src/onboard.rs`) maps the
+/// number back to a sentence, and `InvalidTransaction::Custom(n)` is the only
+/// channel the pool boundary offers. Never renumber a variant; add a new code.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[repr(u8)]
+pub enum EntryReject {
+    /// The proof does not clear the difficulty target in force **now** (mined
+    /// before a retarget step, or simply short of the target).
+    ProofInvalid = 1,
+    /// No hardware fingerprint in the extrinsic (zero hash).
+    GpuIdentityMissing = 2,
+    /// This account already used its one free entry.
+    AccountAlreadyUsed = 3,
+    /// This GPU fingerprint already used its one free entry.
+    GpuAlreadyUsed = 4,
+    /// The per-block cap on fee-free entries is exhausted.
+    LimitReached = 5,
+    /// Anything else; reported rather than silently dressed up as one of the
+    /// above, so a new failure mode cannot masquerade as an old one.
+    Unknown = 255,
+}
+
+impl EntryReject {
+    /// The number that travels in `InvalidTransaction::Custom(n)`.
+    pub const fn code(self) -> u8 {
+        self as u8
+    }
+
+    /// Inverse of [`EntryReject::code`], for tests and for the client's copy.
+    pub const fn from_code(code: u8) -> Option<Self> {
+        match code {
+            1 => Some(Self::ProofInvalid),
+            2 => Some(Self::GpuIdentityMissing),
+            3 => Some(Self::AccountAlreadyUsed),
+            4 => Some(Self::GpuAlreadyUsed),
+            5 => Some(Self::LimitReached),
+            255 => Some(Self::Unknown),
+            _ => None,
+        }
+    }
+
+    /// Operator-facing explanation. This is what the node's error should have
+    /// said all along; it is asserted by tests so it cannot drift from the code.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::ProofInvalid => {
+                "entry proof rejected: the proof does not meet the current GPUPoW difficulty \
+                 target (difficulty retargets every 45 blocks; re-mine and resubmit)"
+            }
+            Self::GpuIdentityMissing => "entry rejected: no GPU hardware fingerprint was supplied",
+            Self::AccountAlreadyUsed => {
+                "entry rejected: this account already used its one free proof-of-work entry"
+            }
+            Self::GpuAlreadyUsed => {
+                "entry rejected: this GPU fingerprint already used its one free entry"
+            }
+            Self::LimitReached => {
+                "entry rejected: the per-block cap on fee-free entries is exhausted — retry \
+                 on the next block"
+            }
+            Self::Unknown => "entry rejected: the chain refused the entry proof",
+        }
+    }
 }
 
 #[frame_support::pallet]
@@ -924,11 +999,25 @@ pub mod pallet {
         /// before a PoW-gated attestation is dispatched; the corresponding
         /// accounting is only written by `record_free_entry` **after** the
         /// attestation has been recorded, so a rejected call consumes nothing.
+        /// The typed reason for a precheck refusal, so the pool boundary can
+        /// report *which* check failed (row 243) instead of one blanket
+        /// "bad signature".
+        fn reject_reason(err: &Error<T>) -> EntryReject {
+            match err {
+                Error::InvalidEntryProof => EntryReject::ProofInvalid,
+                Error::GpuIdentityMissing => EntryReject::GpuIdentityMissing,
+                Error::FreeEntryAccountUsed => EntryReject::AccountAlreadyUsed,
+                Error::FreeEntryGpuUsed => EntryReject::GpuAlreadyUsed,
+                Error::FreeEntryLimitReached => EntryReject::LimitReached,
+                _ => EntryReject::Unknown,
+            }
+        }
+
         fn check_free_entry(
             who: &T::AccountId,
             pow: &EntryPow,
             gpu_info_hash: &[u8; 32],
-        ) -> DispatchResult {
+        ) -> Result<(), Error<T>> {
             // Verification is delegated to `pallet-gpu-pow`: same solution
             // hash binding, same live difficulty target. Never a new hash.
             ensure!(
@@ -1114,9 +1203,9 @@ pub mod pallet {
             who: &T::AccountId,
             pow: &EntryPow,
             gpu_info_hash: &[u8; 32],
-        ) -> DispatchResult {
+        ) -> Result<(), EntryReject> {
             // Shares the exact checks the dispatch path makes; no writes.
-            Self::check_free_entry(who, pow, gpu_info_hash)
+            Self::check_free_entry(who, pow, gpu_info_hash).map_err(|e| Self::reject_reason(&e))
         }
 
         fn free_entry_used(who: &T::AccountId) -> bool {

@@ -1,3 +1,33 @@
+## 17:0x PT 0.3.70 box 3 (243) DONE [TRIAGE] — an entry refusal now says why
+- A0: `origin/main` HEAD `670a722` — one run for that sha, **45086753814 `pending`** (single-slot
+  runner). Not waited on, per the rule; this box is code, it does not need CI.
+- Box: **243**. `precheck_pow` now returns a typed `EntryReject`
+  (`ProofInvalid=1, GpuIdentityMissing=2, AccountAlreadyUsed=3, GpuAlreadyUsed=4,
+  LimitReached=5, Unknown=255`) instead of `DispatchResult`; `validate_unsigned` maps it to
+  `InvalidTransaction::Custom(n)` (`compute-marketplace/src/lib.rs:596`), so the pool no longer
+  collapses every refusal into `BadProof` ⇒ "Transaction has a bad signature".
+- Client half: `gpn-agent/src/onboard.rs` gained `entry_reject_code` + `custom_reject_code()`
+  (parses the pool's `Custom error: {n}`; no number ⇒ no guess) and a code arm in
+  `classify_submit_error`, so the operator reads "the entry proof was rejected: it does not meet
+  the difficulty target in force now … re-mine and resubmit" instead of a signature fault.
+- Red first, then green: flipping the map_err back gives
+  `left: Err(Invalid(BadProof)) right: Err(Invalid(Custom(1)))` (test FAILED); with the change,
+  `entry_precheck_refusal_reports_its_real_reason` passes (pallet 74/74, gpu-attestation 62/62,
+  agent lib 788 passed / 14 ignored). fmt clean; clippy with CI's exact allow-list + `-D warnings`
+  exit 0. The rendering is the SDK's at rev `da5c966` (`rpc-api/src/author/error.rs:107-112`
+  ⇒ `Some(format!("Custom error: {}", e))`), and the agent test feeds exactly that string.
+- Runtime: `spec_version` 53→54 with the pin test bumped in the same commit; `network.json`
+  `spec_version` 52→53 (the live chain is 53; the file was a version behind).
+  `check-spec-version.sh` ⇒ `source spec_version=54   network.json spec_version=53` / OK.
+- **Not live yet**: live `state_getRuntimeVersion` is still `53`, so the testnet pool still prints
+  the old wording until spec 54 is enacted. A `--dev` node does not shortcut it (it boots the
+  frozen genesis WASM — a throwaway dev node on :30399 reported `specVersion 6`; killed, :8092
+  AP verified answering afterwards). Enactment is **`[TRIAGE]`, docs/NEEDS-TRIAGE.md §243**:
+  A build a spec-54 WASM and `set_code` now (~40 min build + one sudo extrinsic) vs B batch it
+  with the next runtime change.
+- Next box: 244 (re-check difficulty at submit and re-mine instead of failing once).
+- Commit below; one push.
+
 ## 16:05 PT 0.3.70 box 3 (242) DONE — the unsigned zero-balance entry WORKS on the live chain
 - A0: `origin/main` HEAD `edf7cef` (0 CI runs for that sha — docs-only, paths-ignore correct). In
   flight: run 45081100470 on `a83907f` `in_progress` 53 min and 45084899171 on `845b055` `pending`.

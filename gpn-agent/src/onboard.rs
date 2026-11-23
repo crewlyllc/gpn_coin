@@ -555,9 +555,84 @@ pub fn is_unknown_call(err: &str) -> bool {
         && (l.contains("not found") || l.contains("unknown") || l.contains("does not exist"))
 }
 
+/// Stable wire codes the runtime sends as `InvalidTransaction::Custom(n)` when
+/// the pool-boundary precheck refuses an unsigned entry (`EntryReject` in
+/// `pallet-gpu-attestation`, row 243).
+///
+/// The pool boundary cannot report a dispatch error, so the code is the only
+/// channel: `Custom(1)` reaches the client as the string "Custom error: 1".
+/// These constants are the client's half of that contract — keep them in step
+/// with the pallet's `EntryReject` (a test below pins each one to its sentence).
+pub mod entry_reject_code {
+    /// The proof does not clear the difficulty target in force now.
+    pub const PROOF_INVALID: u8 = 1;
+    pub const GPU_IDENTITY_MISSING: u8 = 2;
+    pub const ACCOUNT_ALREADY_USED: u8 = 3;
+    pub const GPU_ALREADY_USED: u8 = 4;
+    pub const LIMIT_REACHED: u8 = 5;
+}
+
+/// Pull the number out of the pool's rendering of `InvalidTransaction::Custom`.
+///
+/// Substrate renders it as `Custom error: {n}` (data field) and, if the data is
+/// missing, as `InvalidTransaction custom error` with no number at all — that
+/// second form is reported as unknown rather than guessed at.
+pub fn custom_reject_code(err: &str) -> Option<u8> {
+    let l = err.to_ascii_lowercase();
+    let at = l.find("custom error:")?;
+    l[at + "custom error:".len()..]
+        .trim_start()
+        .split(|c: char| !c.is_ascii_digit())
+        .next()
+        .and_then(|n| n.parse::<u8>().ok())
+}
+
 /// Map a dispatch error string onto a stable reason code + operator guidance.
 pub fn classify_submit_error(err: &str) -> (FailureReason, String) {
     let l = err.to_ascii_lowercase();
+    // Row 243: the pool reports a refused entry proof as `Custom(n)`; turn the
+    // number back into the reason the chain actually had, instead of leaving it
+    // as "Transaction has a bad signature" (a signature this call does not have)
+    // or as an opaque code.
+    if let Some(code) = custom_reject_code(err) {
+        let reason = match code {
+            entry_reject_code::PROOF_INVALID => Some((
+                FailureReason::SubmitRejected,
+                "the entry proof was rejected: it does not meet the difficulty target in force \
+                 now (the target retargets every 45 blocks, so a proof mined before the step is \
+                 no longer valid) — re-mine against the current target and resubmit"
+                    .to_string(),
+            )),
+            entry_reject_code::GPU_IDENTITY_MISSING => Some((
+                FailureReason::GpuIdentityMissing,
+                "the chain rejected the entry because no GPU hardware fingerprint was supplied"
+                    .to_string(),
+            )),
+            entry_reject_code::ACCOUNT_ALREADY_USED => Some((
+                FailureReason::FreeEntryAccountUsed,
+                "this account already used its one free proof-of-work entry — re-register via \
+                 `register_provider_entry_unsigned` (unsigned, no fee) or `register_provider` \
+                 (fee-free since spec 53)"
+                    .to_string(),
+            )),
+            entry_reject_code::GPU_ALREADY_USED => Some((
+                FailureReason::FreeEntryGpuUsed,
+                "this GPU fingerprint already used its one free entry — use a different physical \
+                 GPU or an account that already owns it"
+                    .to_string(),
+            )),
+            entry_reject_code::LIMIT_REACHED => Some((
+                FailureReason::FreeEntryLimitReached,
+                "the per-block cap on fee-free entries is exhausted — retry after the next block \
+                 (the limit is not consumed by this attempt)"
+                    .to_string(),
+            )),
+            _ => None,
+        };
+        if let Some((reason, text)) = reason {
+            return (reason, format!("{text} ({err})"));
+        }
+    }
     if l.contains("freeentrygpuused") || l.contains("free entry gpu") {
         return (
             FailureReason::FreeEntryGpuUsed,
@@ -1209,6 +1284,55 @@ mod tests {
             assert_eq!(got, want, "{err}");
             assert!(!detail.is_empty());
         }
+    }
+
+    /// Row 243: the pool reports a refused *unsigned entry* as
+    /// `InvalidTransaction::Custom(n)` — the node's rendering is
+    /// `Custom error: {n}`. Each code must come back as the real reason and as
+    /// the sentence an operator can act on, and no code may fall back to the
+    /// "bad signature" wording that sent two investigations the wrong way.
+    #[test]
+    fn pool_boundary_reject_codes_are_translated_back_into_reasons() {
+        let cases = [
+            (1u8, FailureReason::SubmitRejected, "difficulty target"),
+            (2, FailureReason::GpuIdentityMissing, "hardware fingerprint"),
+            (
+                3,
+                FailureReason::FreeEntryAccountUsed,
+                "free proof-of-work entry",
+            ),
+            (4, FailureReason::FreeEntryGpuUsed, "GPU fingerprint"),
+            (5, FailureReason::FreeEntryLimitReached, "per-block cap"),
+        ];
+        for (code, want, phrase) in cases {
+            // Exactly the string the node's RPC layer produces for Custom(n).
+            let err = format!(
+                "entry-submit-rejected: {{\"code\":1010,\"data\":\"Custom error: {code}\"}}"
+            );
+            assert_eq!(custom_reject_code(&err), Some(code), "{err}");
+            let (got, detail) = classify_submit_error(&err);
+            assert_eq!(got, want, "{err}");
+            assert!(
+                detail
+                    .to_ascii_lowercase()
+                    .contains(&phrase.to_ascii_lowercase()),
+                "code {code} should explain '{phrase}', got: {detail}"
+            );
+            assert!(
+                !detail.contains("bad signature"),
+                "code {code} must not claim a signature fault: {detail}"
+            );
+        }
+
+        // An unknown number is reported as unknown, not silently mapped onto a
+        // different reason — a new failure mode must not masquerade as an old one.
+        let (got, detail) = classify_submit_error("Custom error: 200");
+        assert_eq!(got, FailureReason::SubmitRejected);
+        assert!(detail.contains("rejected"), "{detail}");
+
+        // No number at all (the pool's data-less rendering) is not guessed at.
+        assert_eq!(custom_reject_code("InvalidTransaction custom error"), None);
+        assert_eq!(custom_reject_code("Transaction has a bad signature"), None);
     }
 
     #[test]
