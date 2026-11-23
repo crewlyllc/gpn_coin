@@ -1,3 +1,15 @@
+## 01:05 PT 0.3.70 §7c ticked — no capability in this bundle; #240's /api/finality is documented live
+- **A0**: local HEAD was one commit behind; pulled to `d0b17ea`. `GET /actions/runs?head_sha=d0b17ea…`
+  (full 40-char sha) ⇒ `total_count: 0` — docs-only, paths-ignore, no run expected.
+- **§7c (capability discoverability) ticked as n/a-with-proof**: the bundle's 8 rows (240-247) add no
+  chat/image/video/audio/FT/ML capability; checked row by row in §3b. The one new surface, #240's
+  `GET /api/finality` + `settlement_depth`, is on the live site — anonymous curl:
+  `/docs/technical-overview` `/api/finality` ×1, `/docs/run-a-node` ×1, `/nodes` ×2 + `settlement_depth` ×1.
+- **Re-verified §7b box 3's chain this run** (fresh): releases.json 0.3.70 sha256 linux `ad383ad1…fd58`
+  / windows `490c3dd5…40e5`; both matched `sha256sum` on `/tmp/b70assets`; `lx/gpn_node --version` ⇒
+  `gpn_node 0.3.70 (spec 54, 774c884)`; `wn2/gpn-node.exe` (unzipped from the published zip) carries `0.3.70`.
+- **Next box**: §8 box 1 — anonymous download of both assets from gpncoin.ai. No blocker, no [TRIAGE].
+
 ## 00:45 PT 0.3.70 §7b box 3 ticked — site == GitHub == binary, one sha256 chain
 - **A0**: HEAD `25dfc01` (docs-only) ⇒ `GET /actions/runs?head_sha=25dfc01…` `total_count: 0`, as expected
   by paths-ignore. Last run's handle re-checked once: `cf0c011` run `45134936613` still `in_progress`
