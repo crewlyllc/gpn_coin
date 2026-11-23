@@ -1,3 +1,10 @@
+## 13:55 PT 0.3.71 §8 box 4 ticked — every live surface and the docs stamp say 0.3.71
+- **A0**: `GET /commits/main` ⇒ `7bcd6486c93632e546db9b3b861ed4c431d742b3` (docs-only, "§8 boxes 2-3 ticked") ⇒ `GET /actions/runs?head_sha=7bcd6486…` ⇒ `total_count: 0` — expected docs-only answer, nothing to wait on.
+- **§8 box 4 (docs stamp / downloads.md == live version)**: live poll at 2026-11-23T21:53Z, no token: `https://gpncoin.ai/releases.json` ⇒ `"version": "0.3.71"`, `published_at 2026-11-23T19:07:36Z`, assets 347,068,583 B `3f89c29b77209a60…` and 253,175,858 B `85f4ebe236d6c8aa…`. Live `/docs/downloads` ⇒ `Verified against: chain spec 54 / release 0.3.71 — checked 2026-11-23 12:00 PT at block 352,310.`; live `/docs/run-a-node` ⇒ same stamp; live `/download` ⇒ `current-release">0.3.71`. Repo `docs/downloads.md:3` has the identical sentence.
+- Stamp re-verified against the chain: `state_getRuntimeVersion` ⇒ `specVersion 54`; `chain_getHeader` ⇒ `0x561ef` = block 352,751 (stamp records the checked-at block, not a stale version).
+- **Next box**: §9 box 1 (one node updates **itself**, no hand-copying), then §9 boxes 2-4, §10, §10b.
+- No blocker, no [TRIAGE].
+
 ## 13:40 PT 0.3.71 §8 boxes 2+3 ticked — both assets downloaded anonymously, sha256 and size match the manifest
 - **A0**: `GET /commits/main` ⇒ `d0d05b529f422e246afde153d16987b00b9b47e4` (docs-only: "tick §7b box 4"). `GET /actions/runs?head_sha=d0d05b5…` ⇒ checked, docs-only ⇒ nothing to wait on.
 - **§8 box 2 (anonymous download of both assets)**: took the two URLs verbatim from the live `https://gpncoin.ai/releases.json` (version 0.3.71, published_at 2026-11-23T19:07:36Z) — `…/crewlyllc/gpn_coin/releases/download/linux-latest/gpn-linux.tar.gz` and `…/windows-latest/gpn-windows.zip` — and fetched them with plain `curl -sL`, no token, no cookie jar. 347,068,583 B in 46 s and 253,175,858 B in 34 s, both HTTP 200 through GitHub's `release-assets.githubusercontent.com` redirect.
