@@ -479,7 +479,7 @@ pub async fn run_entry<C: EntryChain, M: PowMiner>(
     // Mine, then re-check the target: difficulty can move while we search, and
     // the pallet verifies against the difficulty *at submission*. Re-mine only
     // when the found proof no longer clears the newer target.
-    let target = match chain.difficulty().await {
+    let mut target = match chain.difficulty().await {
         Ok(t) => t,
         Err(e) => {
             return EntryOutcome::Failed(
@@ -505,6 +505,7 @@ pub async fn run_entry<C: EntryChain, M: PowMiner>(
             Err(_) => break,
         };
         if pow.meets(&latest) {
+            target = latest;
             break;
         }
         log("difficulty moved while mining — re-mining against the newer target");
@@ -512,38 +513,120 @@ pub async fn run_entry<C: EntryChain, M: PowMiner>(
             Ok(p) => p,
             Err(e) => return EntryOutcome::Failed(FailureReason::PowMiningCancelled, e),
         };
+        target = latest;
     }
 
-    log("submitting the unsigned entry (proof of work, no account, no fee)…");
-    match chain
-        .submit_register_provider_entry_unsigned(&pow, params)
-        .await
-    {
-        Ok(()) => EntryOutcome::Registered,
-        Err(e) if is_unknown_call(&e) => {
-            log("unsigned entry is not in the chain metadata — trying the signed entry call");
-            match chain.submit_register_provider_entry(&pow, params).await {
-                Ok(()) => return EntryOutcome::Registered,
-                Err(e2) => log(&format!("signed entry also unavailable: {e2}")),
+    // Row 244: the target can also move between this client's last read and the
+    // *pool's* precheck, which is the failure the 5th box hit. `Custom(1)` is
+    // that race, not a bad proof: re-read the live difficulty, re-mine against
+    // it, and resubmit — twice before giving up.
+    submit_unsigned_with_remine(chain, miner, pow, target, params, log).await
+}
+
+/// Submit the unsigned entry; if the pool refuses the **proof itself** because
+/// the difficulty target moved between our last read and its precheck, re-read
+/// the live target, re-mine against it and resubmit — twice, then report.
+///
+/// Row 244. Two renderings of that refusal exist: from spec 54 the pallet sends
+/// `InvalidTransaction::Custom(1)` (row 243), and on an older chain the same
+/// refusal still arrives as `BadProof` / "Transaction has a bad signature". The
+/// second is only a race when the proof no longer clears the live target — which
+/// is checked before re-mining, so an already-used account is never re-mined.
+pub async fn submit_unsigned_with_remine<C: EntryChain, M: PowMiner>(
+    chain: &C,
+    miner: &M,
+    mut pow: EntryPow,
+    mut target: U256,
+    params: &EntryParams,
+    log: &mut dyn FnMut(&str),
+) -> EntryOutcome {
+    let mut remines = 0u8;
+    loop {
+        log("submitting the unsigned entry (proof of work, no account, no fee)…");
+        match chain
+            .submit_register_provider_entry_unsigned(&pow, params)
+            .await
+        {
+            Ok(()) => return EntryOutcome::Registered,
+            Err(e) if is_unknown_call(&e) => {
+                log("unsigned entry is not in the chain metadata — trying the signed entry call");
+                match chain.submit_register_provider_entry(&pow, params).await {
+                    Ok(()) => return EntryOutcome::Registered,
+                    Err(e2) => log(&format!("signed entry also unavailable: {e2}")),
+                }
+                log("falling back to attest_entry + register");
+                if let Err(att) = chain.submit_attest_entry(&pow, params).await {
+                    let (reason, detail) = classify_submit_error(&att);
+                    return EntryOutcome::Failed(reason, detail);
+                }
+                return match chain.submit_register_provider(params).await {
+                    Ok(()) => EntryOutcome::RegisteredViaFallback,
+                    Err(e2) => {
+                        let (reason, detail) = classify_submit_error(&e2);
+                        EntryOutcome::Failed(reason, detail)
+                    }
+                };
             }
-            log("falling back to attest_entry + register");
-            if let Err(att) = chain.submit_attest_entry(&pow, params).await {
-                let (reason, detail) = classify_submit_error(&att);
+            Err(e) if remines < 2 && is_proof_refusal(&e) => {
+                log(&format!("the pool refused the proof: {e}"));
+                let latest = match chain.difficulty().await {
+                    Ok(t) => t,
+                    Err(e2) => {
+                        return EntryOutcome::Failed(
+                            FailureReason::ChainReadFailed,
+                            format!(
+                                "the chain refused the entry proof and the live difficulty \
+                                 could not be re-read: {e2}"
+                            ),
+                        )
+                    }
+                };
+                if !is_proof_rejection(&e) && pow.meets(&latest) {
+                    // Legacy wording, but the proof still clears the live target:
+                    // a real refusal (spent free entry, used GPU, …), not a race.
+                    let (reason, detail) = classify_submit_error(&e);
+                    return EntryOutcome::Failed(reason, detail);
+                }
+                remines += 1;
+                let old_target = target;
+                let old_nonce = pow.nonce;
+                pow = match miner.mine(latest, log) {
+                    Ok(p) => p,
+                    Err(e2) => return EntryOutcome::Failed(FailureReason::PowMiningCancelled, e2),
+                };
+                target = latest;
+                log(&format!(
+                    "re-mined against the newer target: old target ~2^{:.1} nonce {:#x} → new \
+                     target ~2^{:.1} nonce {:#x} (attempt {remines}/2)",
+                    difficulty_bits(&old_target),
+                    old_nonce,
+                    difficulty_bits(&latest),
+                    pow.nonce
+                ));
+            }
+            Err(e) => {
+                let (reason, detail) = classify_submit_error(&e);
                 return EntryOutcome::Failed(reason, detail);
             }
-            match chain.submit_register_provider(params).await {
-                Ok(()) => EntryOutcome::RegisteredViaFallback,
-                Err(e) => {
-                    let (reason, detail) = classify_submit_error(&e);
-                    EntryOutcome::Failed(reason, detail)
-                }
-            }
-        }
-        Err(e) => {
-            let (reason, detail) = classify_submit_error(&e);
-            EntryOutcome::Failed(reason, detail)
         }
     }
+}
+
+/// True when the pool refused the *proof itself* (row 243's `Custom(1)`): the
+/// difficulty moved between our last read and the pool's precheck, so the cure
+/// is to re-mine against the live target — not to report a failure.
+pub fn is_proof_rejection(err: &str) -> bool {
+    custom_reject_code(err) == Some(entry_reject_code::PROOF_INVALID)
+}
+
+/// Any refusal that could be the proof: row 243's `Custom(1)`, or the blanket
+/// `BadProof` an older chain (spec ≤ 53) still returns for the same precheck.
+pub fn is_proof_refusal(err: &str) -> bool {
+    if is_proof_rejection(err) {
+        return true;
+    }
+    let l = err.to_ascii_lowercase();
+    l.contains("bad signature") || l.contains("badproof") || l.contains("bad proof")
 }
 
 /// Whether a submit error means the runtime metadata does not carry the call
@@ -995,7 +1078,12 @@ mod tests {
     /// A fake chain whose answers are set per test, plus recorded submissions.
     struct FakeChain {
         status: EntryStatus,
-        difficulty: U256,
+        difficulty: std::cell::Cell<U256>,
+        /// How many entry submissions to refuse with `entry_failure`.
+        entry_failures: std::cell::Cell<u32>,
+        entry_failure: std::cell::RefCell<String>,
+        /// Target the chain moves to when it refuses a proof (the retarget race).
+        target_on_reject: std::cell::Cell<Option<U256>>,
         register_entry: Result<(), String>,
         attest_entry: Result<(), String>,
         register_plain: Result<(), String>,
@@ -1008,7 +1096,10 @@ mod tests {
         fn new(status: EntryStatus, difficulty: U256) -> Self {
             Self {
                 status,
-                difficulty,
+                difficulty: std::cell::Cell::new(difficulty),
+                entry_failures: std::cell::Cell::new(0),
+                entry_failure: Default::default(),
+                target_on_reject: std::cell::Cell::new(None),
                 register_entry: Ok(()),
                 attest_entry: Ok(()),
                 register_plain: Ok(()),
@@ -1017,6 +1108,15 @@ mod tests {
                 submitted_plain: Default::default(),
             }
         }
+
+        /// Refuse the next `times` entry submissions with `err`, moving the
+        /// difficulty to `then_target` first (the retarget race).
+        fn refuse(&self, err: &str, times: u32, then_target: Option<U256>) {
+            self.entry_failures.set(times);
+            self.entry_failure.borrow_mut().clear();
+            self.entry_failure.borrow_mut().push_str(err);
+            self.target_on_reject.set(then_target);
+        }
     }
 
     impl EntryChain for FakeChain {
@@ -1024,13 +1124,20 @@ mod tests {
             Ok(self.status)
         }
         async fn difficulty(&self) -> Result<U256, String> {
-            Ok(self.difficulty)
+            Ok(self.difficulty.get())
         }
         async fn submit_register_provider_entry(
             &self,
             pow: &EntryPow,
             _params: &EntryParams,
         ) -> Result<(), String> {
+            if self.entry_failures.get() > 0 {
+                self.entry_failures.set(self.entry_failures.get() - 1);
+                if let Some(t) = self.target_on_reject.get() {
+                    self.difficulty.set(t);
+                }
+                return Err(self.entry_failure.borrow().clone());
+            }
             self.register_entry.clone()?;
             self.submitted_entry.borrow_mut().push(*pow);
             Ok(())
@@ -1190,6 +1297,148 @@ mod tests {
         assert!(
             chain.submitted_attest.borrow().is_empty(),
             "one call, not two"
+        );
+    }
+
+    #[test]
+    fn a_proof_refused_by_the_pool_is_re_mined_against_the_new_target_and_accepted() {
+        let chain = FakeChain::new(fresh_status(), easy_target());
+        let harder = U256::from(1u8) << 249;
+        chain.refuse("Custom error: 1", 1, Some(harder));
+        let miner = InjectedMiner {
+            start: 0,
+            calls: Default::default(),
+        };
+        let mut lines: Vec<String> = Vec::new();
+        let mut log = |s: &str| lines.push(s.to_string());
+        let outcome = block_on(run_entry(&chain, &miner, "acct", &params(), true, &mut log));
+        assert_eq!(outcome, EntryOutcome::Registered);
+        assert_eq!(miner.calls.get(), 2, "one mine, then exactly one re-mine");
+        let submitted = chain.submitted_entry.borrow();
+        assert_eq!(submitted.len(), 1, "only the accepted proof is recorded");
+        assert!(
+            submitted[0].meets(&harder),
+            "the resubmitted proof must clear the target that refused the first one"
+        );
+        let old_nonce = (0u64..1_000_000)
+            .find(|n| build_entry_pow(*n, [0u8; 32], &easy_target()).is_some())
+            .expect("an easy target must have a solution");
+        let joined = lines.join("\n");
+        assert!(
+            joined.contains("re-mined against the newer target"),
+            "the log must name the re-mine, got: {joined}"
+        );
+        assert!(
+            joined.contains(&format!("nonce {old_nonce:#x}")),
+            "the log must carry the refused nonce, got: {joined}"
+        );
+        assert!(
+            joined.contains(&format!("nonce {:#x}", submitted[0].nonce)),
+            "the log must carry the new nonce, got: {joined}"
+        );
+        assert!(
+            joined.contains(&format!(
+                "old target ~2^{:.1}",
+                difficulty_bits(&easy_target())
+            )) && joined.contains(&format!("new target ~2^{:.1}", difficulty_bits(&harder))),
+            "the log must carry both targets, got: {joined}"
+        );
+    }
+
+    #[test]
+    fn a_refusal_that_is_not_a_proof_race_is_not_re_mined() {
+        let chain = FakeChain::new(fresh_status(), easy_target());
+        chain.refuse("Custom error: 3", 1, Some(U256::from(1u8) << 249));
+        let miner = InjectedMiner {
+            start: 0,
+            calls: Default::default(),
+        };
+        let mut log = |_: &str| {};
+        let outcome = block_on(run_entry(&chain, &miner, "acct", &params(), true, &mut log));
+        assert!(
+            matches!(
+                outcome,
+                EntryOutcome::Failed(FailureReason::FreeEntryAccountUsed, _)
+            ),
+            "a spent free entry is a real refusal, got {outcome:?}"
+        );
+        assert_eq!(miner.calls.get(), 1, "only a proof race is worth re-mining");
+    }
+
+    #[test]
+    fn a_legacy_bad_proof_that_still_meets_the_live_target_is_not_re_mined() {
+        let chain = FakeChain::new(fresh_status(), easy_target());
+        chain.refuse("Transaction has a bad signature", 1, None);
+        let miner = InjectedMiner {
+            start: 0,
+            calls: Default::default(),
+        };
+        let mut log = |_: &str| {};
+        let outcome = block_on(run_entry(&chain, &miner, "acct", &params(), true, &mut log));
+        assert!(
+            matches!(
+                outcome,
+                EntryOutcome::Failed(FailureReason::SubmitRejected, _)
+            ),
+            "a refusal the proof does not explain is reported, got {outcome:?}"
+        );
+        assert_eq!(
+            miner.calls.get(),
+            1,
+            "no re-mine when the target did not move"
+        );
+    }
+
+    #[test]
+    fn a_legacy_bad_proof_after_a_target_move_is_re_mined_and_accepted() {
+        // A chain older than spec 54 renders the same precheck refusal as
+        // `BadProof`; the live target is what tells a race from a real refusal.
+        let chain = FakeChain::new(fresh_status(), easy_target());
+        let harder = U256::from(1u8) << 249;
+        chain.refuse(
+            "Invalid Transaction: Transaction has a bad signature",
+            1,
+            Some(harder),
+        );
+        let miner = InjectedMiner {
+            start: 0,
+            calls: Default::default(),
+        };
+        let mut lines: Vec<String> = Vec::new();
+        let mut log = |s: &str| lines.push(s.to_string());
+        let outcome = block_on(run_entry(&chain, &miner, "acct", &params(), true, &mut log));
+        assert_eq!(outcome, EntryOutcome::Registered);
+        assert_eq!(miner.calls.get(), 2, "one mine, then one re-mine");
+        assert!(
+            chain.submitted_entry.borrow()[0].meets(&harder),
+            "the accepted proof clears the newer target"
+        );
+        assert!(lines
+            .join("\n")
+            .contains("re-mined against the newer target"));
+    }
+
+    #[test]
+    fn a_proof_race_that_never_clears_gives_up_after_two_re_mines() {
+        let chain = FakeChain::new(fresh_status(), easy_target());
+        chain.refuse("Custom error: 1", 5, Some(U256::from(1u8) << 249));
+        let miner = InjectedMiner {
+            start: 0,
+            calls: Default::default(),
+        };
+        let mut log = |_: &str| {};
+        let outcome = block_on(run_entry(&chain, &miner, "acct", &params(), true, &mut log));
+        assert!(
+            matches!(
+                outcome,
+                EntryOutcome::Failed(FailureReason::SubmitRejected, _)
+            ),
+            "three refusals must end in a reported failure, got {outcome:?}"
+        );
+        assert_eq!(
+            miner.calls.get(),
+            3,
+            "initial mine + two re-mines, then stop"
         );
     }
 

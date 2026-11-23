@@ -1,3 +1,31 @@
+## 17:5x PT 0.3.70 box 4 (244) DONE — a refused proof is re-mined against the live target, and accepted
+- A0: `origin/main` HEAD `a16c7cf8`; one run for that sha, **45090420442 `in_progress`** (single-slot
+  runner). Not waited on, per the rule; this box is code and does not need CI.
+- Box: **244**. The pre-submit re-check only covered "the target moved while mining"; the window
+  that actually bit the 5th box is between the client's last read and the *pool's* `precheck_pow`.
+  That path is now a retry: `onboard::submit_unsigned_with_remine` (extracted from `run_entry`,
+  public so a live example can drive the real code) re-reads the live difficulty, re-mines and
+  resubmits — twice — logging `re-mined against the newer target: old target ~2^x nonce 0xa → new
+  target ~2^y nonce 0xb`.
+- Two renderings of the same refusal are handled, because the live chain is spec 53:
+  `InvalidTransaction::Custom(1)` (row 243, spec ≥ 54) **and** the legacy `BadProof` /
+  "Transaction has a bad signature". The legacy one is only a race if the proof no longer clears
+  the live target (re-read first), so a spent free entry / used GPU is never re-mined, and no
+  bonus mining happens on a real refusal.
+- Red first: retry arm disabled ⇒ unit test fails with `left: Failed(SubmitRejected, "the entry
+  proof was rejected: it does not meet the difficulty target in force now … (Custom error: 1)")
+  right: Registered`. Green: `cargo test --lib onboard::` 18 passed / 0 failed; full lib **793
+  passed, 0 failed, 14 ignored**; `cargo fmt --check` clean; clippy with CI's exact allow-list +
+  `-D warnings` exit 0.
+- **Live proof** (`examples/entry_remine_live`, run against `:9944`): stale proof mined against a
+  target 4× easier ("before the retarget") ⇒
+  `the pool refused the proof: RPC error: {"code":1010,"data":"Transaction has a bad signature",…}`
+  ⇒ `re-mined against the newer target: old target ~2^27.0 nonce 0xee97ee6 → new target ~2^29.0
+  nonce 0x20000000ec34465 (attempt 1/2)` ⇒ `outcome = Registered`,
+  `RegisteredProviders[0x782ccf6b…6569] present = true`, `RESULT: PASS`. Throwaway account, fresh
+  GPU fingerprint, no key, no balance. Left on chain as the honest record (as in row 242).
+- Next box: 245 (release cut's two live-inconsistent windows). Commit below; one push.
+
 ## 17:0x PT 0.3.70 box 3 (243) DONE [TRIAGE] — an entry refusal now says why
 - A0: `origin/main` HEAD `670a722` — one run for that sha, **45086753814 `pending`** (single-slot
   runner). Not waited on, per the rule; this box is code, it does not need CI.
