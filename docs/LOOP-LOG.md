@@ -1,3 +1,27 @@
+## 18:2x PT 0.3.70 box 6 (246) DONE — §8's stranger check is a command now, not a hand-tick
+- A0: `origin/main` HEAD `5422fb2`; one run **45097624818 `in_progress`** (secret-scan + fmt/clippy green,
+  linux and windows builds running). Not waited on; this box is code + docs.
+- Box: **246**. `archive/0.3.68.md` §8 was ticked green against a windows URL that answered **404** to
+  anonymous callers, because the check was done by hand and the hand carried the release's token.
+- Fix: `scripts/release-cut.sh --verify-published [--version X.Y.Z]` is now §8 as a command. No `-K`,
+  no token, no cookie jar: it reads the live `releases.json` anonymously, requires every manifest
+  filename to exist **verbatim** in the release its URL points at (listing that release's assets
+  anonymously and printing what it actually carries when it does not match), range-GETs each URL for
+  **206**, then downloads both assets and compares sha256/size. The same `stranger_check` runs in
+  step 4c before signing and in step 6 against the published manifest.
+- The first live run caught the check's own bug: an anonymous GitHub release download answers **302**
+  to `objects.githubusercontent.com`, so `anon_status` now follows redirects and still demands a
+  final 206 — stopping at the 302 would have refused every healthy release.
+- Evidence: `scripts/tests/test-release-cut.sh` **91 checks passed, 0 failed** (new `t14`: a
+  `--skip-mirror` cut over a tag holding only `gpn-windows.zip.old-1795385826` refuses with
+  `does not carry 'gpn-windows.zip' exactly`; `--verify-published` exits 1 with `carries no asset with
+  that exact name` after an asset is renamed aside; healthy release PASSes; `--version 9.9.9` fails).
+  Live 0.3.69: `linux: 'gpn-linux.tar.gz' 347001144 bytes sha256 c6eca129…` / `windows:
+  'gpn-windows.zip' 253156473 bytes sha256 a7c0af21…` / `PASS`. Commit `45c2efc`.
+- `docs/UPDATE-CHECKLIST.md` §8 now instructs running the command instead of hand-checking.
+- Next box: 247 (its implementation is already in `a83907f`; the box needs its own evidence).
+- No [TRIAGE] items. Not messaging Jeremy.
+
 ## 17:59 PT 0.3.70 box 5 (245) DONE — the cut can no longer 404 an asset or sign stale bytes
 - A0: run 45093748756 on `a13125e` `pending` at start; not waited on. No failure to act on.
 - **My working tree was 2 commits stale** (`670a722` vs origin `a13125e`), so this run spent its first
