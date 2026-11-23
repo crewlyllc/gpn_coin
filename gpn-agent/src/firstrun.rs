@@ -342,13 +342,23 @@ pub fn state_home() -> Option<PathBuf> {
 
 /// [`state_home`] with both candidates injected, so tests need not mutate the
 /// process-global environment.
+///
+/// A candidate is only usable if it is a **native absolute** path. Git-Bash /
+/// MSYS sets `HOME` to a POSIX path (`/c/Users/me`) even on Windows, and
+/// `Path::is_absolute()` rightly refuses that form: adopting it produced a
+/// relative state dir, so every artifact path derived from it failed
+/// `artifact_path_allowed` (CI run 45173554840, windows job:
+/// `only_artifact_directories_may_be_named_by_a_callback` failed on the image
+/// root). Falling through to `USERPROFILE` is the correct Windows answer; on
+/// Unix `HOME` is absolute and still wins.
 pub(crate) fn state_home_at(home: Option<&str>, userprofile: Option<&str>) -> Option<PathBuf> {
     [home, userprofile]
         .into_iter()
         .flatten()
         .map(|h| h.trim().trim_end_matches(['/', '\\']))
-        .find(|h| !h.is_empty())
+        .filter(|h| !h.is_empty())
         .map(PathBuf::from)
+        .find(|p| p.is_absolute())
 }
 
 /// [`expand_tilde`] with the home directory injected, so tests need not mutate
@@ -1931,23 +1941,44 @@ mod tests {
 
     #[test]
     fn state_home_prefers_home_then_userprofile() {
-        // POSIX wins when both exist.
+        // The first *native absolute* candidate wins. On Unix that is the POSIX
+        // HOME; on Windows a Git-Bash `/c/...` HOME is not absolute and
+        // USERPROFILE is taken instead (CI run 45173554840).
+        let expected = if cfg!(windows) {
+            "C:/Users/tester"
+        } else {
+            "/home/tester"
+        };
         assert_eq!(
             state_home_at(Some("/home/tester"), Some("C:/Users/tester")),
-            Some(std::path::PathBuf::from("/home/tester"))
+            Some(std::path::PathBuf::from(expected))
         );
-        // A Windows task-started process has USERPROFILE only (#185).
+        // A non-absolute lone candidate is not an anchor.
+        let non_native = if cfg!(windows) {
+            "/home/tester"
+        } else {
+            "C:/Users/tester"
+        };
+        assert_eq!(state_home_at(Some(non_native), None), None);
+        // A Windows task-started process has USERPROFILE only (#185). Use a
+        // native-absolute value per platform so the assertion tests adoption,
+        // not a Windows path that Unix rightly refuses as non-absolute.
+        let up_only = if cfg!(windows) {
+            "C:\\Users\\tester"
+        } else {
+            "/home/tester"
+        };
         assert_eq!(
-            state_home_at(None, Some("C:\\Users\\tester")),
-            Some(std::path::PathBuf::from("C:\\Users\\tester"))
+            state_home_at(None, Some(up_only)),
+            Some(std::path::PathBuf::from(up_only))
         );
         // Empty / whitespace / trailing-slash values are not usable anchors; a
         // trailing slash is trimmed rather than doubled.
         assert_eq!(state_home_at(Some("  "), None), None);
         assert_eq!(state_home_at(Some(""), Some("")), None);
         assert_eq!(
-            state_home_at(Some("/home/tester/"), None),
-            Some(std::path::PathBuf::from("/home/tester"))
+            state_home_at(Some(&format!("{}/", up_only.replace('\\', "/"))), None),
+            Some(std::path::PathBuf::from(&up_only.replace('\\', "/")))
         );
         // Nothing at all: the caller decides the fallback, and store.rs warns.
         assert_eq!(state_home_at(None, None), None);

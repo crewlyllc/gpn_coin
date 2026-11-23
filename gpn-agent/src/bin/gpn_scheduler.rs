@@ -11002,19 +11002,26 @@ mod tests {
         // unauthenticated write path (the matching `assignment_token` fix), a
         // caller could name the AP user's private key and read it back.
         let art = gpn_agent::utils::temp_dir().join("gpn_artifacts");
-        assert!(artifact_path_allowed(
-            &art.join("job_1_ft.zip").to_string_lossy()
-        ));
-        assert!(artifact_path_allowed(
-            &gpn_agent::image_jobs::image_dir()
-                .join("42-0.png")
-                .to_string_lossy()
-        ));
-        assert!(artifact_path_allowed(
-            &gpn_agent::audio_jobs::audio_dir()
-                .join("42-0.mp3")
-                .to_string_lossy()
-        ));
+        let art_p = art.join("job_1_ft.zip").to_string_lossy().to_string();
+        assert!(
+            artifact_path_allowed(&art_p),
+            "finetune artifact refused: {art_p} (root {})",
+            art.display()
+        );
+        let img = gpn_agent::image_jobs::image_dir();
+        let img_p = img.join("42-0.png").to_string_lossy().to_string();
+        assert!(
+            artifact_path_allowed(&img_p),
+            "image artifact refused: {img_p} (root {})",
+            img.display()
+        );
+        let aud = gpn_agent::audio_jobs::audio_dir();
+        let aud_p = aud.join("42-0.mp3").to_string_lossy().to_string();
+        assert!(
+            artifact_path_allowed(&aud_p),
+            "audio artifact refused: {aud_p} (root {})",
+            aud.display()
+        );
         // Files outside the artifact roots: refused.
         assert!(!artifact_path_allowed("/etc/passwd"));
         assert!(!artifact_path_allowed("/home/jeremyg/.ssh/id_ed25519"));
