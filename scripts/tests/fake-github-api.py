@@ -99,6 +99,30 @@ class H(BaseHTTPRequestHandler):
     def js(self, code: int, obj) -> None:
         self.send(code, json.dumps(obj).encode())
 
+    def send_file(self, p) -> None:
+        """Serve a file, honouring a single `bytes=a-b` range with 206.
+
+        Real GitHub (release downloads) answers a Range request with 206; the
+        cut asserts exactly that before it advertises a version (row 245), so
+        the harness has to behave the same way.
+        """
+        data = Path(p).read_bytes()
+        rng = self.headers.get("Range") or ""
+        m = re.fullmatch(r"bytes=(\d+)-(\d*)", rng.strip())
+        if m:
+            start = int(m[1])
+            end = int(m[2]) if m[2] else len(data) - 1
+            end = min(end, len(data) - 1)
+            body = data[start:end + 1]
+            self.send_response(206)
+            self.send_header("Content-Type", "application/octet-stream")
+            self.send_header("Content-Range", f"bytes {start}-{end}/{len(data)}")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
+        self.send(200, data, "application/octet-stream")
+
     def base(self) -> str:
         return f"http://{self.headers.get('Host', '127.0.0.1')}"
 
@@ -173,8 +197,7 @@ class H(BaseHTTPRequestHandler):
             for tag, assets in d[side_for(repo)].items():
                 for a in assets:
                     if asset_id(repo, tag, a["name"]) == aid:
-                        return self.send(200, Path(a["file"]).read_bytes(),
-                                         "application/octet-stream")
+                        return self.send_file(a["file"])
             return self.js(404, {"message": "Not Found"})
 
         m = re.fullmatch(r"/download/([^/]+/[^/]+)/([^/]+)/([^/]+)", path)
@@ -183,8 +206,7 @@ class H(BaseHTTPRequestHandler):
             d = load()
             for a in d[side_for(repo)].get(tag, []):
                 if a["name"] == name:
-                    return self.send(200, Path(a["file"]).read_bytes(),
-                                     "application/octet-stream")
+                    return self.send_file(a["file"])
             return self.js(404, {"message": "Not Found"})
 
         return self.js(404, {"message": "Not Found"})

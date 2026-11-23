@@ -109,6 +109,9 @@ setup() { # published_version built_version [--no-published]
   make_bundle "$T/old-windows.zip" "$PUB_VER"
   make_bundle "$T/gpn-linux.tar.gz" "$BUILT_VER"
   make_bundle "$T/gpn-windows.zip" "$BUILT_VER"
+  # The cut mirrors the provenance bundle alongside the zip (2026-11-20): a
+  # source release without one is refused. The fixture must carry it too.
+  printf 'fake provenance bundle for %s\n' "$BUILT_VER" > "$T/src-windows.zip.bundle"
   cp "$T/gpn-linux.tar.gz" "$T/src-linux.tar.gz"
   cp "$T/gpn-windows.zip" "$T/src-windows.zip"
 
@@ -128,7 +131,8 @@ import json, sys, pathlib
 T = pathlib.Path(sys.argv[1])
 state = {
   "source": {"linux-latest": [{"name": "gpn-linux.tar.gz", "file": str(T/"src-linux.tar.gz")}],
-             "windows-latest": [{"name": "gpn-windows.zip", "file": str(T/"src-windows.zip")}]},
+             "windows-latest": [{"name": "gpn-windows.zip", "file": str(T/"src-windows.zip")},
+                                {"name": "gpn-windows.zip.bundle", "file": str(T/"src-windows.zip.bundle")}]},
   "mirror": {"linux-latest": [{"name": "gpn-linux.tar.gz", "file": str(T/"old-linux.tar.gz")}],
              "windows-latest": [{"name": "gpn-windows.zip", "file": str(T/"old-windows.zip")}]},
   "site_path": str(T/"repo/website/releases.json"),
@@ -289,7 +293,7 @@ t6_full_publish() {
   check 'grep -q "released 0.3.5" <<< "$OUT"' "announces 0.3.5"
   check 'grep -q "anonymous download" <<< "$OUT"' "ran the anonymous verification"
   check 'grep -q "matches the signed manifest" <<< "$OUT"' "download sha256 matched"
-  check '[ "$(uploads)" = 2 ]' "uploaded exactly two assets"
+  check '[ "$(uploads)" = 3 ]' "uploaded two installers + the provenance bundle"
   check '! grep -q "^PATCH .*old-" <(grep -v "^DELETE" "$T/state/actions.log") || grep -q "^DELETE .*\.old-" "$T/state/actions.log"' "superseded copies cleaned up"
   local man_ver; man_ver="$("$PY" -c 'import json,sys;print(json.load(open(sys.argv[1]))["version"])' "$R/website/releases.json")"
   check '[ "$man_ver" = 0.3.5 ]' "releases.json now says 0.3.5"
@@ -412,9 +416,42 @@ t12_gap_with_code() {
   teardown
 }
 
+t13_upload_before_rename() {
+  CURRENT="t13 upload under a temp name, then rename"
+  setup 0.3.4 0.3.5
+  cut --timeout 20
+  check '[ "$RC" = 0 ]' "exit 0"
+  # The served name must not be renamed aside before the new bytes are uploaded
+  # and verified: that order is what made the URL 404 for a whole upload.
+  local win_first
+  win_first="$(grep ' windows-latest ' "$T/state/actions.log" | head -1)"
+  check 'echo "$win_first" | grep -q "^UPLOAD windows-latest gpn-windows.zip.new-"' \
+        "first windows action is an upload under a temp name"
+  check 'grep -q "^PATCH windows-latest gpn-windows.zip->gpn-windows.zip.old-" "$T/state/actions.log"' \
+        "old asset renamed aside only after the upload"
+  check 'grep -qE "^PATCH windows-latest gpn-windows.zip.new-[0-9]+->gpn-windows.zip$" "$T/state/actions.log"' \
+        "verified temp asset renamed onto the served name"
+  check '! grep -q "^DELETE windows-latest gpn-windows.zip$" "$T/state/actions.log"' \
+        "the served name is never deleted"
+  # and the version is only advertised after the anonymous check passed
+  # NB: `cut` is this file's release-cut wrapper — use awk, not cut(1).
+  PA_POS="$(grep -n 'anonymous GET 206' <<< "$OUT" | head -1 | awk -F: '{print $1}')"
+  PL_POS="$(grep -n 'live manifest is' <<< "$OUT" | head -1 | awk -F: '{print $1}')"
+  check '[ -n "$PA_POS" ] && [ -n "$PL_POS" ] && [ "$PA_POS" -lt "$PL_POS" ]' \
+        "anonymous 206 check ran before the manifest went live (asset @${PA_POS:-?}, live @${PL_POS:-?})"
+  # every served name still resolves to a complete file at the end
+  local man_ver
+  man_ver="$("$PY" -c 'import json,sys;print(json.load(open(sys.argv[1]))["version"])' "$R/website/releases.json")"
+  check '[ "$man_ver" = 0.3.5 ]' "releases.json says 0.3.5"
+  check '[ "$(curl -s -o /dev/null -w "%{http_code}" -r 0-1023 "$BASE/download/mirror/gpn/windows-latest/gpn-windows.zip")" = 206 ]' \
+        "served windows asset still answers 206 anonymously"
+  teardown
+}
+
 ALL=(t1_nothing_to_do t2_detection_and_dry_run t3_digest_mismatch t4_mirror_failure
      t5_dirty_manifest t6_full_publish t7_version_assertion t8_skip_mirror
-     t9_ci_gate t10_wrong_tree_aborts t11_docs_only_gap t12_gap_with_code)
+     t9_ci_gate t10_wrong_tree_aborts t11_docs_only_gap t12_gap_with_code
+     t13_upload_before_rename)
 
 want=("$@")
 printf '\nrelease-cut.sh — %d scenario(s)\n' "${#ALL[@]}"

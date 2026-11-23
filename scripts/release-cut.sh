@@ -674,19 +674,18 @@ step "3b/6 artifact carries the code"
 # ─────────────────────────────────────────────────────────────── 4 mirror ──
 step "4/6 mirror the assets to $MIRROR_REPO"
 mirror_one() { # tag name file sha size
-  local tag=$1 name=$2 file=$3 sha=$4 size=$5 rid aid msha
+  local tag=$1 name=$2 file=$3 sha=$4 size=$5 rid aid msha ts tmp tsha tmpid
   rid="$(release_id "$CFG_DST" "$MIRROR_REPO" "$tag")"
-  # Rename the current asset instead of deleting it first: an upload failure
-  # then leaves a complete mirror (the old build), never a 404 for the fleet.
-  while read -r aname aid adig; do
-    [ "$aname" = "$name" ] || continue
-    api "$CFG_DST" PATCH "/repos/$MIRROR_REPO/releases/assets/$aid" \
-      -H 'Content-Type: application/json' \
-      -d "$("$PY" -c 'import json,sys; print(json.dumps({"name": sys.argv[1]}))' "$name.old-$(date +%s)")" >/dev/null
-    say "$tag: renamed the previous $name aside"
-  done < <(release_assets "$CFG_DST" "$MIRROR_REPO" "$tag")
-
-  say "$tag: uploading $name ($size bytes)…"
+  ts="$(date +%s)"
+  tmp="$name.new-$ts"
+  # Upload the new bytes under a TEMPORARY name first, while the served name
+  # still points at the previous build. The pre-0.3.70 order (rename the old
+  # asset aside, then upload) left the download URL 404ing for the whole
+  # multi-minute upload — observed 2026-11-22 14:16, and a download in that
+  # window yields nothing (or, worse, releases.json still describing the old
+  # build while the bytes changed underneath). Uploading under a temp name
+  # means the served asset is *always* a complete, verified build.
+  say "$tag: uploading $name ($size bytes) as $tmp (the served name keeps the previous build)…"
   # 2026-11-06: one 324 MB upload died here with exit 22 and no visible body
   # (the output was piped to /dev/null). A 324 MB body takes ~2 min, which is
   # long enough for the connection to be reset mid-upload, so retry -- and keep
@@ -697,10 +696,38 @@ mirror_one() { # tag name file sha size
     -H 'Content-Type: application/octet-stream' \
     -H 'Accept: application/vnd.github+json' \
     --data-binary "@$file" \
-    "$GPN_GH_UPLOAD/repos/$MIRROR_REPO/releases/$rid/assets?name=$name" 2>&1)" || {
+    "$GPN_GH_UPLOAD/repos/$MIRROR_REPO/releases/$rid/assets?name=$tmp" 2>&1)" || {
     echo "ABORT: upload of $name failed: $(printf '%s' "$up_body" | scrub | head -c 400)" >&2
+    # Never leave a partial temp asset behind to be mistaken for a build.
+    tmpid="$(asset_meta "$CFG_DST" "$MIRROR_REPO" "$tag" "$tmp" 2>/dev/null | cut -d' ' -f3 || true)"
+    [ -n "$tmpid" ] && api "$CFG_DST" DELETE "/repos/$MIRROR_REPO/releases/assets/$tmpid" >/dev/null || true
     exit 1
   }
+  read -r tsha _ tmpid <<< "$(asset_meta "$CFG_DST" "$MIRROR_REPO" "$tag" "$tmp")"
+  [ "$tsha" = "$sha" ] || {
+    echo "ABORT: uploaded $tmp has digest $tsha, expected $sha — the served $name is untouched" >&2
+    api "$CFG_DST" DELETE "/repos/$MIRROR_REPO/releases/assets/$tmpid" >/dev/null || true
+    exit 1
+  }
+  say "$tag: uploaded and verified $tmp (${tsha:0:16}…) — served name still the previous build"
+
+  # Now make the switch: rename the old asset aside, then rename the verified
+  # temp asset onto the served name. Two metadata calls, milliseconds apart —
+  # the only inconsistent window left, and it cannot 404 into nothing: at every
+  # instant the release holds a complete asset under one name or the other.
+  while read -r aname aid adig; do
+    [ "$aname" = "$name" ] || continue
+    api "$CFG_DST" PATCH "/repos/$MIRROR_REPO/releases/assets/$aid" \
+      -H 'Content-Type: application/json' \
+      -d "$("$PY" -c 'import json,sys; print(json.dumps({"name": sys.argv[1]}))' "$name.old-$ts")" >/dev/null
+    say "$tag: renamed the previous $name aside as $name.old-$ts"
+  done < <(release_assets "$CFG_DST" "$MIRROR_REPO" "$tag")
+
+  api "$CFG_DST" PATCH "/repos/$MIRROR_REPO/releases/assets/$tmpid" \
+    -H 'Content-Type: application/json' \
+    -d "$("$PY" -c 'import json,sys; print(json.dumps({"name": sys.argv[1]}))' "$name")" >/dev/null
+  say "$tag: $tmp is now served as $name"
+
   msha="$(asset_meta "$CFG_DST" "$MIRROR_REPO" "$tag" "$name" | cut -d' ' -f1)"
   [ "$msha" = "$sha" ] || {
     echo "ABORT: mirror digest for $name is $msha, expected $sha" >&2; exit 1; }
@@ -708,7 +735,11 @@ mirror_one() { # tag name file sha size
 
   # drop superseded copies now that the new one is verified
   while read -r aname aid adig; do
-    case "$aname" in "$name".old-*) api "$CFG_DST" DELETE "/repos/$MIRROR_REPO/releases/assets/$aid" >/dev/null ;;
+    case "$aname" in
+      "$name".old-*) api "$CFG_DST" DELETE "/repos/$MIRROR_REPO/releases/assets/$aid" >/dev/null ;;
+      # A temp asset from an interrupted earlier cut is not a build anyone
+      # should download; remove it once the real name is verified.
+      "$name".new-*) api "$CFG_DST" DELETE "/repos/$MIRROR_REPO/releases/assets/$aid" >/dev/null ;;
     esac
   done < <(release_assets "$CFG_DST" "$MIRROR_REPO" "$tag")
 }
@@ -750,10 +781,46 @@ else
   mirror_one windows-latest "$B_NAME" "$F_BUNDLE" "$B_SHA" "$(size_of "$F_BUNDLE")"
 fi
 
-# ───────────────────────────────────────────────────────────────── 5 sign ──
-step "5/6 sign the manifest"
+# ───────────────────────────────────────────────────── 4c public check ──
+# Row 245: the version must not be advertised on any surface until an
+# anonymous stranger can fetch the exact bytes the manifest will describe. This
+# runs BEFORE signing/publishing, so releases.json never names a version whose
+# asset is missing or different — the 2026-11-22 window (URL 404, then a URL
+# serving a zip whose sha the manifest did not match) is impossible here.
+step "4c/6 the public assets serve the built bytes"
 URL_LINUX="$DL_BASE/linux-latest/gpn-linux.tar.gz"
 URL_WIN="$DL_BASE/windows-latest/gpn-windows.zip"
+anon_status() { # url -> HTTP status for a 1 KiB range request (no auth)
+  curl -sS --max-time 30 --retry 2 --retry-delay 2 -r 0-1023 \
+    -o /dev/null -w '%{http_code}' "$1" 2>/dev/null || true
+}
+if [ "$DRY" = 1 ]; then
+  say "DRY RUN: skipping — a dry run does not mirror, so the public URL still serves the previous build"
+else
+for pair in "linux:$URL_LINUX:$S_LINUX" "windows:$URL_WIN:$S_WIN"; do
+  os="${pair%%:*}"; rest="${pair#*:}"; url="${rest%:*}"; want="${rest##*:}"
+  code="$(anon_status "$url")"
+  if [ "$code" != 206 ]; then
+    echo "ABORT: anonymous range GET $url returned '${code:-nothing}', expected 206." >&2
+    echo "       The asset is not publicly readable, so no manifest may name it." >&2
+    exit 1
+  fi
+  f="$TMP/public-$os"
+  curl -L --fail --silent --show-error --retry 3 --connect-timeout 20 \
+    -o "$f" "$url" 2>&1 | scrub || {
+      echo "ABORT: anonymous download failed for $url" >&2; exit 1; }
+  got="$(sha_of "$f")"
+  [ "$got" = "$want" ] || {
+    echo "ABORT: $url anonymously serves sha256 $got, but the build is $want" >&2
+    echo "       Refusing to sign a manifest that describes different bytes." >&2
+    exit 1
+  }
+  say "$os: anonymous GET 206 + sha256 ${got:0:16}… + $(size_of "$f") bytes match the build"
+done
+fi
+
+# ───────────────────────────────────────────────────────────────── 5 sign ──
+step "5/6 sign the manifest"
 OUT="$MANIFEST"
 [ "$DRY" = 1 ] && OUT="$TMP/releases.json"
 
@@ -826,16 +893,29 @@ except Exception: print("")' || true)"
 done
 
 say "anonymous download verification…"
-for pair in "linux:$URL_LINUX:$S_LINUX" "windows:$URL_WIN:$S_WIN"; do
-  os="${pair%%:*}"; rest="${pair#*:}"; url="${rest%:*}"; want="${rest##*:}"
-  f="$TMP/verify-$os"
-  curl -L --fail --silent --show-error --retry 2 --connect-timeout 20 -o "$f" "$url" || {
-    echo "ABORT: anonymous download failed for $url" >&2; exit 1; }
-  got="$(sha_of "$f")"
-  if [ "$got" != "$want" ]; then
-    echo "ABORT: $url serves sha256 $got, manifest says $want" >&2; exit 1
+# The bytes were already fetched anonymously in 4c (and those are the digests in
+# the signed manifest). This post-publish check proves the file that just went
+# ".live" still describes them, and that the URL is still publicly readable —
+# re-downloading 550 MB a second time would prove nothing extra.
+for pair in "linux|$URL_LINUX|$S_LINUX|$Z_LINUX" "windows|$URL_WIN|$S_WIN|$Z_WIN"; do
+  IFS='|' read -r os url want wsize <<< "$pair"
+  code="$(anon_status "$url")"
+  [ "$code" = 206 ] || {
+    echo "ABORT: after publish, anonymous range GET $url returned '${code:-nothing}', expected 206" >&2
+    exit 1; }
+  read -r msha msize <<< "$("$PY" - "$OUT" "$os" <<'PY'
+import json, sys
+m = json.load(open(sys.argv[1]))
+for a in m["assets"]:
+    if a["os"] == sys.argv[2]:
+        print(a["sha256"], a["size"])
+PY
+)"
+  if [ "$msha" != "$want" ] || [ "$msize" != "$wsize" ]; then
+    echo "ABORT: the live manifest says $msha / $msize bytes for $os, but the cut built $want / $wsize" >&2
+    exit 1
   fi
-  say "$os: ${got:0:16}… matches the signed manifest ($(size_of "$f") bytes)"
+  say "$os: ${msha:0:16}… matches the signed manifest ($msize bytes), anonymous GET 206"
 done
 
 # 6b release the repo lock: the manifest is live and verified, so the release no
