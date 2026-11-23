@@ -1,3 +1,11 @@
+## 13:13 PT 0.3.71 §7b box 4 ticked (n/a — fix-only bundle, no capability to surface)
+- **A0**: `origin/main` HEAD `48c19f9` (docs-only, "loop log for the §7b box 3 run") ⇒ `GET /actions/runs?head_sha=48c19f9eb33ef885205fd297db678b767db787cb` ⇒ `total_count: 0` — expected docs-only answer, nothing to wait on.
+- **§7b box 4 (capability discoverability)**: n/a for this bundle. Its rows are 16 (bounded red-team pass), 248 (per-route POST body cap) and 249 (callback-token + artifact-path allow-list) — security fixes on existing routes, no new endpoint/modality/capability. Nothing new for the site to document; the existing `/v1/chat/completions` example still answers `200` (live AP evidence already in §2). Recorded `n/a` with the item list rather than retitled, per §0.
+- Also closed §7's section header to `DONE (4/4)` — its four boxes were already ticked, only the header count was stale.
+- Self-check of the previous tick: `https://gpncoin.ai/releases.json` ⇒ `version 0.3.71 published_at 2026-11-23T19:07:36Z`, linux 347,068,583 B `3f89c29b…`, windows 253,175,858 B `85f4ebe2…` — unchanged, so §7b box 3 still holds.
+- **Next box**: §8 box 2 (anonymous download of both assets from gpncoin.ai).
+- No blocker, no [TRIAGE].
+
 ## 12:55 PT 0.3.71 §7b box 3 ticked — site, GitHub release and both binaries all report 0.3.71
 - **A0**: `origin/main` HEAD `a052ead` (docs-only) ⇒ `GET /actions/runs?head_sha=a052ead…` ⇒ `total_count: 0` — expected, nothing to wait on.
 - **§7b box 3 (site == GitHub release == binary)**: `gpncoin.ai/releases.json` ⇒ `"version": "0.3.71"`, `published_at 2026-11-23T19:07:36Z`. `GET /releases/tags/{linux,windows}-latest` ⇒ `gpn-linux.tar.gz` 347,068,583 B `sha256:3f89c29b77209…`, `gpn-windows.zip` 253,175,858 B `sha256:85f4ebe236d6c…` — the two assets the manifest names. Re-hashed the exact bytes locally (both match the manifest), extracted them, and asked the programs: `gpn-node --version` ⇒ `gpn-node 0.3.71`; `strings gpn-node.exe` from the zip ⇒ `0.3.71`. All three surfaces agree.
