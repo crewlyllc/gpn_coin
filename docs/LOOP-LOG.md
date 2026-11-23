@@ -1,3 +1,24 @@
+## 11:25 PT 0.3.71 §7 PUBLISHED — manifest live on gpncoin.ai, stranger check PASS
+
+- **A0**: `main` HEAD `ae0fed2` (= local, pushed this run). `GET /actions/runs?head_sha=` for the
+  previous HEAD `eb72b65` ⇒ `total_count: 0` (docs-only), so nothing to wait on.
+- **Box §7 release-cut**: the 11:01 dispatch died at 6/6 with
+  `REFUSED: the index contains paths you did not name: docs/LOOP-LOG.md docs/releases/0.3.71.md`
+  (exit 3) — a previous session's `git add -A` had staged docs on top of the release commit. The
+  mirror + signed manifest steps (1–5) had already succeeded. Fix: cleared the index, pushed the
+  manifest commit `ae0fed2` (signed releases.json 0.3.71, published_at 19:07:36Z) with the
+  extraheader override, then re-ran the 6/6 tail by hand.
+- **Evidence**: live `https://gpncoin.ai/releases.json` = 0.3.71 on two polls (19:20:47Z,
+  19:20:57Z); `release-cut.sh --verify-published --version 0.3.71` ⇒ exit 0, PASS, linux
+  347068583 B `3f89c29b…`, windows 253175858 B `85f4ebe2…`. Mirror `crewlyllc/gpn_coin`
+  `linux-latest`/`windows-latest` carry those exact digests (+ `.bundle` 5e0cc459…).
+- **Ticked**: §7 release-cut, §7 `network.json` latest_version (0.3.71), §7 releases.json twice,
+  §8 `--verify-published` exits 0.
+- **Next box**: §7b — `docs/run-a-node` still says "release 0.3.70 — checked 2026-11-22 23:58 PT"
+  (stale; fetched 19:22Z). `/download` is the live page (307 on `/download/`) and has no version
+  literal, so grep is the wrong test there.
+- No decision needed.
+
 ## 11:01 PT 0.3.71 §7 release-cut DISPATCHED — handle written, run ended by design
 
 - **A0**: `origin/main` HEAD `eb72b65` (fetched; working tree clean, = local HEAD).
