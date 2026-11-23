@@ -1,3 +1,18 @@
+## 23:20 PT 0.3.70 §6 box 2 ticked — `--version` off the published 0.3.70 bytes reads 0.3.70
+- A0: `origin/main` HEAD `0814161` (docs-only §6-box-1 commit) ⇒ `?head_sha=0814161d6be7…` runs
+  `total_count: 0` — paths-ignore, nothing red. No run to wait on.
+- **§6 box 2 ticked** (`--version` matches the released version) on the same published bytes cached in
+  `/tmp/b70assets` (digests `ad383ad1…c000fd58` linux / `490c3dd5…fde40e5` windows = the release asset
+  digests). `lx/gpn_node --version` ⇒ `gpn_node 0.3.70 (spec 54, 774c884)` — build tag matches the crate
+  version. Windows exe cannot run here, so read from bytes: `strings -a wn/gpn_node.exe | grep
+  'gpn_node/0.3.70'` ⇒ `gpn_node/0.3.70 (` (same literal in the linux node); `0.3.70` also present in
+  `lx/gpn_api` and `wn/gpn_api.exe`.
+- notes: `gpn_api --version` / `gpn_scheduler --version` are not version flags (they try to bind/start and
+  exit), so api/scheduler version is evidenced from the embedded string. Production scheduler on :8092
+  untouched (`pgrep -x gpn_scheduler` ⇒ only pid 1041420 `--listen 0.0.0.0:8092`).
+- One docs commit, docs-only. No blockers, no [TRIAGE]. Next run: §7 box 1 (by-hand attestation verify of
+  the bytes `release-cut.sh` will download), then box 2 (dispatch the cut, write the handle, end the run).
+
 ## 23:02 PT 0.3.70 §6 box 1 ticked — artifact string scan run on the downloaded 0.3.70 binaries
 - A0: `origin/main` HEAD `12cedfa7` (docs-only) ⇒ `?head_sha=12cedfa70a0b…` runs `total_count: 0`
   — paths-ignore, nothing red. Note: a 22:38 PT run had already ticked §5 boxes 5+6; this run found
