@@ -1,3 +1,20 @@
+## 20:56 PT 0.3.70 §5 box 1/2 still building — checked once, ended the run
+- A0: `origin/main` HEAD `1a9b375` (docs-only ⇒ `head_sha` runs `total_count: 0`, correct per
+  paths-ignore). No CI conclusion to act on; nothing red.
+- First unticked box is **§5 box 1** (`release-linux-selfhosted.yml` → `gpn-linux.tar.gz`); its handle
+  was already in the box from 20:43 PT. Asked GitHub once per run as the rule requires:
+  - run **45113570183** (linux, tag `build/774c8849f607`) ⇒ `in_progress`, job `linux` started
+    04:43:50Z: steps 1-7 success (build + package + reclaim), **step 8 `publish GitHub Release
+    (rolling 'linux-latest')` in_progress** at 04:56Z.
+  - run **45113574272** (windows, same tag) ⇒ `in_progress`, job `windows` started 04:43:53Z:
+    encoding guard, deps, rust, build agent, polkadot-sdk all success; **step 10 `build node`
+    in_progress**.
+- No box ticked: neither artifact exists yet, and a box without the artifact is not evidence.
+  Neither run is stale (<15 min), so no cancel/re-dispatch. Ended the run instead of waiting.
+- Next run: re-read these two handles, and if linux has published, tick §5 box 1 with the release
+  asset digest; if windows has published, tick box 2 as well and proceed to box 3 (same SHA) and the
+  attestation boxes.
+
 ## 20:45 PT 0.3.70 §4 finished (4/4) and both release builds dispatched
 - A0: `origin/main` HEAD `8a85b3d` (docs). CI run `45101926276` (head `774c884`) was **in_progress**
   at start — windows `Build + test gpn-agent (release)` on the single-slot box-1 runner since 03:22Z.
