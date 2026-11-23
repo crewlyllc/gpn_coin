@@ -1,3 +1,11 @@
+## 15:36 PT 0.3.72 cut — rows 250-254 bundled (bump 0.3.71 → 0.3.72, CHANGELOG, checklist generated)
+- **A0**: `GET /commits/main` -> `a2340de731a1414def3e83e38de83025e8ab5ab2` ("docs(loop): 0.3.71 complete ..."); `GET /actions/runs?head_sha=a2340de731a1...` -> `total_count: 0` — expected, `docs/**`/`**/*.md` in `ci.yml` paths-ignore, so no run for a docs SHA. Nothing in flight, nothing red.
+- **§C (no IN-PROGRESS rows)**: status-column count after `git pull` (HEAD `a2340de`) -> `IN-PROGRESS` **0**, `NEW` **5** (rows 250, 251, 252, 253, 254, all owner-directed 2026-11-23 12:36 PT). Bundled all five: marked `IN-PROGRESS` with a `BUNDLED 0.3.72` note; `scripts/bump-version.py patch` -> 0.3.71 → 0.3.72 across 15 manifests + `network.json`; CHANGELOG `## [0.3.72]` section written (Added/Changed/Fixed per item).
+- **Checklist generated**: `scripts/make-release-checklist.py 0.3.72` -> `docs/releases/0.3.72.md` (5 in-progress, 6 blocked); §3b carries rows 250-254.
+- **Pushed once**: `a2340de..573c504` to `main` (single commit). This IS a code change (Cargo manifests + network.json), so CI will run — not waited on per the dispatch-and-end rule.
+- **Next run**: §A — take the first unticked box in `docs/releases/0.3.72.md` (row 250, hourly update cadence).
+- No blocker, no [TRIAGE].
+
 ## 15:32 PT 0.3.71 COMPLETE — rows 16/248/249 closed, §10b timing recorded, release filed to archive
 - **A0**: `GET /commits/main` ⇒ `ecd237605fcd8bc5b03d2c382d6146fe13af541d` (docs-only); `GET /actions/runs?head_sha=ecd237…` ⇒ `total_count: 0` — expected, `docs/**` is in `ci.yml` paths-ignore, so no run for a docs SHA is the correct answer, not a red flag.
 - **§10 box 3 (mark the task rows DONE)**: `GPN-LIST.md` rows **16, 248, 249** ⇒ `COMPLETE 0.3.71 (2026-11-23)`, each carrying release commit `50a11fc` and its evidence pointer. Row 16 closed on its own stated condition: the per-release pass ran, its findings (248 unbounded AP body ⇒ OOM, 249 tokenless result + arbitrary artifact read) are filed and fixed, the 2026-10-16 list (rows 28–31) is all COMPLETE, no open critical finding remains. Per-release passes continue as new rows.
