@@ -237,8 +237,16 @@ pub fn image_dir() -> PathBuf {
             return PathBuf::from(d);
         }
     }
-    let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
-    PathBuf::from(home).join(".gpn").join("images")
+    // `$HOME` is not a Windows variable: a process started by the Task
+    // Scheduler or the Actions runner has only `USERPROFILE`. The old
+    // `HOME`-or-`"."` fallback then resolved this to a RELATIVE
+    // `.\\.gpn\\images`, so `artifact_path_allowed` (which requires an
+    // absolute path under this root) refused every image artifact on Windows.
+    // Same class as #185; `state_home` is the crate's one anchor.
+    match crate::firstrun::state_home() {
+        Some(home) => home.join(".gpn").join("images"),
+        None => std::env::temp_dir().join("gpn").join("images"),
+    }
 }
 
 /// 128 bits of hex, derived from the clock + pid + a process-local counter +

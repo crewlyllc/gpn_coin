@@ -188,8 +188,12 @@ pub fn audio_dir() -> PathBuf {
             return PathBuf::from(d);
         }
     }
-    let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
-    PathBuf::from(home).join(".gpn").join("audio")
+    // Same anchor as `image_jobs::image_dir`: `HOME` first, then
+    // `USERPROFILE`, never a relative fallback (see the note there).
+    match crate::firstrun::state_home() {
+        Some(home) => home.join(".gpn").join("audio"),
+        None => std::env::temp_dir().join("gpn").join("audio"),
+    }
 }
 
 fn record_path(id: &str) -> Option<PathBuf> {
