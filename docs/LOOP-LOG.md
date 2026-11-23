@@ -1,3 +1,20 @@
+## 23:02 PT 0.3.70 §6 box 1 ticked — artifact string scan run on the downloaded 0.3.70 binaries
+- A0: `origin/main` HEAD `12cedfa7` (docs-only) ⇒ `?head_sha=12cedfa70a0b…` runs `total_count: 0`
+  — paths-ignore, nothing red. Note: a 22:38 PT run had already ticked §5 boxes 5+6; this run found
+  its own duplicate box-5 commit rejected by the remote and dropped it rather than force a second
+  evidence block (working tree also had an uncommitted `scripts/git-hooks/pre-commit` edit from
+  another session — preserved untouched, not committed).
+- **§6 box 1 ticked** (scan built binaries for strings the change added). Downloaded the 0.3.70
+  assets via the API (linux `781579745` 346,959,113 B `ad383ad1…`, windows `781616189` 253,180,343 B
+  `490c3dd5…`), digests matched the release, extracted `gpn_node`/`gpn_api`/`gpn_scheduler` + `.exe`s
+  and counted code literals `settlement_depth` / `this chain has no finality gadget`:
+  api 1/1 both platforms, node 1/0, scheduler 3/3 (plus `returns genesis; use depth` 1).
+- notes: #243's `EntryReject::as_str()` sentences are inside the compact-compressed runtime wasm and
+  are not greppable in any node binary (sibling pallet sentence ⇒ 0 hits too); absence there is the
+  blob, not the build. Binaries cached in `/tmp/b70assets` for §6 box 2.
+- One docs commit, docs-only. No blockers, no [TRIAGE]. Next run: §6 box 2 (`--version` off the
+  same bytes), then §7 box 1 (attestation refusal check) → box 2 (dispatch the cut, do not wait).
+
 ## 22:38 PT 0.3.70 §5 boxes 5+6 ticked — the published 0.3.70 windows zip verifies against its cosign bundle
 - A0: `origin/main` HEAD `6a68db5` (docs-only loop-log commit) ⇒ `?head_sha=6a68db5dbcde…` runs
   `total_count: 0` — paths-ignore working, nothing red to act on. Working tree was 2 docs commits
