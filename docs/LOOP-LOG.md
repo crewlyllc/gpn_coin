@@ -1,3 +1,18 @@
+## 23:43 PT 0.3.70 §7 box 1 ticked — attestation verified by hand on the exact bytes the cut mirrors; cut dispatched
+- A0: `origin/main` HEAD `5e01c36` (docs-only) — a CI run exists and is `in_progress`; per A0 that is
+  not a blocker (the box worked was not a build), so the run continued.
+- **§7 box 1 ticked**: re-downloaded the windows zip (asset 781616189, 253,180,343 B) and its bundle
+  (781617472, 9,033 B) into `/tmp/b70assets`; `sha256sum` ⇒ `490c3dd5…fde40e5` / `135afd9d…f706b71e`,
+  both equal to the `windows-latest` asset digests. Private-path verifier
+  `cosign verify-blob --bundle gpn-windows.zip.bundle --certificate-identity-regexp
+  '^https://github\.com/jeremyzguo/gpn_coin/\.github/workflows/release-windows\.yml@.*$'
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com gpn-windows.zip` ⇒ **`Verified OK`**.
+  Linux digest `ad383ad1…c000fd58` matches the API; `release-linux-selfhosted.yml` has no
+  `cosign`/`attest` step (grep ⇒ 0 matches), so windows is the signed artifact by design.
+- **§7 box 2 NOT ticked — dispatched**: `scripts/release-cut.sh --version 0.3.70 --timeout 300`,
+  setsid/nohup, log `/tmp/release-cut-0.3.70.log`. Observed through step 2 ("download and verify the
+  built assets") before ending the run. Next run reads the log and ticks or re-dispatches.
+- One docs commit (`fd4bc66`), docs-only. No blockers, no [TRIAGE].
 ## 23:20 PT 0.3.70 §6 box 2 ticked — `--version` off the published 0.3.70 bytes reads 0.3.70
 - A0: `origin/main` HEAD `0814161` (docs-only §6-box-1 commit) ⇒ `?head_sha=0814161d6be7…` runs
   `total_count: 0` — paths-ignore, nothing red. No run to wait on.
