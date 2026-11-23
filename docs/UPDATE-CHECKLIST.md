@@ -191,8 +191,21 @@ Rules that follow from this:
 - [ ] Batch documentation edits into ONE commit. One commit per question is how a single-slot
       runner spends an hour verifying nothing.
 
-- [ ] Nothing else pushed in the same window; no push while CI runs for HEAD.
-- [ ] CI green on that exact SHA: fmt, clippy, secret-scan, Linux build, **Windows build**.
+- [ ] **CI is observed, not waited on.** Ask GitHub once for the run on this exact SHA and act only
+      on its `conclusion`: `failure` ⇒ read the failing job's log, quote the failing line, fix the
+      cause, push once; `success` ⇒ carry on; `queued`/`in_progress` ⇒ **note the run id and keep
+      working the checklist** — a build takes 40–75 min and a release driver that waits inside it is
+      the stall that produced three consecutive run timeouts on 2026-11-18. Only a build/publish box
+      (§5–§7) may wait, and only after the run has been in progress >90 min, at which point the stale
+      run is cancelled and a fresh one dispatched. (Reworded 2026-11-23: the old text said "no push
+      while CI runs for HEAD" and cost 0.3.70's slowest step — 1h02m in `archive/0.3.70.md` §4 —
+      waiting on a single-slot runner that was going to take the same hour either way.)
+- [ ] **The run that matters is the one for this SHA, and a docs-only SHA has none.** `ci.yml`
+      `paths-ignore`s `docs/**`, `**/*.md`, the campaign queues and `brand/**`, so `total_count: 0`
+      for a documentation SHA is the expected answer, not a red flag; for a code SHA the conclusion
+      must be `success`. Query with the **full 40-char sha** (`git rev-parse HEAD`) — a short sha
+      returns `total_count: 0` and is indistinguishable from "no run", which is how "docs-only, no
+      run" got concluded about commits that had one.
 
 ## 5. Build both platforms
 

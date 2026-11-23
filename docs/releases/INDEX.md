@@ -23,4 +23,4 @@ the checklist's last box is ticked and the version is published.
 | 0.3.67 | 2026-11-22 | 233, 234, 235, 236 | archive/0.3.67.md |
 | 0.3.68 | 2026-11-22 | 237, 238 | archive/0.3.68.md |
 | 0.3.69 | 2026-11-22 | 239 | archive/0.3.69.md |
-| 0.3.70 | 2026-11-23 | 240, 241, 242, 244, 245, 246, 247 (243 source only; spec-54 enactment pending) | archive/0.3.70.md |
+| 0.3.70 | 2026-11-23 | 240, 241, 242, 243 (source in 0.3.70; spec-54 `set_code` enacted live 2026-11-23 02:2x PT), 244, 245, 246, 247 | archive/0.3.70.md |
