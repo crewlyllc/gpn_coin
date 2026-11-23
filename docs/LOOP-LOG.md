@@ -1,3 +1,22 @@
+## 22:38 PT 0.3.70 §5 boxes 5+6 ticked — the published 0.3.70 windows zip verifies against its cosign bundle
+- A0: `origin/main` HEAD `6a68db5` (docs-only loop-log commit) ⇒ `?head_sha=6a68db5dbcde…` runs
+  `total_count: 0` — paths-ignore working, nothing red to act on. Working tree was 2 docs commits
+  behind (`4c737ed` vs `6a68db5`); fast-forwarded before touching anything.
+- **§5 box 5 ticked** (the artifact carries a verifiable signature). Repo is `visibility: private`,
+  so the private path applies: `GET /releases/tags/windows-latest` lists `gpn-windows.zip`
+  253180343 B `sha256:490c3dd5f475de03a1b85fc7c77f24b3a5e195690713beb27f6ced665fde40e5` beside
+  `gpn-windows.zip.bundle` 9033 B `sha256:135afd9ddcf74998ecc709a7367e4dde451f020f3fee6f67d7480ba8f706b71e`.
+- **§5 box 6 ticked** (verify with the matching verifier): downloaded both assets through the API
+  (`Accept: application/octet-stream` — the public `releases/download/...` URL returns a 9-byte
+  `Not Found` for this private repo because curl drops the auth header on the cross-host redirect),
+  `sha256sum gpn-windows.zip` ⇒ `490c3dd5…` = the asset digest, then
+  `cosign verify-blob --bundle gpn-windows.zip.bundle --certificate-identity-regexp
+  '^https://github\.com/jeremyzguo/gpn_coin/\.github/workflows/release-windows\.yml@.*$'
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com gpn-windows.zip`
+  ⇒ **`Verified OK`**. §5 now 6/7.
+- No blockers, no [TRIAGE]. Next run: §5 box 7 is the section rename/count (done as 6/7 here) — §6
+  box 1: scan the built binaries for the literals this bundle added (`reorg=`, `work ours=`, `gpn-forked`).
+
 ## 22:18 PT 0.3.70 §5 box 4 ticked — cosign sign+gate precede publish, proven on the shipped run
 - A0: `origin/main` HEAD `00759f6` (docs-only tick commit) ⇒ `?head_sha=00759f68e6af…` runs
   `total_count: 0` — paths-ignore working, nothing red to act on.
