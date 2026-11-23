@@ -1,3 +1,16 @@
+## 08:50 PT 0.3.71 §5 box 3 DONE — both artifacts proven to come from one commit (3520f70)
+
+- **A0**: `origin/main` HEAD `7691850` (docs-only) ⇒ `GET /actions/runs?head_sha=76918509c0867149f2fe9d9eb6b360bb12001bb2`
+  ⇒ `total_count: 0` (ci.yml paths-ignore), nothing red, no wait.
+- **Box ticked: §5 "Same SHA on both runs".** Re-queried from the API this run, not from the
+  earlier note: run `45208102738` (Linux binaries, self-hosted) **success** head_sha
+  `3520f705f987a49a134c6658b7ddbf5e871374cb`; run `45208112910` (Windows binaries) **success**
+  head_sha `3520f705f987a49a134c6658b7ddbf5e871374cb`; both on branch `build/3520f705f987`.
+- §5 now 3/7; checklist 24/52. **Next box:** attestation ordering/gate, then bundle verify —
+  private-repo path, so `cosign verify-blob --bundle gpn-windows.zip.bundle` against
+  `sha256:85f4ebe2…763e6a`.
+- No [TRIAGE], no owner decision.
+
 ## 08:25 PT 0.3.71 §5 box 2 DONE — windows artifact built, signed and published on box 1's runner
 
 - **A0**: `origin/main` HEAD `083785f` (docs-only, "§5 linux DONE … windows in_progress") ⇒
