@@ -1,3 +1,15 @@
+## 00:45 PT 0.3.70 §7b box 3 ticked — site == GitHub == binary, one sha256 chain
+- **A0**: HEAD `25dfc01` (docs-only) ⇒ `GET /actions/runs?head_sha=25dfc01…` `total_count: 0`, as expected
+  by paths-ignore. Last run's handle re-checked once: `cf0c011` run `45134936613` still `in_progress`
+  since 07:58Z (39 min, website change not path-ignored) — contention, not a failure; A0 does not block.
+- **§7b box 3 ticked — every surface names the same build.** site `releases.json` ⇒ `0.3.70`
+  (`published_at 2026-11-23T07:45:54Z`, sha256 linux `ad383ad1…` / windows `490c3dd5…`), `/download`
+  ⇒ `current-release">0.3.70`; GitHub rolling releases carry those exact digests and sizes; the same
+  two assets hashed locally in `/tmp/b70assets` match, and `lx/gpn_node --version` ⇒
+  `gpn_node 0.3.70 (spec 54, 774c884)` (`wn/gpn_node.exe` carries `gpn_node/0.3.70`).
+- **Next box**: §7c/§8 first unticked — anonymous download of both assets from gpncoin.ai. No blocker,
+  no [TRIAGE].
+
 ## 00:18 PT 0.3.70 §7b box 2 ticked — GitHub + mirror + network.json all carry 0.3.70
 - **A0**: HEAD `adbaad4` (docs-only) ⇒ `total_count: 0` runs, as expected by paths-ignore.
   Also closed last run's handle: `cf0c011` (website change, NOT ignored) has run `45134936613`,
