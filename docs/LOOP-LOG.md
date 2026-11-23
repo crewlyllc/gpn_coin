@@ -1,3 +1,12 @@
+## 06:39–06:45 PT 0.3.71 §4: the fix's CI run is 19 min into its build window and green on every gate that has finished — observed once, not waited on
+
+- **A0**: `origin/main` HEAD = `e9cb38d9448b…` (docs: "§4 red diagnosis, the #249 Windows home fix, and the new run handle"); docs-only, `paths-ignore`, no build expected for it.
+- **A — first unticked box is §4's last one, and it is a conclusion box.** Asked GitHub once for the in-flight handle run `45193416159` on `3520f705f987…` (the `3520f70` `fix(#249)` home-resolution fix): `status in_progress` (created 14:21:58Z, 19 min). Jobs: `fmt + clippy` **success** (14:23:19Z — the `3520f70` tree's clippy gate is green *in CI*, not just locally), `secret-scan` **success**, `Build + unit tests (linux)` in_progress since 14:23:51Z, `Build + unit tests (windows, self-hosted)` in_progress — that is the job that went red on `45173554840` (`assertion failed: artifact_path_allowed(... image_dir() ...)` at `gpn_scheduler.rs:11008:9`), so its outcome is exactly what this box waits on. macOS / GPU testnet / dependency audit skipped by design.
+- **No tick**: a box is ticked on a conclusion, not on a run being under way, and 19 min is well inside the 40–75 min build window — the 90-minute stale-run rule does not apply.
+- **§4 box updated with the 14:41Z observation**; nothing else was workable this run (§5's two builds are gated on this box by the sequencing rule, and no unrelated commit may be made while the checklist is open).
+- **Next run**: ask once more for `45193416159`. `success` ⇒ tick §4's last box, dispatch `release-linux-selfhosted.yml` + `release-windows.yml` on `3520f705f987…`, write both run ids into §5, end the run. `failure` ⇒ read the failing job's log, quote the line, classify, fix, push once, dispatch a fresh run, end.
+- No [TRIAGE] items; nothing needs Jeremy.
+
 ## 06:16–06:30 PT 0.3.71 §4 handle came back RED — Windows test caught a real #249 bug, fixed and re-dispatched
 
 - **A0**: `git fetch` ⇒ HEAD `d7dd448` = `origin/main`; `GET /actions/runs?head_sha=d7dd448e…` (full sha) ⇒ `total_count: 0` — docs-only SHA, `paths-ignore` intact.
