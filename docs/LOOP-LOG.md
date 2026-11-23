@@ -1,3 +1,14 @@
+## 04:59–05:45 PT 0.3.71 §4 CI observed — fix commit's run is green on every gate that already finished; only the Windows agent build still runs
+- **A0**: `git fetch` + `pull --ff-only` ⇒ HEAD `5bb9079` = `origin/main`. `GET /actions/runs?head_sha=5bb907907…` (full sha) ⇒ `total_count: 0` — docs-only SHA, `paths-ignore`, no run expected.
+- **A — box 1, §4 "the run that matters is the one for this SHA"**: still open, but no longer stuck. Run `45173554840` (head `c17444ae3079…`, the `fix(#248)` clippy commit) was started 12:41Z by last run's cancellation of the stale `45165291261`. Polled the handle with a bounded wait: at 13:45Z the jobs are
+  - `fmt + clippy` **success** — the exact gate that failed on the stale run (`error: this assertion has a constant value`, `gpn_scheduler.rs:10937`) now passes in CI, which supersedes the local-only proof recorded at 12:39Z;
+  - `secret-scan` **success**; `Build + unit tests (linux)` **success**;
+  - `Build + unit tests (windows, self-hosted)` **in_progress** on step `Build + test gpn-agent (release)`;
+  - macOS / GPU testnet / dependency audit **skipped** by design.
+  Overall run status still `in_progress`, so the box stays unticked — a box is ticked on a conclusion, not on optimism. Not a blocker, not parked: the handle and the per-job state are written into the box, and the next run asks once (success ⇒ tick + dispatch §5's two builds; failure ⇒ read the failing job's log first).
+- Nothing else workable this run: §5 is gated on this box by the sequencing rule, and while the checklist is open nothing else may be committed beyond this record.
+- No [TRIAGE] item; nothing needs Jeremy.
+
 ## 04:39 PT 0.3.71 §4: cancelled the stale failed CI run that was blocking the fix's verification; the fix's clippy step now passes locally
 - **A0**: `origin/main` = local HEAD = `a011b24` (docs) ⇒ no CI run for it (`paths-ignore`), expected. The release code sha under verification is `c17444a` (the clippy fix), run `45173554840`.
 - **Diagnosis of a stall, not a red**: `45173554840` sat `pending` with **zero jobs** since 12:21Z — blocked by the `ci-refs/heads/main` concurrency group of stale run `45165291261` (`50ab741f…`, in progress since 11:26Z). That run's gate had already failed: job `137664584174` step 12 ⇒ `error: this assertion has a constant value --> src/bin/gpn_scheduler.rs:10937:9` ⇒ `could not compile gpn-agent (bin "gpn_scheduler" test)` ⇒ exit 101. Its conclusion could only be `failure`, so it was spending a Windows build (65 min) on a doomed run while holding the lock.
