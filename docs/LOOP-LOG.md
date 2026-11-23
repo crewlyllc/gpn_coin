@@ -1,3 +1,37 @@
+## 18:5x PT 0.3.70 box 7 (247) DONE — a failed Windows download can no longer install the old build
+- A0: `origin/main` HEAD `b3dc877` is docs-only, **no CI run for that sha** (`total_count: 0`) — correct per
+  paths-ignore, not a problem. No failure to act on at HEAD. Working tree was 2 commits stale again
+  (`5422fb2` vs `b3dc877`); `git fetch` + compare + `reset --hard origin/main` *before* touching a box
+  saved the repeat of yesterday's duplicate-work trap.
+- **A red CI step was found on the way and cleared, not left standing.** Run `45090420442` (`a16c7cf`,
+  linux job) failed at step 20 `Referral links (website ?ref= validation)` with
+  `AssertionError: Windows quickstart must append the ref to install.ps1`. Cause: our test, not the page —
+  `website/tests/referral.test.js` and `join.test.js` still asserted `-File C:\gpn\bin\install.ps1`, which
+  row 247's `bin.pending` staging moved. Both now assert `bin.pending\\install.ps1`, so the ref placeholder
+  is still required *and* the staging path is correct. All website suites green (10/45/5/10/9/13).
+- Box: **247**. Three surfaces ship the command (`download.html`, `index.html` quickstart, `join.html` —
+  a join link is how the 0.3.64 report arrived) and all three now do: `curl.exe -fL` → abort on
+  `$LASTEXITCODE` → size vs `releases.json` → sha256 vs `releases.json` → extract to `C:\gpn\bin.pending`
+  → run **that** `install.ps1`. `install.ps1` refuses to finish when its binaries are older than the
+  published release.
+- Two **fail-open paths** in the first cut of that guard, found while writing the test and fixed:
+  a `ProductVersion` with `+build` metadata made `[version]` throw and the surrounding catch meant
+  "offline, skip" — so the guard silently disabled itself, the exact class of bug this row is about;
+  and the rethrow matched `'*older build*'` while the message says "OLD build", surviving only on a
+  second phrase. Parsing never throws now (`0.3.70+build7` → `0.3.70`); unknown stays permissive so
+  offline bundles still install; one phrase variable is what the catch matches.
+- Evidence: `scripts/tests/test-install-download-guard.sh` **19 checks, 0 failed** (extracts the page's
+  own code block, rewrites only `C:\gpn\*` and `curl.exe` to locals: curl exit 7 / 9-byte body /
+  sha-mismatch each abort with the page's own message, a correct artifact passes);
+  `scripts/tests/test-install-version-guard.ps1` **24 checks, 0 failed** (red before: the previous
+  installer had no guard block, and the old expression printed
+  `version check skipped: Cannot convert value "0.3.70+build7"`). Windows PowerShell **5.1.22621.4249**
+  on box 1 over SSH: **9/9**, including that the `download.html` snippet **parses under the 5.1
+  parser** (the ANSI-codepage trap is absent from it). `test-autostart-installers.sh`: all passed.
+  install.ps1 is pure ASCII. Code `4bf1b7f`.
+- Next box: §3 — bump and record (the last item row in this bundle is done; the release itself is next).
+  No [TRIAGE] items.
+
 ## 18:2x PT 0.3.70 box 6 (246) DONE — §8's stranger check is a command now, not a hand-tick
 - A0: `origin/main` HEAD `5422fb2`; one run **45097624818 `in_progress`** (secret-scan + fmt/clippy green,
   linux and windows builds running). Not waited on; this box is code + docs.
