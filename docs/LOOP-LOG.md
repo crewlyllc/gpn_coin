@@ -1,3 +1,23 @@
+## 19:4x PT 0.3.70 §4 batching box ticked — and I started from a one-run-stale tree
+- A0: `origin/main` HEAD `774c884`; one run `45101926276` **in_progress** (created 02:44Z, its jobs
+  only started 03:22Z behind the single-slot Windows runner: linux `test gpn-agent`, windows
+  `build+test`). No conclusion ⇒ no failure to act on, and §3/§4 are not build steps, so it was not
+  waited on. `paths-ignore` is **not** broken by that run: the push carried `4bf1b7f` (row 247's
+  code) alongside the docs commit.
+- **Stale tree again: I cost a full tick to it.** My checkout was at `774c884` (18:5x) while main had
+  already moved to `7eaea2f` (19:20) — whose run had already ticked **§3 4/4** and §4 box 1. I read
+  §3 box 1 as unticked, ticked it, and the push was rejected (`fetch first`); the duplicate commit
+  `531a535` was discarded un-pushed (`git reset --hard origin/main`) rather than merged on top. The
+  trap TOOLS.md already names: `git fetch` + compare + reset *before* reading a checklist. Two runs
+  now lost to it (2026-11-21, 2026-11-23).
+- Box worked: **§4 batching box.** Verified by counting, not by intent: the 19:20 run put four §3
+  ticks + §4 box 1 + its LOOP-LOG entry in one commit `7eaea2f` (2 files, `git show --stat`), and
+  `GET /actions/runs?head_sha=7eaea2f` ⇒ `total_count: 0`. Collateral: `531a535` (a docs-only commit
+  that never reached main) also has `total_count: 0` — consistent with docs being ignored.
+- Next box: §4 `Nothing else pushed in the same window; no push while CI runs for HEAD`, which binds
+  the §5 build window and should be worked with it; then `CI green on that exact SHA` (§5).
+- No [TRIAGE] items.
+
 ## 19:2x PT 0.3.70 §4 (docs-only push starts no build) ticked
 - A0: `origin/main` HEAD `14ccf97`, `GET /actions/runs?head_sha=14ccf97…62065` ⇒ `total_count: 0` —
   a docs-only commit, so no run is correct, not a failure. Nothing red to act on.
