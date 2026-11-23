@@ -1,3 +1,20 @@
+## 09:05 PT 0.3.71 §5 box 3 DONE — attestation provably precedes publish, and the gate provably blocks
+
+- **A0**: `origin/main` HEAD `f356c6f` (docs-only). `GET /actions/runs?head_sha=f356c6f...` ⇒
+  `total_count: 1`, run `45219327472` (`CI`) **in_progress** — noted, not waited on (A0 rule).
+- **Box ticked: §5 "attestation step runs BEFORE publish, and a failed attestation blocks".**
+  Repo visibility from API: `private=true` ⇒ cosign path. Executed steps in run `45208112910`
+  job `windows`: 19 availability success → 20 GitHub attest **skipped** (public-only) → 21 cosign
+  `sign-blob` success → 22 `Provenance gate - refuse to publish an unsigned artifact` success →
+  23 publish success. Gate at `release-windows.yml:720` has **no `if:`**; throws at `:735` (github
+  path) and `:740-743` (cosign: missing or <200 B bundle). Gate logic run on box 1's real Windows
+  PowerShell 5.1 against a fake zip — output: `CASE1 BLOCKED: no signature bundle ... refusing to
+  publish an unattested artifact` and `CASE2 BLOCKED: signature bundle is 102 bytes - refusing to
+  publish`.
+- **Next box (§5):** attestation exists for the *published* digest — private path ⇒ release carries
+  `gpn-windows.zip.bundle` and it verifies the published zip (cosign verify-blob).
+- No [TRIAGE], no owner decision.
+
 ## 08:50 PT 0.3.71 §5 box 3 DONE — both artifacts proven to come from one commit (3520f70)
 
 - **A0**: `origin/main` HEAD `7691850` (docs-only) ⇒ `GET /actions/runs?head_sha=76918509c0867149f2fe9d9eb6b360bb12001bb2`
