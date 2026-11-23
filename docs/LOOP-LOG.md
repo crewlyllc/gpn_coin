@@ -1,3 +1,28 @@
+## 16:05 PT 0.3.70 box 3 (242) DONE — the unsigned zero-balance entry WORKS on the live chain
+- A0: `origin/main` HEAD `edf7cef` (0 CI runs for that sha — docs-only, paths-ignore correct). In
+  flight: run 45081100470 on `a83907f` `in_progress` 53 min and 45084899171 on `845b055` `pending`.
+  Not waited on, per the rule. No failure to act on.
+- Box: **242**. Ran it down instead of inheriting the 5th box's story. Two probes, both new:
+  `examples/entry_live_register.rs` (mine against the live target, submit, find inclusion, decode
+  events) and `examples/block_events.rs` (decode any block's events by name — the node returns
+  extrinsics as byte arrays, so `client.blocks().at()` cannot decode a block body).
+- **Result: the path works.** Fresh account `0x67fbdf31…1274` (blake2 of entropy — no key, never
+  funded) mined 1.24G hashes at 61.8 MH/s against `Difficulty 0x…b2a2cf660d000000`, submitted
+  pallet 11 / call 20 as 205 B (`0x2d03` compact len 203 + version `0x04`), `author_submitExtrinsic`
+  ⇒ `0xeac02e8d…63b6`, **included block 347621 extrinsic 1**: `GPUAttestation::AttestationSubmitted`
+  (Bronze, gpu_count 1), `FreeEntryGranted`, `System::NewAccount`,
+  `ComputeMarketplace::ProviderRegistered`, `System::ExtrinsicSuccess{pays_fee:No}`.
+- Control first (`compute_gflops=1`, below the 250 floor): pool **accepted** it, included in block
+  347602 index 1, refused only by the eligibility floor — so pool admission is not what fails.
+- Cause of the 5th box's `1010 "Transaction has a bad signature"`: `validate_unsigned` maps EVERY
+  `precheck_pow` failure to `InvalidTransaction::BadProof`, and the retarget (±33 % every 45 blocks)
+  invalidates a proof mined before the step. That is rows 243 + 244, not the encoding — recorded in
+  the box so no future run re-litigates the hex.
+- Checks: `cargo fmt --check` clean; clippy with CI's exact allow-list on the examples exit 0.
+- Left on chain: one throwaway provider, no endpoint/stake/key (the AP cannot route to it and it
+  cannot sign). Honest record of the test.
+- Next box: 243 (`BadProof` → a real meaning in the node's error text). No [TRIAGE] items.
+
 ## 15:36 PT 0.3.70 box 2 (241) DONE — GRANDPA revisit condition recorded as a testable contract
 - A0: `origin/main` HEAD `37b84a9`, one run for that sha — **45084034435 `CI pending`** (single-slot
   runner). Not waited on, per the rule; push supersedes it. No failure to act on.
