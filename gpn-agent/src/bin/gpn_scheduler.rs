@@ -4324,6 +4324,35 @@ fn max_request_bytes(method: &Method, path: &[&str]) -> usize {
     }
 }
 
+/// May a provider callback name this `artifact_path`? (#249, red-team 2026-11-23)
+///
+/// `POST /result/{id}` records the path that `GET /artifact/{id}` later serves
+/// verbatim, and the write was accepted from any caller while the path was taken
+/// straight out of the request body. A caller who could reach that write path
+/// could therefore name `~/.ssh/id_ed25519` — or the AP's keystore — and then
+/// fetch it back through the artifact route. Artifacts only ever live under the
+/// image, audio or finetune directories, so anything else is refused before it
+/// reaches the store. `..` is refused outright, so a relative escape cannot be
+/// laundered through a path that merely starts with an allowed root.
+fn artifact_path_allowed(p: &str) -> bool {
+    let path = std::path::Path::new(p);
+    if p.trim().is_empty() || !path.is_absolute() {
+        return false;
+    }
+    if path
+        .components()
+        .any(|c| matches!(c, std::path::Component::ParentDir))
+    {
+        return false;
+    }
+    let roots = [
+        gpn_agent::image_jobs::image_dir(),
+        gpn_agent::audio_jobs::audio_dir(),
+        gpn_agent::utils::temp_dir().join("gpn_artifacts"),
+    ];
+    roots.iter().any(|r| path.starts_with(r))
+}
+
 /// Read a raw query-string value (no decoding) from a request URL.
 fn query_param<'a>(url: &'a str, key: &str) -> Option<&'a str> {
     let (_, q) = url.split_once('?')?;
@@ -8920,32 +8949,50 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     // AP issued a per-job token at dispatch and the provider must echo
                     // it. Without a match, ANY remote caller could inject/overwrite a
                     // job's result (answer poisoning). Loopback stays exempt so local
-                    // tests/monitors keep working. A job with no recorded token (legacy
-                    // pre-fix assignment) is accepted for backward-compat.
+                    // tests/monitors keep working. A job with NO recorded token is
+                    // refused for a remote caller (#249) — "absent" is not "trusted".
                     let is_loopback = req
                         .remote_addr()
                         .map(|a| a.ip().is_loopback())
                         .unwrap_or(false);
                     if !is_loopback {
-                        if let Some(want) = assignment_token(&assign_store, idn) {
-                            let got = v
-                                .get("callback_token")
-                                .and_then(|x| x.as_str())
-                                .map(str::to_string)
-                                .or_else(|| {
-                                    req.headers().iter().find_map(|h| {
-                                        if h.field.equiv("X-Gpn-Callback-Token") {
-                                            Some(h.value.as_str().trim().to_string())
-                                        } else {
-                                            None
-                                        }
+                        // #249: this used to be `if let Some(want)` — i.e. a job
+                        // with **no** recorded token (a legacy assignment, or an
+                        // id the AP never dispatched) accepted ANY remote caller's
+                        // result. On the live store 1,583 of 4,528 job ids had no
+                        // token, so "absent" must mean "refuse", not "trust".
+                        match assignment_token(&assign_store, idn) {
+                            Some(want) => {
+                                let got = v
+                                    .get("callback_token")
+                                    .and_then(|x| x.as_str())
+                                    .map(str::to_string)
+                                    .or_else(|| {
+                                        req.headers().iter().find_map(|h| {
+                                            if h.field.equiv("X-Gpn-Callback-Token") {
+                                                Some(h.value.as_str().trim().to_string())
+                                            } else {
+                                                None
+                                            }
+                                        })
                                     })
-                                })
-                                .unwrap_or_default();
-                            if !ct_eq(&want, &got) {
+                                    .unwrap_or_default();
+                                if !ct_eq(&want, &got) {
+                                    let _ = req.respond(
+                                        Response::from_string(
+                                            json!({"error":"invalid callback token"}).to_string(),
+                                        )
+                                        .with_header(hdr.clone())
+                                        .with_status_code(401),
+                                    );
+                                    return;
+                                }
+                            }
+                            None => {
                                 let _ = req.respond(
                                     Response::from_string(
-                                        json!({"error":"invalid callback token"}).to_string(),
+                                        json!({"error": format!("job {idn} has no callback token on record; a remote result write needs one")})
+                                            .to_string(),
                                     )
                                     .with_header(hdr.clone())
                                     .with_status_code(401),
@@ -8976,6 +9023,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 .unwrap_or("remote inference error"),
                         )
                     } else if let Some(ap) = v.get("artifact_path").and_then(|x| x.as_str()) {
+                        if !artifact_path_allowed(ap) {
+                            let _ = req.respond(
+                                Response::from_string(
+                                    json!({"error":"artifact_path must be under the artifact directories (image, audio or finetune)"}).to_string(),
+                                )
+                                .with_header(hdr.clone())
+                                .with_status_code(400),
+                            );
+                            return;
+                        }
                         store.complete_artifact(
                             idn,
                             ap,
@@ -10938,6 +10995,41 @@ mod tests {
             MAX_MEDIA_REQUEST_BYTES > 12 * 1024 * 1024,
             "an 8 MB clip is ~11 MB base64"
         );
+    }
+
+    #[test]
+    fn only_artifact_directories_may_be_named_by_a_callback() {
+        // #249: `POST /result/{id}` recorded `artifact_path` verbatim and
+        // `GET /artifact/{id}` served whatever file it named. With the
+        // unauthenticated write path (the matching `assignment_token` fix), a
+        // caller could name the AP user's private key and read it back.
+        let art = gpn_agent::utils::temp_dir().join("gpn_artifacts");
+        assert!(artifact_path_allowed(
+            &art.join("job_1_ft.zip").to_string_lossy()
+        ));
+        assert!(artifact_path_allowed(
+            &gpn_agent::image_jobs::image_dir()
+                .join("42-0.png")
+                .to_string_lossy()
+        ));
+        assert!(artifact_path_allowed(
+            &gpn_agent::audio_jobs::audio_dir()
+                .join("42-0.mp3")
+                .to_string_lossy()
+        ));
+        // Files outside the artifact roots: refused.
+        assert!(!artifact_path_allowed("/etc/passwd"));
+        assert!(!artifact_path_allowed("/home/jeremyg/.ssh/id_ed25519"));
+        // Traversal is refused even when the prefix looks allowed.
+        assert!(!artifact_path_allowed(&format!(
+            "{}/../.ssh/id_ed25519",
+            art.to_string_lossy()
+        )));
+        assert!(!artifact_path_allowed("../../etc/passwd"));
+        // Relative paths and empties are not artifacts.
+        assert!(!artifact_path_allowed("job_1_ft.zip"));
+        assert!(!artifact_path_allowed(""));
+        assert!(!artifact_path_allowed("   "));
     }
 
     #[test]
