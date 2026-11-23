@@ -1,3 +1,17 @@
+## 21:36 PT 0.3.70 §5 box 2 ticked — windows artifact digest re-verified first-hand
+- A0: `origin/main` HEAD `bb765912` (docs-only tick commit) ⇒ `?head_sha=` runs `total_count: 0`.
+  That is paths-ignore working, not an absent check; nothing red to act on. Working tree was
+  detached at `774c884` (2 docs commits behind) — fetched and checked out `main` before touching
+  the checklist.
+- **§5 box 2 ticked** (`release-windows.yml` → `gpn-windows.zip`). Re-queried rather than trusting
+  the previous note: `GET /actions/runs/45113574272` ⇒ `status=completed, conclusion=success,
+  head_sha=774c8849f607411504230d90a85c62c4b4b8f7db`; `GET /releases/tags/windows-latest` ⇒
+  `gpn-windows.zip` 253,180,343 B `sha256:490c3dd5f475de03a1b85fc7c77f24b3a5e195690713beb27f6ced665fde40e5`
+  created 05:08:57Z, plus `gpn-windows.zip.bundle` 9033 B
+  `sha256:135afd9ddcf74998ecc709a7367e4dde451f020f3fee6f67d7480ba8f706b71e`.
+- No blockers, no [TRIAGE]. Next run: §5 box 3 (same SHA on both runs — now checkable from both
+  completed runs), then box 4/5/6 (attestation ordering, bundle vs published digest, cosign verify).
+
 ## 21:16 PT 0.3.70 §5 box 1 ticked — linux artifact published; windows artifact also green
 - A0: `origin/main` HEAD `7a208c5` (docs-only ⇒ `head_sha` runs `total_count: 0`, path-ignore correct).
   No CI conclusion to act on, nothing red.
