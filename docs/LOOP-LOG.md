@@ -1,3 +1,14 @@
+## 19:2x PT 0.3.70 §4 (docs-only push starts no build) ticked
+- A0: `origin/main` HEAD `14ccf97`, `GET /actions/runs?head_sha=14ccf97…62065` ⇒ `total_count: 0` —
+  a docs-only commit, so no run is correct, not a failure. Nothing red to act on.
+- Tree check first this time: `git fetch` ⇒ `HEAD == origin/main == 14ccf97` before reading a checklist.
+- Box worked: **§4 first box, docs-only commit must not start a build.** `ci.yml:28-35` `paths-ignore`
+  is intact on push and pull_request (`docs/**`, `**/*.md`, campaigns, `brand/**`, `.gpn/**`),
+  and the docs-only sha `14ccf97` has `total_count: 0` while behaviour-changing paths remain
+  un-ignored. Config and run history agree; no fix needed.
+- Next box: §4 batching box, then `CI green on that exact SHA` and §5 build/publish.
+- No [TRIAGE] items.
+
 ## 19:14 PT 0.3.70 §3 (bump/lockstep) ticked — and I repeated the stale-tree mistake on box 247
 - A0: `origin/main` `774c884`, run **45101926276 pending** on it. Not waited on.
 - **I worked box 247 for ~40 minutes on a stale tree and it was already done.** My checkout sat at
