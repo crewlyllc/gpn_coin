@@ -1,3 +1,10 @@
+## 12:55 PT 0.3.71 §7b box 3 ticked — site, GitHub release and both binaries all report 0.3.71
+- **A0**: `origin/main` HEAD `a052ead` (docs-only) ⇒ `GET /actions/runs?head_sha=a052ead…` ⇒ `total_count: 0` — expected, nothing to wait on.
+- **§7b box 3 (site == GitHub release == binary)**: `gpncoin.ai/releases.json` ⇒ `"version": "0.3.71"`, `published_at 2026-11-23T19:07:36Z`. `GET /releases/tags/{linux,windows}-latest` ⇒ `gpn-linux.tar.gz` 347,068,583 B `sha256:3f89c29b77209…`, `gpn-windows.zip` 253,175,858 B `sha256:85f4ebe236d6c…` — the two assets the manifest names. Re-hashed the exact bytes locally (both match the manifest), extracted them, and asked the programs: `gpn-node --version` ⇒ `gpn-node 0.3.71`; `strings gpn-node.exe` from the zip ⇒ `0.3.71`. All three surfaces agree.
+- Note: `published_at` on the reused `*-latest` tags is still the 2026-10-13/20 tag date — the digests and the binary's own `--version` output are what prove the version.
+- **Next box**: §7b box 4 (capability discoverability on gpncoin.ai for this bundle).
+- No blocker, no [TRIAGE].
+
 ## 12:2x PT 0.3.71 §7b box 2 ticked — both GitHub repos carry the same attested assets, manifest + network.json agree
 - **A0**: `GET /commits/main` ⇒ `ff712cc` (docs-only). `GET /actions/runs?head_sha=ff712cca…` ⇒ `total_count: 0` — the expected docs-only answer, nothing to wait on.
 - **§7b box 2 (GitHub carries the same version)**: `GET /releases/tags/linux-latest` and `/windows-latest` on **both** repos. `jeremyzguo/gpn_coin`: `gpn-linux.tar.gz` 347,068,583 B `sha256:3f89c29b77209…` (783549310), `gpn-windows.zip` 253,175,858 B `sha256:85f4ebe236d6c…` (783600133), `.bundle` 9,033 B `5e0cc45927fc0…` (783603077). Mirror **`crewlyllc/gpn_coin`** holds the same three by name/size/digest (784174945 / 784181979 / 784186471) — these are exactly the URLs `website/releases.json` points at. `releases.json` ⇒ `"version": "0.3.71"`, `published_at 2026-11-23T19:07:36Z`; `network.json:25` ⇒ `"latest_version": "0.3.71"`.
