@@ -4299,7 +4299,7 @@ fn path_segments(url: &str) -> Vec<&str> {
         .collect()
 }
 
-/// The most request body any route may send (#251, red-team 2026-11-23).
+/// The most request body any route may send (#248, red-team 2026-11-23).
 ///
 /// Every POST used to be read with `read_to_string` and **no limit at all**, and
 /// the read happened *before* the auth gate — so an anonymous caller could POST
@@ -5539,7 +5539,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let _ = req.respond(Response::empty(413));
                 return;
             }
-            // Bound the body BEFORE buffering it (#251). `Content-Length` is
+            // Bound the body BEFORE buffering it (#248). `Content-Length` is
             // only a hint — a liar can omit it or understate it — so the read
             // itself is capped at limit+1 bytes and the overflow is detected
             // from the actual length. This runs before the auth gate on purpose:
@@ -5548,11 +5548,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             // oversized body must be refused without being read into memory on
             // any route.
             let body_limit = max_request_bytes(&method, &path);
-            if req
-                .body_length()
-                .map(|n| n > body_limit)
-                .unwrap_or(false)
-            {
+            if req.body_length().map(|n| n > body_limit).unwrap_or(false) {
                 let _ = req.respond(
                     Response::from_string(
                         json!({"error": {"message": format!("request body exceeds {body_limit} bytes"), "type": "gpn_payload_too_large"}})
@@ -10897,36 +10893,51 @@ mod tests {
 
     #[test]
     fn only_the_voice_clone_route_may_carry_megabytes() {
-        // #251: every POST used to be buffered with no limit, before auth, so
+        // #248: every POST used to be buffered with no limit, before auth, so
         // an anonymous 4 GB `/report` body was an OOM kill. The cap is 1 MiB
         // everywhere except the one route whose payload is a base64 audio clip.
+        //
+        // The magnitudes are asserted as LITERALS on purpose. The first version
+        // of this test compared each route against `MAX_REQUEST_BYTES` itself,
+        // so raising the constant to 32 MiB (i.e. removing the protection)
+        // still passed — it only proved route *selection*. Verified by
+        // re-running with the const set to 32 MiB: the literal version fails,
+        // the self-referential one did not.
+        assert_eq!(MAX_REQUEST_BYTES, 1024 * 1024, "default cap must be 1 MiB");
         assert_eq!(
-            max_request_bytes(&Method::Post, &["report"]),
-            MAX_REQUEST_BYTES
+            MAX_MEDIA_REQUEST_BYTES,
+            16 * 1024 * 1024,
+            "media cap is 16 MiB, not a second unbounded"
         );
+        let mib = 1024 * 1024;
+        assert_eq!(max_request_bytes(&Method::Post, &["report"]), mib);
+        assert_eq!(max_request_bytes(&Method::Post, &["result", "42"]), mib);
         assert_eq!(
-            max_request_bytes(&Method::Post, &["result", "42"]),
-            MAX_REQUEST_BYTES
+            max_request_bytes(&Method::Post, &["provider", "heartbeat"]),
+            mib
         );
         assert_eq!(
             max_request_bytes(&Method::Post, &["v1", "chat", "completions"]),
-            MAX_REQUEST_BYTES
+            mib
         );
         assert_eq!(
             max_request_bytes(&Method::Post, &["v1", "images", "generations"]),
-            MAX_REQUEST_BYTES
+            mib
         );
         assert_eq!(
             max_request_bytes(&Method::Post, &["v1", "audio", "speech"]),
-            MAX_MEDIA_REQUEST_BYTES
+            16 * mib
         );
         // GET carries no body at all; the cap must not accidentally apply the
         // media allowance to `GET /v1/audio/speech/{id}`.
         assert_eq!(
             max_request_bytes(&Method::Get, &["v1", "audio", "speech"]),
-            MAX_REQUEST_BYTES
+            mib
         );
-        assert!(MAX_MEDIA_REQUEST_BYTES > 12 * 1024 * 1024, "an 8 MB clip is ~11 MB base64");
+        assert!(
+            MAX_MEDIA_REQUEST_BYTES > 12 * 1024 * 1024,
+            "an 8 MB clip is ~11 MB base64"
+        );
     }
 
     #[test]
