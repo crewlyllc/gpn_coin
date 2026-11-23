@@ -1,3 +1,23 @@
+## 17:59 PT 0.3.70 box 5 (245) DONE — the cut can no longer 404 an asset or sign stale bytes
+- A0: run 45093748756 on `a13125e` `pending` at start; not waited on. No failure to act on.
+- **My working tree was 2 commits stale** (`670a722` vs origin `a13125e`), so this run spent its first
+  half re-implementing box 243 — which `a16c7cf` had already shipped, including the spec_version bump.
+  I caught it at push time (rebase conflict), discarded both duplicate commits, reset to `origin/main`
+  and worked the real next box. Same trap TOOLS.md warns about; fetch + compare before working a box.
+- Box: **245**. Cause was the order in `mirror_one`: rename the served asset aside, *then* upload a
+  ~300 MB file — so the URL 404s for the whole upload (observed 14:16), and the manifest describes the
+  previous build until the commit lands. Fixed: upload as `<name>.new-<ts>` while the served name still
+  points at the previous complete build, verify its digest, then rename old aside and temp onto the
+  served name (two metadata calls apart; the served name is never deleted). New **step 4c** before
+  signing: anonymous range GET must be 206 and an anonymous full download must hash to the build for
+  both assets. Post-publish check compares manifest sha/size with the build instead of re-downloading.
+- Test drift found and fixed: the fixture never carried the provenance `.bundle` that the cut has
+  required since 2026-11-20, so `t6` was already red on main; the fake API now answers `Range` with 206.
+  New `t13` asserts upload→rename order, that the served name is never deleted, and that the 206 check
+  precedes the manifest going live.
+- Evidence: `scripts/tests/test-release-cut.sh` **77 checks passed, 0 failed**. Commit `3df2efc`.
+- Next box: 246. No [TRIAGE] items.
+
 ## 17:5x PT 0.3.70 box 4 (244) DONE — a refused proof is re-mined against the live target, and accepted
 - A0: `origin/main` HEAD `a16c7cf8`; one run for that sha, **45090420442 `in_progress`** (single-slot
   runner). Not waited on, per the rule; this box is code and does not need CI.
