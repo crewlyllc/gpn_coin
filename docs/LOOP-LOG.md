@@ -1,3 +1,15 @@
+## 21:57 PT 0.3.70 §5 box 3 ticked — same SHA on both finished runs, proven from the runs API
+- A0: `origin/main` HEAD `4c737ed` (docs-only tick commit) ⇒ `?head_sha=` runs `total_count: 0`
+  — paths-ignore working; nothing red. Local tree was 1 commit behind, fast-forwarded first.
+- **§5 box 3 ticked** (same SHA on both runs). `GET /actions/runs/45113570183` ⇒
+  `Linux binaries (self-hosted)`, `completed success`, `head_sha 774c8849f607411504230d90a85c62c4b4b8f7db`;
+  `GET /actions/runs/45113574272` ⇒ `Windows binaries`, `completed success`, **same** `head_sha`.
+  `git ls-remote --tags origin refs/tags/build/774c8849f607` ⇒ `774c8849f607411504230d90a85c62c4b4b8f7db`
+  — tag, both runs and the green CI run 45101926276 name one commit. §5 now 4/7.
+- No blockers, no [TRIAGE]. Next run: §5 box 4 (attestation step ordering + repo visibility decides
+  cosign-bundle vs GitHub attestation), then box 5 (bundle verifies published digest), box 6 (cosign
+  verify-blob / gh attestation verify output pasted).
+
 ## 21:36 PT 0.3.70 §5 box 2 ticked — windows artifact digest re-verified first-hand
 - A0: `origin/main` HEAD `bb765912` (docs-only tick commit) ⇒ `?head_sha=` runs `total_count: 0`.
   That is paths-ignore working, not an absent check; nothing red to act on. Working tree was
