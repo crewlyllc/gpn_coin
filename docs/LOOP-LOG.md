@@ -1,3 +1,33 @@
+## 07:19 PT A0 — no run for HEAD (docs-only); the open §4 handle is still in_progress; nothing pushed
+
+- **A0 (CI for `origin/main` HEAD `a8766a8`):** GitHub returns `total_count: 0` for
+  the full 40-char sha — correct, that commit touches only `docs/LOOP-LOG.md`
+  (`paths-ignore: docs/**`). Not treated as a problem, no wait.
+- **The §4 box is still the open item, not a new failure.** Its handle is run
+  `45193416159` on `3520f70` (`fix(#249): image/audio dirs resolve an absolute home on
+  Windows`). Asked once: `secret-scan` success, `fmt + clippy` success,
+  `Build + unit tests (linux)` success, `Build + unit tests (windows, self-hosted)`
+  **in_progress**. The box stays unticked; §5 dispatch waits on §4 green per the
+  ordering rule. No poll loop, no wait.
+- **Re-derived the failure independently before reading the handle.** Log of the
+  earlier red run `45173554840` job `137699130709` step 7:
+  `panicked at src\bin\gpn_scheduler.rs:11008:9: assertion failed:
+  artifact_path_allowed(&gpn_agent::image_jobs::image_dir().join("42-0.png")…)`,
+  `test result: FAILED. 106 passed; 1 failed`, 303/99/74 other suites green.
+  Cause class confirmed on box 1 by rustc probe: `HOME` is absent in the runner
+  environment, so a `HOME`-or-`.` fallback yields the relative `.\\.gpn\\images`
+  and `artifact_path_allowed` (absolute-only) refuses it — `3520f70` is the fix.
+- **Latent follow-on, NOT pushed (release in flight, unrelated commit forbidden).**
+  `firstrun::state_home_at` still accepts any non-empty `HOME`, so a Git-Bash-style
+  `HOME=/c/Users/me` on Windows would re-introduce the same relative root. Patch that
+  (a) requires a native-absolute anchor and (b) makes the §3b artifact test print the
+  path and root it refused was written, clippy/fmt-clean locally (with CI's exact
+  `CLIPPY_ALLOWS`), to `~/gpn-loop/state-home-absolute-2026-11-23.patch`. Apply after
+  0.3.71 cuts.
+- **No commit, no dispatch, no new box.** Next run: ask once about `45193416159`;
+  `success` ⇒ tick §4 and dispatch §5's two builds; `failure` ⇒ read the failing job's
+  log first.
+
 ## 07:01–07:07 PT AUDIT — fixed 1 (disk), otherwise clean
 
 **Services / ports.** `systemctl --user list-units 'gpn*' --all` ⇒ 23 units; every `enabled` unit is
