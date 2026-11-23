@@ -1,3 +1,19 @@
+## 10:41 PT 0.3.71 §7 box 1 DONE — the bytes release-cut will mirror are attested (`Verified OK`)
+
+- **A0**: `origin/main` HEAD `9f93fda` (fetched, = local HEAD, clean tree). `GET /actions/runs?head_sha=9f93fda…`
+  ⇒ `total_count: 0` — docs-only SHA, paths-ignore intact, nothing in flight.
+- **Box ticked: §7 "Refuse to cut unless §5's attestation checks passed."** Step 2's source releases
+  re-queried from the API: `windows-latest` ⇒ `gpn-windows.zip` 253,175,858 B
+  `sha256:85f4ebe2…ad763e6a`, `gpn-windows.zip.bundle` 9,033 B; `linux-latest` ⇒ `gpn-linux.tar.gz`
+  347,068,583 B `sha256:3f89c29b…acd6906a`. Re-downloaded both windows assets **fresh by asset id**
+  into `/tmp/attest-cut-0.3.71/`; `sha256sum` reproduces the API digests exactly; then
+  `cosign verify-blob --bundle … --certificate-identity-regexp '^…/release-windows\.yml@.*$'
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com gpn-windows.zip`
+  ⇒ **`Verified OK`, exit 0**. `~/.gpn/release-in-flight` absent, so no cut is running.
+- **Next box: §7 `scripts/release-cut.sh --timeout 300`** — that is a long job: next run dispatches it,
+  writes the handle into the box, and ENDS (no waiting).
+- No blockers, no [TRIAGE].
+
 ## 18:24 PT 0.3.71 §6 box 2 DONE — `--version` is 0.3.71 on both shipped platforms (§6 closed 2/2)
 
 - **A0**: `origin/main` HEAD `ab2d237` (= local HEAD after fetch). `GET /actions/runs?head_sha=ab2d2373d35194ea3c8a30445faf7fa9e4574b04`
