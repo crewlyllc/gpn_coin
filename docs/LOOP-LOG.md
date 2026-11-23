@@ -1,3 +1,62 @@
+## 07:01–07:07 PT AUDIT — fixed 1 (disk), otherwise clean
+
+**Services / ports.** `systemctl --user list-units 'gpn*' --all` ⇒ 23 units; every `enabled` unit is
+`active (running)` (fleet, accesspoint, provider, diffusion, finetune, explorer, faucet, oracle,
+heartbeat, fleet-directive). `gpn-node.service` is `disabled` by design (gpn-fleet supervises the
+node). All five ports answer: 9944, 8092, 8093, 8099 (dashboard `200`), 11434.
+`system_chain` = "GPN Public Testnet", `system_version` = **0.3.70**, `system_health` ⇒
+`{peers:4, isSyncing:false}`; `system_peers` lists 4 AUTHORITY peers. Block advance measured
+directly: `0x55b9d → 0x55ba2` (351133→351138) over 100 s. `/v1/models` lists 5 models.
+`POST :8092/result/999999999` from a **non-loopback** LAN address ⇒ **401** (item 249's fix is live:
+AP binary dated Nov 23 03:48, `ActiveEnterTimestamp=03:48:00 PST`); loopback ⇒ 200 (trusted, as
+designed); `artifact_path` traversal ⇒ 400; `GET /artifact/999999999` ⇒ 404.
+
+**Logs.** `journalctl --user -u gpn-fleet -n 300` ⇒ 300 lines, **0** matches for
+panic|Reason:|taskkill|"Incompatible pruning"|update fail. A0 journal: 0 errors in 100 lines.
+Provider journal: 3 `[assign] pull failed (attempt 1)` lines (Nov 22 08:13, Nov 22 14:35, Nov 23
+03:48) — each a one-shot retry during an AP restart, next poll succeeded; not a fault.
+Updater ledger `~/.gpn/update/update-attempts.json`: last entry **0.3.70, outcome "confirmed",
+attempts 1**, and `gpn-update` journal 00:48:55–00:49:19 confirms 0.3.70 is running. Cron release
+loop `feff1358…`: last 6 runs completed (durations 60 s–47 min, all ending in a summary, no
+timeouts/errors); the 47-min run was waiting on in-flight CI, per its own summary.
+
+**Disk — the one fault fixed.** `df -h /` before: **366G used / 51G avail / 88 %** (11.6 % free).
+No cargo/rustc/cc1 running (`pgrep -x` empty); Linux runner `busy=False`; only the Windows runner
+busy, which builds in its own checkout. Deleted per §3b/§3c:
+- `gpn-agent/target/debug` — **33 G**
+- `gpn-node/target/debug` — **2.2 G**
+- `/tmp` scratch >3 d: `anon8` 557 M (old GPN tarballs + rel.json), `shieldtest` 192 M (cargo
+  scratch), `p8test` 17 M (html scrape), `gpn-rehearse-spec52` 4.7 M, `gpn-spec52-probe` 1.3 M,
+  `rl-neg` 860 K, `rc-neg` 272 K, `gpn-update-cli-*` (~0.8 M) — none held open (`lsof +D` empty;
+  `b70assets` at 01:00 today left alone → active release-cycle scratch).
+After: **330G used / 87G avail / 80 %** (19.8 % free, at the 20 % line). Deliberately left:
+`~/.ci-cache` 89 G, `~/.cache/huggingface` 53 G, `~/ollama` 8.1 G, `~/.gpn` chain data 24 G,
+`shared/` 14 G (all owner-decision "stays"), `gpn-agent/target/release` 7.1 G and
+`gpn-node/target/release` 7.0 G (release artefacts, not touched).
+
+**Top five consumers after cleanup.** `~/.ci-cache` 89 G · `~/.cache/huggingface` 53 G (models) ·
+`~/.gpn` 24 G (chain) · `/tmp` 14 G (stale `b70assets` 2.1 G is today's, rest is release scratch
+from Nov 22) · `~/ollama` 8.1 G. Inside `~/.openclaw`: workspace 65 G (projectmanager07 51 G, of
+which `gpn-agent/target` 7.1 G + `gpn-node/target` 7.0 G; `shared` 14 G), plugin-runtime-deps 1.5 G,
+agents 370 M, cron 34 M. Hidden-space rule satisfied every run.
+
+**Box 1 (SSH).** `(Get-Process gpn-node).Path` ⇒ `C:\gpn\data\update\current\gpn-node.exe`;
+`system_version` on its :9944 ⇒ **0.3.70**. `C:\gpn\bin\gpn-node.exe` has the same mtime
+(2026-11-22 21:05:42 PST), so bin and active copy are the same build — no deploy drift.
+
+**Release record.** `docs/releases/INDEX.md` has 19 versions; every one has a file in
+`docs/releases/archive/` (0 missing). 0.3.70: INDEX row ✓, `archive/0.3.70.md` ✓, GPN-LIST rows
+240–247 COMPLETE ✓. Consistency: site `releases.json version` = **0.3.70** = running node 0.3.70.
+Tree `Cargo.toml` is 0.3.71 (next release in flight, expected). GPN-LIST row 161 (0.3.59) is
+COMPLETE without naming its version — older convention, not a defect.
+`gpn-deploy-drift` timer fired 06:01 / 06:32 / 07:02, all `Finished` (exit 0) each time.
+
+**Locks.** `~/.gpn/deploy.lock` names `pid=2059845` (dead, Nov 19) but `deploy-bin.sh` uses `flock`,
+not the pid field — a dead holder has already released the lock, so the stale text is inert and the
+file was **not** removed. `gpu.lock` held by live pid 1540962 (provider). Nothing else needed a fix.
+
+Verdict: **fixed 1** (36 G of debug/scratch reclaimed; disk 11.6 % → 19.8 %). Nothing needs Jeremy.
+
 ## 06:59–07:02 PT 0.3.71 §4: handle still building at 36 min — gates green, Windows job on step 6; observed once, not waited on
 
 - **A0**: `git fetch` ⇒ HEAD `db4adef` = `origin/main` (docs: "§4 handle observed at 14:41Z"); docs-only, `paths-ignore` ⇒ no build for it (the code sha is `3520f705f987…`).
