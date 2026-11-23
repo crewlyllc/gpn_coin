@@ -1,3 +1,23 @@
+## 21:16 PT 0.3.70 §5 box 1 ticked — linux artifact published; windows artifact also green
+- A0: `origin/main` HEAD `7a208c5` (docs-only ⇒ `head_sha` runs `total_count: 0`, path-ignore correct).
+  No CI conclusion to act on, nothing red.
+- Read the two handles from 20:43 PT instead of waiting on them:
+  - run **45113570183** (linux, tag `build/774c8849f607`) ⇒ **completed success** 04:57:19Z.
+  - run **45113574272** (windows, same tag) ⇒ **completed success** 05:09:45Z.
+  Both `head_sha` = `774c8849f607411504230d90a85c62c4b4b8f7db`, the CI-green sha.
+- **§5 box 1 ticked** with the live asset: `gpn-linux.tar.gz` 346,959,113 B,
+  `sha256:ad383ad161ca43d91be35f251360ce23d8df470b2a25f3e936f88e88c000fd58`, created 04:54:55Z on
+  `linux-latest`. Queried via `GET /releases/tags/linux-latest` at 05:16Z — not from a doc.
+- Box 2 (windows) not ticked per the one-box-per-run rule, but its evidence is recorded in the box:
+  `gpn-windows.zip` 253,180,343 B `sha256:490c3dd5f4…`, created 05:08:57Z, plus
+  `gpn-windows.zip.bundle` (9033 B) — the private-repo cosign path, consistent with
+  `GET /repos/...` ⇒ `private: true`.
+- Reported failure: `release-unix.yml` run **45113572025** failed at 04:43:52Z. Cause: job
+  `build (macos-latest)` has 0 steps and lived 3 seconds — no macOS runner picked it up (private
+  repo, only `macos-latest` label). Classified: environment, and macOS is not in the manifest, so
+  no release impact. No re-dispatch.
+- No [TRIAGE] items. Next run: tick §5 box 2, then box 3 (same SHA, now provable from both runs),
+  then the attestation boxes against `gpn-windows.zip.bundle`.
 ## 20:56 PT 0.3.70 §5 box 1/2 still building — checked once, ended the run
 - A0: `origin/main` HEAD `1a9b375` (docs-only ⇒ `head_sha` runs `total_count: 0`, correct per
   paths-ignore). No CI conclusion to act on; nothing red.
