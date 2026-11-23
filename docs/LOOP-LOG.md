@@ -1,3 +1,17 @@
+## 18:05 PT 0.3.71 §6 box 1 DONE — new literals found in the shipped gpn_scheduler.exe
+
+- **A0**: `origin/main` HEAD `20fd7c2` (= local HEAD after fetch). `GET /actions/runs?head_sha=20fd7c233104d6d4b1af82e4358e978667c6b2c5`
+  ⇒ `total_count: 0` — docs-only SHA, paths-ignore intact, nothing to wait on.
+- **Box ticked: §6 "Scan the built binaries for strings the change added".** Unzipped the
+  cosign-verified `gpn-windows.zip` (253,175,858 B) to `/tmp/attest-0.3.71/ex/` and grepped the
+  exact shipped bytes. In the built `gpn_scheduler.exe` (18,186,240 B): `gpn_payload_too_large`,
+  `request body exceeds` (#248 cap), `invalid callback token`, `must be under the artifact
+  directories`, `gpn_artifacts` (#249 allow-list) all present. Correctly absent from `gpn-node.exe`
+  — the change is in the access point binary only. Literals taken from `git show 50a11fc`/`6f66601`.
+- **Next box: §6 "The binary's `--version` matches the version being released."** Then §7 cut
+  (`release-cut.sh`), which is a long job — that run will dispatch and END, not wait.
+- No blockers, no [TRIAGE].
+
 ## 09:41 PT 0.3.71 §5 CLOSED (7/7) — published windows zip verified with cosign against its own bundle
 
 - **A0**: `origin/main` HEAD `ac26f0f` (= local HEAD, fetched). `GET /actions/runs?head_sha=ac26f0f423d4fc85bc8437f24a95e568e6653791`
