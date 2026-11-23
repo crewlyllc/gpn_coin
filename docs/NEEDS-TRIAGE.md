@@ -82,3 +82,5 @@ Format: `- [ ] <item id> — <question> | options: A … B … | recommend: … 
       `118 PendingFileRenameOperations entries - logged only, does not defer` → `installed 0.3.68` →
       `confirm: process=up rpc=yes 123s version=0.3.68` → `CONFIRMED`. Rows 237/238 are `COMPLETE 0.3.68`
       in `GPN-LIST.md`. Nothing left to decide here.
+
+- [ ] queue-exhausted — GPN-LIST has **0 NEW and 0 IN-PROGRESS** rows after 0.3.70 closed 243 (219 COMPLETE / 7 BLOCKED / 226 rows, 2026-11-23 02:31 PT). Step C of the release loop has nothing to bundle, so the loop will go idle. | options: **A** take one of the 7 blocked rows that is work rather than a decision — 16 (red-team our own node and fix what breaks) is the strongest candidate, 153 (real token streaming) next — and bundle it | **B** keep the loop idle until Jeremy adds rows, waking only on CI failures and heartbeat | **C** revisit 26 (single-binary node) which Jeremy deferred on 2026-10-13 | recommend: **A with row 16** — a security red-team pass is the highest-value thing left before mainnet, needs no owner decision, and every finding it produces becomes a normal NEW row with a test.
