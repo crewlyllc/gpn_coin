@@ -1,3 +1,24 @@
+## 08:25 PT 0.3.71 §5 box 2 DONE — windows artifact built, signed and published on box 1's runner
+
+- **A0**: `origin/main` HEAD `083785f` (docs-only, "§5 linux DONE … windows in_progress") ⇒
+  `GET /actions/runs?head_sha=083785f234…` ⇒ `total_count: 0` (ci.yml paths-ignore, expected);
+  `GET /commits/083785f/check-runs` ⇒ only `Workers Builds: gpn-coin` **success**. Nothing red.
+- **Box ticked: §5 `release-windows.yml` → `gpn-windows.zip` on `windows-latest`.**
+  Handle `45208112910` (`3520f70`) ⇒ conclusion **success**, created 15:41:53Z, completed
+  16:08:08Z (26 min). All 23 executed steps green, including 21 `Sign release artifact keyless
+  (windows zip, private repo)`, 22 `Provenance gate - refuse to publish an unsigned artifact`,
+  23 `publish GitHub Release (rolling 'windows-latest')`. Step 20 `Attest build provenance
+  (windows zip, public repo)` skipped — correct, repo is `private: true`.
+- **Same SHA as the linux run**, proven from the API rather than assumed: run `45208112910`
+  head_sha `3520f705f987a49a134c6658b7ddbf5e871374cb` == run `45208102738` head_sha.
+- **Asset checked by API, not by the job's word**: `GET /releases/tags/windows-latest` ⇒
+  `gpn-windows.zip` 253,175,858 bytes, updated `2026-11-23T16:08:02Z`,
+  `sha256:85f4ebe236d6c8aa15cd6e7f3415d9fe2bfee08cfd474d9fabf72318ad763e6a`, plus
+  `gpn-windows.zip.bundle` 9,033 bytes (16:08:03Z).
+- **Next box (§5):** "Same SHA on both runs" — evidence already in hand; then the attestation
+  boxes (private path ⇒ cosign verify-blob against the published digest).
+- No [TRIAGE], no owner decision needed. §5 now 2/7; checklist total 23/52.
+
 ## 08:00 PT 0.3.71 §5 box 1 DONE — linux artifact built and published; windows still building
 
 - **A0**: `origin/main` HEAD `07cf4be` (docs-only, "§4 DONE … §5 builds dispatched") ⇒
