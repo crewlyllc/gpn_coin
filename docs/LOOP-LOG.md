@@ -1,3 +1,14 @@
+## 06:59–07:02 PT 0.3.71 §4: handle still building at 36 min — gates green, Windows job on step 6; observed once, not waited on
+
+- **A0**: `git fetch` ⇒ HEAD `db4adef` = `origin/main` (docs: "§4 handle observed at 14:41Z"); docs-only, `paths-ignore` ⇒ no build for it (the code sha is `3520f705f987…`).
+- **A — first unticked box is still §4's conclusion box.** Asked GitHub once: run `45193416159` (`3520f70`) ⇒ `status in_progress` (created 14:21:58Z, 36 min). Jobs: `fmt + clippy` **success**, `secret-scan` **success**, `Build + unit tests (linux)` **success**; `Build + unit tests (windows, self-hosted)` step 6 `Build + test gpn-node (release)` running since 14:22:19Z, step 7 (the agent step that went red on `45173554840`) still pending. macOS / GPU testnet / audit skipped by design. Nothing red.
+- **Runner check**: `actions/runners` ⇒ `DESKTOP-USBUADL online busy=True` (holding this job — contention, not a fault), `openclawassist online busy=False`.
+- **No tick**: 36 min is inside the 40–75 min Windows build window and the 90-minute stale-run rule applies only to §5–§7 build boxes.
+- **§4 box updated with the 14:59Z observation**, including the §5 prerequisite I could settle without a dispatch: repo `jeremyzguo/gpn_coin` is **private** (user-owned) ⇒ attestation is cosign keyless + `gpn-windows.zip.bundle`, not `actions/attest-build-provenance`. `~/.gpn/release-in-flight` absent.
+- Nothing else was workable (§5's two builds are gated on this box; no unrelated commit while the checklist is open).
+- **Next run**: ask once more for `45193416159`. `success` ⇒ tick §4, dispatch `release-linux-selfhosted.yml` + `release-windows.yml` on `3520f705f987…`, write both run ids into §5, end the run. `failure` ⇒ read the failing job's log, quote the line, classify, fix, push once.
+- No [TRIAGE] items; nothing needs Jeremy.
+
 ## 06:39–06:45 PT 0.3.71 §4: the fix's CI run is 19 min into its build window and green on every gate that has finished — observed once, not waited on
 
 - **A0**: `origin/main` HEAD = `e9cb38d9448b…` (docs: "§4 red diagnosis, the #249 Windows home fix, and the new run handle"); docs-only, `paths-ignore`, no build expected for it.
