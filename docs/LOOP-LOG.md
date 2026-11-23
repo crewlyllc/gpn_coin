@@ -1,3 +1,19 @@
+## 09:20 PT 0.3.71 §5 box 4 DONE — attestation bundle present for the published windows digest
+
+- **A0**: `origin/main` HEAD `c7d5808` (docs-only, after fetching — local tree was 1 behind).
+  `GET /actions/runs?head_sha=c7d58087b3b4a0a73a5737f4b35802f642558a6f` ⇒ `total_count: 0`;
+  docs-only SHA, expected, nothing to wait on.
+- **Box ticked: §5 "The attestation exists for the digest that is actually published".**
+  Repo is `private=true` from the API ⇒ cosign path. `GET /releases/tags/windows-latest`:
+  `gpn-windows.zip` 253,175,858 B, `digest sha256:85f4ebe236d6c8aa15cd6e7f3415d9fe2bfee08cfd474d9fabf72318ad763e6a`
+  (16:08:02Z) and `gpn-windows.zip.bundle` 9,033 B
+  `sha256:5e0cc45927fc0223af7706b4130711e217b5abb4550f6723a9fc0f828b083636` (16:08:03Z) — bundle
+  beside the exact published digest. `GET /attestations/sha256:85f4ebe…` ⇒ HTTP 404 (documented
+  private-repo behaviour, not a failure). Bundle is an inline cosign bundle (`base64Signature`, `cert`).
+- Next box: cosign `verify-blob` the downloaded zip against the bundle (cosign present at
+  `~/.local/bin/cosign`); that is a 253 MB download, next run.
+- No blockers, no [TRIAGE].
+
 ## 09:05 PT 0.3.71 §5 box 3 DONE — attestation provably precedes publish, and the gate provably blocks
 
 - **A0**: `origin/main` HEAD `f356c6f` (docs-only). `GET /actions/runs?head_sha=f356c6f...` ⇒
