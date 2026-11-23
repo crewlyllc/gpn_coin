@@ -1,3 +1,18 @@
+## 02:20 PT idle run — 0 NEW / 0 IN-PROGRESS, CI on the spec-54 code push in flight, nothing to bundle
+- **A0**: `git fetch` + `pull --ff-only` ⇒ HEAD `70302aa` (was `1cd2f8e`, two docs/chain commits behind).
+  `GET /actions/runs?head_sha=70302aa1c5db5f7283e1812c974b523970aaf517` ⇒ `total_count: 0` — docs-only,
+  `paths-ignore`, no run expected. The parent code push `857ce1498083aa58e10ee31f42ca8c027e5f8168`
+  did start a run: `45154311285` `CI` **in_progress**, created `10:14:48Z` — noted, not awaited
+  (A0 does not block, and no checklist box is open that depends on a build). Nothing red to fix.
+- **A**: no IN-PROGRESS row. **B**: already done — `https://gpncoin.ai/releases.json` ⇒
+  `version 0.3.70`, published `2026-11-23T07:45:54Z`; local node `system_version` ⇒ `0.3.70`
+  (`:9944`, 02:20 PT); `docs/releases/archive/0.3.70.md` is 56/56 and filed in `INDEX.md`.
+  **C**: queue is `GPN-LIST.md` 226 rows ⇒ 219 COMPLETE, **7 BLOCKED, 0 IN-PROGRESS, 0 NEW** —
+  nothing to bundle, so no version bump and no checklist generated this run.
+- **Open [TRIAGE]** (unanswered, filed last run): `docs/NEEDS-TRIAGE.md` `queue-exhausted` — take
+  blocked row 16 (red-team) as real work, stay idle, or revisit 26. Recommendation unchanged: A/row 16.
+- No commit beyond this log line; nothing else pushed.
+
 ## 02:31 PT push + queue state — nothing left IN-PROGRESS or NEW
 - **Pushed** `857ce14` (`entry(#243): enact spec 54 on testnet…`) — code push (`gpn-node/scripts/build-spec54-wasm.sh` + the 533 KB WASM blob + docs), so a CI run is expected on that sha; next run reads its conclusion.
 - **Queue after this run**: `GPN-LIST.md` 226 rows ⇒ **219 COMPLETE, 7 BLOCKED, 0 IN-PROGRESS, 0 NEW**. So the next run's step **C has nothing to bundle**. The 7 BLOCKED are 12 (mainnet prep), 13 (bridge/shield), 16 (red-team), 17 (trusted setup), 26 (single binary, owner-deferred), 153 (token streaming, parked), 194 (fork-test venue — still awaiting an answer, recommendation B).
