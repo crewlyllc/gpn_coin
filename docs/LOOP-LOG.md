@@ -1,3 +1,24 @@
+## 19:14 PT 0.3.70 §3 (bump/lockstep) ticked — and I repeated the stale-tree mistake on box 247
+- A0: `origin/main` `774c884`, run **45101926276 pending** on it. Not waited on.
+- **I worked box 247 for ~40 minutes on a stale tree and it was already done.** My checkout sat at
+  `b3dc877`; origin was `774c884`, which already carried `4bf1b7f` ("the Windows install refuses an
+  old build, and the download cannot fail silently") *and* the tick. I read my local
+  `docs/releases/0.3.70.md`, saw 247 unticked, and rebuilt the same guards — a second
+  `test-download-snippet.sh`, a second version-gate function — before the push was rejected as
+  non-fast-forward. Discarded (`git reset --hard origin/main`); nothing of the duplicate was pushed.
+  This is the exact trap TOOLS.md names and the 17:59 run already paid for once.
+  The fix is mechanical and I did not apply it before working: `git fetch` then compare
+  `git rev-parse HEAD` with the API's `/commits/main` **before** reading a checklist file.
+- Confirmed origin's own guards work (ran them, did not take them on faith):
+  `scripts/tests/test-install-download-guard.sh` ⇒ **19 checks, 0 failed** (curl failure aborts,
+  9-byte body aborts, right-size/wrong-bytes aborts, manifest-described artifact accepted).
+- Box worked: **§3 Bump and record**, 4/4 ticked with evidence now that 3b is 8/8 — the bump is
+  `c07ff48` (`Cargo.toml:3 version = "0.3.70"`, CHANGELOG "Bumped from 0.3.69"), no `_TODO_` in the
+  0.3.70 section, `bump-version.py --check` ⇒ `lockstep: 15 manifest(s) and 14 lockfile entr(ies)
+  agree`, and seed parity `node --test website/tests/access-points.test.js` ⇒ `tests 10 / pass 10 /
+  fail 0` (the same check as CI's access-points step).
+- Next box: §4 first `Push (once)` box — the CI-green-on-this-SHA boxes need A0's run to conclude.
+- No [TRIAGE] items.
 ## 18:5x PT 0.3.70 box 7 (247) DONE — a failed Windows download can no longer install the old build
 - A0: `origin/main` HEAD `b3dc877` is docs-only, **no CI run for that sha** (`total_count: 0`) — correct per
   paths-ignore, not a problem. No failure to act on at HEAD. Working tree was 2 commits stale again
