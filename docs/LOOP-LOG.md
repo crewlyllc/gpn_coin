@@ -1,3 +1,17 @@
+## 22:18 PT 0.3.70 §5 box 4 ticked — cosign sign+gate precede publish, proven on the shipped run
+- A0: `origin/main` HEAD `00759f6` (docs-only tick commit) ⇒ `?head_sha=00759f68e6af…` runs
+  `total_count: 0` — paths-ignore working, nothing red to act on.
+- **§5 box 4 ticked** (attestation ordering + visibility decides the mechanism).
+  `GET /repos/jeremyzguo/gpn_coin` ⇒ `visibility private, private true` ⇒ cosign path.
+  `GET /actions/runs/45113574272/jobs` step order: 19 visibility check success → 20 GitHub attest
+  **skipped** (private) → 21 cosign sign-blob **success** → 22 provenance gate **success** →
+  23 publish success. Signing/gating at 21/22, publish at 23 — before, in the job that shipped.
+  Structural block: gate (release-windows.yml:720) has no `if:`, no `continue-on-error`, and
+  throws on missing/short bundle or failed `cosign verify-blob` (737-743). §5 now 5/7.
+- Docs commit `734d248` pushed to main (docs-only, no CI expected).
+- No blockers, no [TRIAGE]. Next run: §5 box 5 (attestation exists for the digest releases.json
+  serves), then box 6 (paste `cosign verify-blob` output against the published bundle).
+
 ## 21:57 PT 0.3.70 §5 box 3 ticked — same SHA on both finished runs, proven from the runs API
 - A0: `origin/main` HEAD `4c737ed` (docs-only tick commit) ⇒ `?head_sha=` runs `total_count: 0`
   — paths-ignore working; nothing red. Local tree was 1 commit behind, fast-forwarded first.
