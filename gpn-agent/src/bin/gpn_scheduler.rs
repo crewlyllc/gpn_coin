@@ -10991,10 +10991,8 @@ mod tests {
             max_request_bytes(&Method::Get, &["v1", "audio", "speech"]),
             mib
         );
-        assert!(
-            MAX_MEDIA_REQUEST_BYTES > 12 * 1024 * 1024,
-            "an 8 MB clip is ~11 MB base64"
-        );
+        // An 8 MB clip is ~11 MB of base64, so the media cap must clear 12 MiB.
+        const { assert!(MAX_MEDIA_REQUEST_BYTES > 12 * 1024 * 1024) };
     }
 
     #[test]
