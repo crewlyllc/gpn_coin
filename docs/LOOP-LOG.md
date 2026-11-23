@@ -1,3 +1,27 @@
+## 23:56 PT 0.3.70 §7 CLOSED (cut published) + §7b site versions fixed and live
+- **A0**: local HEAD == `origin/main` `329dc82` (= the cut's own release commit). `GET /actions/runs?head_sha=329dc82…`
+  ⇒ run `45133557768` `pending` — not a blocker (no build box worked this run).
+- **§7 box 2 ticked — the cut actually published.** `/tmp/release-cut-0.3.70.log` ends
+  `=== released 0.3.70 — https://gpncoin.ai/releases.json` and `release-lock: released (0.3.70)`;
+  its publish step pushed `7145248..329dc82 HEAD -> main`. Log: `live manifest is 0.3.70`;
+  anonymous linux `GET 206` sha256 `ad383ad1…` 346,959,113 B; windows `GET 206` sha256 `490c3dd5…`
+  253,180,343 B, both matching the signed manifest; `crewlyllc/gpn_coin@linux-latest|windows-latest`
+  range GET 206.
+- **§7 boxes 3+4 ticked**: `network.json` `latest_version` = `0.3.70`; `releases.json` served
+  `0.3.70` twice ten seconds apart (two separate curls, no cache).
+- **§7b box 1 ticked — and it was a real bug, not a formality**: the static fallbacks still said
+  0.3.69 (`download.html` `id="current-release"` fallback, `docs/run-a-node` and `docs/downloads`
+  stamps). Fixed in `cf0c011`, deployed by the Cloudflare Git integration, re-verified live:
+  `/download` (301 from `/download.html`) ⇒ `current-release">0.3.70`; `/docs/run-a-node` and
+  `/docs/downloads` ⇒ `release 0.3.70`; stamp updated to `spec 53 / release 0.3.70 — checked
+  2026-11-22 23:58 PT at block 349,461` (`chain_getHeader` `0x55515`; live spec still 53 because the
+  0.3.70 binary's spec 54 activates at the runtime upgrade, and `network.json` stays 53 until then by
+  `check-spec-version.sh`). `seeds.json` has no version field at all.
+- **Handle for next run**: `cf0c011` touches `website/*.html`, which is NOT in `ci.yml` paths-ignore,
+  so a build was started for it — read its conclusion before §7b box 2 (GitHub release/mirror checks).
+- Remaining: §7b 2-4, §8 stranger verify, §9 self-update + running-process version, §10 behaviour,
+  §10b timing, then §0b filing (archive + INDEX row).
+
 ## 23:43 PT 0.3.70 §7 box 1 ticked — attestation verified by hand on the exact bytes the cut mirrors; cut dispatched
 - A0: `origin/main` HEAD `5e01c36` (docs-only) — a CI run exists and is `in_progress`; per A0 that is
   not a blocker (the box worked was not a build), so the run continued.
