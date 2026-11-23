@@ -1,3 +1,15 @@
+## 00:18 PT 0.3.70 §7b box 2 ticked — GitHub + mirror + network.json all carry 0.3.70
+- **A0**: HEAD `adbaad4` (docs-only) ⇒ `total_count: 0` runs, as expected by paths-ignore.
+  Also closed last run's handle: `cf0c011` (website change, NOT ignored) has run `45134936613`,
+  still `pending` since 07:58Z (18 min) — single-runner contention, not a failure; A0 does not block.
+- **§7b box 2 ticked — GitHub carries the same version.** `jeremyzguo/gpn_coin`: linux-latest
+  `gpn-linux.tar.gz` 346,959,113 B, windows-latest `gpn-windows.zip` 253,180,343 B (+ bundle 9,033 B);
+  `crewlyllc/gpn_coin` mirror carries the identical three names/sizes (what `releases.json` points at);
+  `releases.json` `0.3.70` published `2026-11-23T07:45:54Z` sha256 linux `ad383ad1…` / windows `490c3dd5…`;
+  `network.json` `latest_version` = `0.3.70`.
+- **Next box**: §7b box 3 — surfaces agree with the binaries (`gpn-node --version` from the published
+  artifact vs site vs GitHub). No blocker, no [TRIAGE].
+
 ## 23:56 PT 0.3.70 §7 CLOSED (cut published) + §7b site versions fixed and live
 - **A0**: local HEAD == `origin/main` `329dc82` (= the cut's own release commit). `GET /actions/runs?head_sha=329dc82…`
   ⇒ run `45133557768` `pending` — not a blocker (no build box worked this run).
