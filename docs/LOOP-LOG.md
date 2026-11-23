@@ -1,3 +1,26 @@
+## 20:45 PT 0.3.70 §4 finished (4/4) and both release builds dispatched
+- A0: `origin/main` HEAD `8a85b3d` (docs). CI run `45101926276` (head `774c884`) was **in_progress**
+  at start — windows `Build + test gpn-agent (release)` on the single-slot box-1 runner since 03:22Z.
+  Not waited on blindly and not blocked on: §4's boxes are verification, so I kept working, polled the
+  job on a bounded schedule, and it reached `completed success` 04:42:10Z (whole run
+  `completed success` 04:42:11Z). No failure to diagnose.
+- Boxes worked: **§4 box 2** (no push inside the CI window) — the code push itself created the run
+  (`4bf1b7f`/`774c884` 18:44:12/18:44:25 PT vs run created 02:44:35Z); everything pushed after is
+  `docs/`-only (`14ccf97`, `7eaea2f`, `8a85b3d`, each `total_count: 0`) and the run finished green,
+  so nothing superseded it. **§4 box 3** (CI green on that SHA) — fmt+clippy, secret-scan, linux
+  (26 steps), windows (node + agent release builds) all success on `774c8849f607…`.
+- §5 started: **per-item Windows evidence over SSH** (box 1) — `$PSVersionTable.PSVersion` ⇒
+  `5.1.22621.4249`, `C:\gpn\bin\install.ps1` still the 0.3.69 copy with no `version-guard` block
+  (expected: that block is row 247's change), `(Get-Process gpn-node).Path` ⇒
+  `C:\gpn\data\update\current\gpn-node.exe`. No runner dispatch used for it.
+- **Dispatched both platform builds and stopped** (the anti-timeout rule):
+  `scripts/dispatch-release.sh 774c8849f607…` tagged `build/774c8849f607` on the CI-verified sha and
+  dispatched `Linux binaries (self-hosted)` run **45113570183** (in_progress) and `Windows binaries`
+  run **45113574272** (queued behind the box-1 runner) at 04:43:4xZ; `release-unix.yml` (macOS,
+  run 45113572025) went too and is informational.
+- Next run: read those two handles, then §5's attestation boxes and `scripts/release-cut.sh`.
+- No [TRIAGE] items.
+
 ## 19:4x PT 0.3.70 §4 batching box ticked — and I started from a one-run-stale tree
 - A0: `origin/main` HEAD `774c884`; one run `45101926276` **in_progress** (created 02:44Z, its jobs
   only started 03:22Z behind the single-slot Windows runner: linux `test gpn-agent`, windows
