@@ -1,3 +1,18 @@
+## 11:01 PT 0.3.71 §7 release-cut DISPATCHED — handle written, run ended by design
+
+- **A0**: `origin/main` HEAD `eb72b65` (fetched; working tree clean, = local HEAD).
+  `GET /actions/runs?head_sha=eb72b6561dc196881510ccf96ef90ca72e9fef7d` ⇒ `total_count: 0` — docs-only
+  SHA, paths-ignore intact, nothing in flight to wait on.
+- **Box: §7 `scripts/release-cut.sh --timeout 300`** — dispatched per the dispatch-and-end rule:
+  pid 1849015, log `~/gpn-release-logs/cut-0.3.71-20261123-110018.log`, started 11:01 PT.
+  Observed before ending: step 1 detect ⇒ built assets linux `3f89c29b…906a` (347,068,583 B) /
+  windows `85f4ebe2…ad7636` (253,175,858 B) vs published manifest 0.3.70 ⇒ cut required;
+  step 2 downloaded and sha256-verified the linux tarball, then began the 253 MB windows zip.
+- **Next run**: read the log tail. If it exited 0 (mirror + signed manifest + push + re-download verify)
+  tick the box with the manifest version line; if not, quote the failing line and diagnose. Then §7
+  `network.json`/`releases.json` boxes and §7b surfaces.
+- No blockers, no [TRIAGE].
+
 ## 10:41 PT 0.3.71 §7 box 1 DONE — the bytes release-cut will mirror are attested (`Verified OK`)
 
 - **A0**: `origin/main` HEAD `9f93fda` (fetched, = local HEAD, clean tree). `GET /actions/runs?head_sha=9f93fda…`
