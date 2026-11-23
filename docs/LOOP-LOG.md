@@ -1,3 +1,12 @@
+## 12:05 PT 0.3.71 §7b box 1 ticked — every version surface on gpncoin.ai now says 0.3.71 (two doc pages were stale)
+- **A0**: `origin/main` HEAD `f18881e` (docs-only) ⇒ `GET /actions/runs?head_sha=f18881e4d5a382339abed4f14babca6df55ad754` ⇒ `total_count: 0`, the expected docs-only answer. Local checkout was 2 commits behind — fast-forwarded before reading anything.
+- **§7b box 1**: `releases.json` polled twice (20:00:07Z, 20:00:18Z) ⇒ `version 0.3.71 published_at 2026-11-23T19:07:36Z`.
+- **Found and fixed two stale surfaces**: `/docs/run-a-node` and `/docs/downloads` still carried `chain spec 53 / release 0.3.70 — 2026-11-22 23:58 PT`, and `/download` served the static fallback `id="current-release">0.3.70`. Stamps rewritten to `chain spec 54 / release 0.3.71 — 2026-11-23 12:00 PT at block 352,310` in `docs/run-a-node.md`, `docs/downloads.md`, `website/docs/{run-a-node,downloads}.html` + the `website/download.html` literal. Spec 54 is measured, not guessed: `state_getRuntimeVersion` ⇒ `specVersion 54`, `chain_getHeader` ⇒ `0x56036` = 352,310.
+- **Verified live after the push** (`c080957`, Cloudflare build ~2 min): `/docs/run-a-node` and `/docs/downloads` ⇒ `chain spec 54 / release 0.3.71`; `/download` ⇒ `current-release">0.3.71`.
+- `seeds.json` has no version field (keys: chain_id, counts, genesis, live_providers, live_source, multiaddrs, network, nodes, publisher, seeds, source, ttl, updated, updated_at) ⇒ recorded n/a with evidence.
+- **Next box**: §7b box 2 (GitHub `linux-latest`/`windows-latest` + the `crewlyllc/gpn_coin` mirror hold the assets the manifest names, and `network.json` matches).
+- No blocker, no [TRIAGE].
+
 ## 11:55 PT 0.3.71 A0 — the Windows CI failure was ours: Git-Bash `HOME` made the state dir relative; fixed and pushed
 - **A0**: `fetch` + `pull --ff-only` ⇒ HEAD `1d86c3e` = `origin/main` (another run had ticked §7 publish and §8 box 1). Handle `45173554840` (head `c17444a`) answered **`failure`** — so that was this run's box.
 - **Read the failure**: job `Build + unit tests (windows, self-hosted)` `137699130709`, step 7 ⇒ `test result: FAILED. 106 passed; 1 failed; … only_artifact_directories_may_be_named_by_a_callback … assertion failed: artifact_path_allowed(&image_jobs::image_dir().join("42-0.png"))`, `Process completed with exit code 1`. `fmt + clippy`, `secret-scan`, linux build all green.
