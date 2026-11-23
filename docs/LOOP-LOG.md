@@ -1,3 +1,19 @@
+## 09:41 PT 0.3.71 §5 CLOSED (7/7) — published windows zip verified with cosign against its own bundle
+
+- **A0**: `origin/main` HEAD `ac26f0f` (= local HEAD, fetched). `GET /actions/runs?head_sha=ac26f0f423d4fc85bc8437f24a95e568e6653791`
+  ⇒ `total_count: 0` — docs-only SHA, paths-ignore intact, nothing to wait on.
+- **Box ticked: §5 "Verify the downloaded artifact with the verifier that matches the mechanism".**
+  Downloaded by asset id (not a site URL): `gpn-windows.zip` 253,175,858 B, `gpn-windows.zip.bundle`
+  9,033 B. `sha256sum` reproduces API digests exactly — zip `85f4ebe2…ad763e6a`, bundle `5e0cc459…f828b083636`.
+  `cosign verify-blob --bundle … --certificate-identity-regexp '^https://github\.com/jeremyzguo/gpn_coin/\.github/workflows/release-windows\.yml@.*$' --certificate-oidc-issuer https://token.actions.githubusercontent.com gpn-windows.zip`
+  ⇒ **`Verified OK`, exit 0**. Files kept at `/tmp/attest-0.3.71/`.
+- Note: gpncoin.ai `releases.json` still serves 0.3.70 (manifest rewritten only by `release-cut.sh`),
+  so the manifest-equals-binary check is owed again in §7/§7b. `linux-latest` has no `.bundle` —
+  the linux self-hosted workflow does not sign; windows is the only attested artifact.
+- **Next box: §6 — scan the built binaries for the change's literals and check `--version`.**
+  The 253 MB zip is already local, so that is unzip + `strings` next run, then §7 cut.
+- No blockers, no [TRIAGE].
+
 ## 09:20 PT 0.3.71 §5 box 4 DONE — attestation bundle present for the published windows digest
 
 - **A0**: `origin/main` HEAD `c7d5808` (docs-only, after fetching — local tree was 1 behind).
