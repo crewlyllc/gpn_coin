@@ -8,6 +8,41 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 versions are [Semantic Versioning](https://semver.org/spec/v2.0.0.html), with
 the GPN-specific meaning of each level documented in `docs/updates.md`.
 
+## [0.3.72] - 2026-11-23
+
+Bumped from 0.3.71 (`scripts/bump-version.py patch`).
+
+A bundle of five owner-directed items (2026-11-23 12:36 PT): update cadence back to hourly,
+repeatable free registration, airdrop weight from verified contribution, a verified/unverified
+label on every GPU fingerprint, and logging of rejected heartbeats.
+
+### Added
+- **Airdrop weight from verified contribution** (row 252): the `gpn-airdrop-input-v1` export now
+  carries per-account `blocks_authored`, `jobs_served` and `jobs_settled_gpn` read from chain, and
+  the allocation formula in `docs/` excludes zero-contribution accounts — a registered-but-idle
+  identity receives nothing. Identity creation is no longer the thing worth farming.
+- **`GET /api/rejected` + dashboard list of rejected heartbeats** (row 254): the most recent
+  unregistered identities that tried to `/status` are readable without touching a distant machine.
+
+### Changed
+- **Update check cadence back to hourly** (row 250): `DEFAULT_CHECK_HOURS` is again `1`, per the
+  owner's 2026-11-12 decision; the 6 h value set 2026-11-18 under a TEMPORARY label is reverted.
+  `check_interval_is_clamped` still enforces a 1 h minimum, and the startup line reports
+  `first check in <1h`.
+- **Free registration is repeatable** (row 251): `FreeEntryGpus` is kept as history but no longer
+  gates entry. A fingerprint may (re)register at most once per day, so a machine that onboarded
+  once and lost its provider record can re-enter; a never-seen fingerprint still pays its entry
+  work; a second attempt inside 24 h is refused with a named reason.
+- **Every GPU fingerprint is labelled `verified` or `unverified`** (row 253): the AP `/providers`,
+  `/api/network`, dashboard and explorer never present the self-reported `gpu_info_hash` as fact —
+  the tier is `informational` until `ChallengeVerifierAccount` confirms a challenge, and the docs
+  state that an unverified fingerprint is a claim.
+
+### Fixed
+- **Rejected heartbeats log the peer id and reported version before being discarded** (row 254):
+  the AP now records `account + peer_id + reported version + source IP` once per minute, so
+  "which build is that machine running" is answerable from our side instead of inferred.
+
 ## [0.3.71] - 2026-11-23
 
 Bumped from 0.3.70 (`scripts/bump-version.py patch`).
