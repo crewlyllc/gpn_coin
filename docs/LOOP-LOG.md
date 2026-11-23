@@ -1,3 +1,34 @@
+## 01:52 PT 0.3.70 §9 + §10 + §10b ticked and FILED — release 0.3.70 complete (7 of 8 rows)
+- **A0**: `git fetch` + `pull --ff-only` ⇒ HEAD `ddc256d` (was one behind). `GET /actions/runs?head_sha=ddc256d73874ccdb656b4bccc90efcdf96561a27` (full sha) ⇒ `total_count: 0` — docs-only, paths-ignore, no run expected. Nothing to act on.
+- **§9 (4 boxes) — the self-update happened on its own, on box 1.** `C:\gpn\update.log`:
+  `00:00:04 check: -> update available: 0.3.70` → `00:01:05 GPN-Node stopped (forced)` (60 s graceful stop
+  timed out, worker tree taskkill'd) → `00:01:19 apply: installed 0.3.70 … current -> versions/0.3.70
+  previous: 0.3.69, copied 61 binaries to C:\gpn\bin` → `00:01:21 start (after apply): schtasks` →
+  `00:03:25 CONFIRMED: 0.3.70 is running (rpc http://127.0.0.1:9944) after 124 s`.
+  `(Get-Process gpn-node).Path` ⇒ `C:\gpn\data\update\current\gpn-node.exe` (pid 29524); the process answers
+  `system_version` ⇒ **0.3.70** at 01:43:21 PT. `update-state.json` release_id `490c3dd5f475…40e5` is the
+  published windows asset sha256 from §8 — the *published* bundle, not a local build. Rollback kept: `versions/0.3.69`
+  + `current.previous` → it.
+- **§10 (3 boxes) — behaviour on real machines.** (a) box 1 runs 0.3.70 (above). (b) anonymous, no auth:
+  `curl -sS https://gpncoin.ai/api/finality` ⇒ `settlement_depth 288`, `finalized_head null`, `mode depth`,
+  `settlement_time_human "≈72 min at 15 s"`, http 200. (c) same doc from the local AP + `/api/network`'s
+  `finality` object. Peers: box 1 held `2 peers` 01:01→01:41 (head 349730→349880, every sync line
+  `canonical/anchor-match=true`); last 4 000 log lines ⇒ `Reason:` bans **0**, `gpn-forked` **0**. The
+  `gpn-isolated` marker did fire 00:58:55→01:00:55 (post-restart bootnode re-dial) and cleared itself —
+  peers back 01:01, `NOW DIALABLE` on TCP 30333 at 01:03:25.
+- **Rows**: 240, 241, 242, 244, 245, 246, 247 ⇒ `COMPLETE 0.3.70 (2026-11-23)` with sha `329dc82` + evidence.
+  **Row 243 stays IN-PROGRESS on purpose** — its done-when needs the live pool to stop saying "bad signature",
+  which only happens at the spec-54 `set_code` (live `state_getRuntimeVersion` is still 53). Listed in the
+  INDEX row as "243 source only; spec-54 enactment pending".
+- **§10b**: `docs/releases/timing/0.3.70.{json,md}` — 56 boxes, **total 10h24m**; slowest single step 1h02m
+  (§4 "no push while CI runs" = runner queue, not re-work); §7b's four surface boxes 19-23 min each — the
+  shortening is to wire `release-cut.sh --verify-published` into §7b so one check replaces four polls.
+- **Filed**: `git mv docs/releases/0.3.70.md docs/releases/archive/0.3.70.md`; INDEX row appended. Whole file
+  `checklist-status.py` ⇒ **TOTAL 56/56**, every section DONE.
+- **[TRIAGE]**: 243's spec-54 `set_code` enactment (already filed in docs/NEEDS-TRIAGE.md §243). Not a new
+  question this run, no new decision needed from Jeremy.
+- **Next**: bundle the remaining NEW rows for 0.3.71 (C) once 243's enactment path is decided.
+
 ## 01:26 PT 0.3.70 §8 ticked — stranger download verified end to end (200, sha256, size, live stamps)
 - **A0**: local HEAD was one behind; fast-forwarded to `689b015`. `GET /actions/runs?head_sha=689b015ba4a31f7d31898c387675426389e4e554` (full sha) ⇒ `total_count: 0` — docs-only, expected.
   Carry-over handle re-checked once: run `45134936613` (`cf0c011`, website change) still `in_progress`
