@@ -1,3 +1,26 @@
+## 07:45 PT 0.3.71 §4 DONE (CI green on 3520f70) and §5's two builds dispatched, not awaited
+
+- **A0**: `origin/main` HEAD `baa1cff` (docs-only) ⇒ `GET /actions/runs?head_sha=baa1cff597…` ⇒
+  `total_count: 0`, correct under `ci.yml` paths-ignore. Nothing red.
+- **Box ticked: §4 "The run that matters is the one for this SHA" — DONE.** The handle
+  `45193416159` (`3520f70`, the `fix(#249)` home-resolution fix) answered **`success`** at
+  15:41:20Z. Jobs: `fmt + clippy` success, `secret-scan` success, `Build + unit tests (linux)`
+  success, and `Build + unit tests (windows, self-hosted)` **success** (14:22:01→15:41:20Z) —
+  the job that went red on `45173554840` with `assertion failed: artifact_path_allowed(...)`
+  at `gpn_scheduler.rs:11008:9`. So #249 is proven on the runner that has no `HOME`. §4 is now
+  `(4/4) DONE 2026-11-23`.
+- One bounded poll only (15:40Z→15:41Z) after the run had already been in progress 78 min; it
+  concluded on the second poll.
+- **§5 dispatched, handles written, run ended (dispatch-and-end):** `scripts/dispatch-release.sh
+  3520f705f987…` pushed tag `build/3520f705f987` and dispatched the two builds on that exact sha —
+  linux run **45208102738**, windows run **45208112910**, both `in_progress` at 15:42Z.
+- **Reported failure, not parked:** `release-unix.yml` run **45208107351** failed 4 s after creation
+  with job `build (macos-latest)` having **0 steps** — no macOS runner picked it up on this private
+  repo. Same environment signature as run `45113572025` on 0.3.70; macOS is not in the manifest, so
+  no release impact and no re-dispatch. Fix queued for the next bundle: drop `release-unix.yml`
+  from `dispatch-release.sh`'s workflow list.
+- No [TRIAGE] items. Next run: ask once about runs 45208102738 / 45208112910; on success tick the
+  two §5 build boxes + the same-SHA box, then the attestation boxes against `gpn-windows.zip.bundle`.
 ## 07:19 PT A0 — no run for HEAD (docs-only); the open §4 handle is still in_progress; nothing pushed
 
 - **A0 (CI for `origin/main` HEAD `a8766a8`):** GitHub returns `total_count: 0` for
