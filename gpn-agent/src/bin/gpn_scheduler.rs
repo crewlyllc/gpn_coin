@@ -4299,6 +4299,31 @@ fn path_segments(url: &str) -> Vec<&str> {
         .collect()
 }
 
+/// The most request body any route may send (#251, red-team 2026-11-23).
+///
+/// Every POST used to be read with `read_to_string` and **no limit at all**, and
+/// the read happened *before* the auth gate — so an anonymous caller could POST
+/// `/report` (which is deliberately exempt from the caller token) with a
+/// multi-gigabyte body and the access point would buffer the whole thing in RAM.
+/// Measured on the live AP: a 64 MB `/report` body was accepted (`ok:true`) and
+/// moved the process from 122 MB to 379 MB RSS; a 4 GB body is an OOM kill that
+/// takes the directory, the routing table and every in-flight job with it.
+const MAX_REQUEST_BYTES: usize = 1024 * 1024;
+
+/// The only route that legitimately carries megabytes: `POST /v1/audio/speech`
+/// embeds the caller's reference clip as base64 (`voice_ref`, itself capped at
+/// 8 MB decoded ⇒ ~11 MB encoded). Everything else is JSON prose.
+const MAX_MEDIA_REQUEST_BYTES: usize = 16 * 1024 * 1024;
+
+/// The body limit for one request, by route.
+fn max_request_bytes(method: &Method, path: &[&str]) -> usize {
+    if *method == Method::Post && path == ["v1", "audio", "speech"] {
+        MAX_MEDIA_REQUEST_BYTES
+    } else {
+        MAX_REQUEST_BYTES
+    }
+}
+
 /// Read a raw query-string value (no decoding) from a request URL.
 fn query_param<'a>(url: &'a str, key: &str) -> Option<&'a str> {
     let (_, q) = url.split_once('?')?;
@@ -5514,8 +5539,46 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let _ = req.respond(Response::empty(413));
                 return;
             }
+            // Bound the body BEFORE buffering it (#251). `Content-Length` is
+            // only a hint — a liar can omit it or understate it — so the read
+            // itself is capped at limit+1 bytes and the overflow is detected
+            // from the actual length. This runs before the auth gate on purpose:
+            // the exempt routes (`/report`, `POST /result/{id}`,
+            // `/provider/heartbeat`) are reachable anonymously, and an
+            // oversized body must be refused without being read into memory on
+            // any route.
+            let body_limit = max_request_bytes(&method, &path);
+            if req
+                .body_length()
+                .map(|n| n > body_limit)
+                .unwrap_or(false)
+            {
+                let _ = req.respond(
+                    Response::from_string(
+                        json!({"error": {"message": format!("request body exceeds {body_limit} bytes"), "type": "gpn_payload_too_large"}})
+                            .to_string(),
+                    )
+                    .with_header(hdr.clone())
+                    .with_status_code(413),
+                );
+                return;
+            }
             let mut body = String::new();
-            let _ = req.as_reader().read_to_string(&mut body);
+            let read = {
+                let mut r = req.as_reader().take(body_limit as u64 + 1);
+                r.read_to_string(&mut body)
+            };
+            if read.is_ok() && body.len() > body_limit {
+                let _ = req.respond(
+                    Response::from_string(
+                        json!({"error": {"message": format!("request body exceeds {body_limit} bytes"), "type": "gpn_payload_too_large"}})
+                            .to_string(),
+                    )
+                    .with_header(hdr.clone())
+                    .with_status_code(413),
+                );
+                return;
+            }
 
             // Auth gate (non-loopback only).
             if !ap_token.is_empty() {
@@ -10830,6 +10893,40 @@ mod tests {
         );
         // A bare `?` is a query too (empty), not a path character.
         assert_eq!(path_segments("/network?"), vec!["network"]);
+    }
+
+    #[test]
+    fn only_the_voice_clone_route_may_carry_megabytes() {
+        // #251: every POST used to be buffered with no limit, before auth, so
+        // an anonymous 4 GB `/report` body was an OOM kill. The cap is 1 MiB
+        // everywhere except the one route whose payload is a base64 audio clip.
+        assert_eq!(
+            max_request_bytes(&Method::Post, &["report"]),
+            MAX_REQUEST_BYTES
+        );
+        assert_eq!(
+            max_request_bytes(&Method::Post, &["result", "42"]),
+            MAX_REQUEST_BYTES
+        );
+        assert_eq!(
+            max_request_bytes(&Method::Post, &["v1", "chat", "completions"]),
+            MAX_REQUEST_BYTES
+        );
+        assert_eq!(
+            max_request_bytes(&Method::Post, &["v1", "images", "generations"]),
+            MAX_REQUEST_BYTES
+        );
+        assert_eq!(
+            max_request_bytes(&Method::Post, &["v1", "audio", "speech"]),
+            MAX_MEDIA_REQUEST_BYTES
+        );
+        // GET carries no body at all; the cap must not accidentally apply the
+        // media allowance to `GET /v1/audio/speech/{id}`.
+        assert_eq!(
+            max_request_bytes(&Method::Get, &["v1", "audio", "speech"]),
+            MAX_REQUEST_BYTES
+        );
+        assert!(MAX_MEDIA_REQUEST_BYTES > 12 * 1024 * 1024, "an 8 MB clip is ~11 MB base64");
     }
 
     #[test]

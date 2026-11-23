@@ -8,6 +8,39 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 versions are [Semantic Versioning](https://semver.org/spec/v2.0.0.html), with
 the GPN-specific meaning of each level documented in `docs/updates.md`.
 
+## [0.3.71] - 2026-11-23
+
+Bumped from 0.3.70 (`scripts/bump-version.py patch`).
+
+**The access point stops accepting an unbounded request body.** A red-team pass on the live
+public surface found that every POST was buffered with `read_to_string` and **no size limit at
+all**, and that the read happened *before* the auth gate — so the three routes that are
+deliberately token-exempt (`POST /report`, `POST /result/{id}`, `POST /provider/heartbeat`)
+were anonymously reachable at any size. Measured on the live AP: one 64 MB `/report` body was
+accepted (`{"ok":true,…}`) and the process grew from 122 MB to 379 MB RSS; concurrent
+multi-gigabyte bodies would OOM-kill the directory, taking the routing table and every
+in-flight job with it.
+
+### Added
+- **Per-route request-body caps** (row 248): 1 MiB for every route, 16 MiB for
+  `POST /v1/audio/speech` only (it embeds the caller's reference clip as base64, itself capped
+  at 8 MB decoded). Over-limit bodies answer **413 `gpn_payload_too_large`** — enforced on the
+  bytes actually read, not just on the declared `Content-Length`, so a client that omits or
+  understates the header is caught too.
+
+### Changed
+- The release loop's red-team row (16) is now an ongoing per-release sweep instead of a one-shot
+  blocked flag: each pass files its findings as numbered rows and fixes them before the bump.
+  Its old gate was stale — the cumulative-work fork choice it was waiting on a go-ahead for is
+  already implemented and shipped (`gpn-node/node/src/fork_choice.rs`, 0.3.66–0.3.70).
+
+### Fixed
+- **Unauthenticated memory-exhaustion DoS on the access point** (row 248). Verified on a scratch
+  AP (:18092) with the fixed binary: a 64 MB `/report` ⇒ **413** while RSS stayed flat at 36 MB;
+  a normal `/report` still answers `ok:true`; a 2 MB `voice_ref` body still passes the cap (its
+  own validation answers 403, not 413). Unit test
+  `only_the_voice_clone_route_may_carry_megabytes` covers the route map.
+
 ## [0.3.70] - 2026-11-22
 
 Bumped from 0.3.69 (`scripts/bump-version.py patch`).
