@@ -1,3 +1,19 @@
+## 18:24 PT 0.3.71 §6 box 2 DONE — `--version` is 0.3.71 on both shipped platforms (§6 closed 2/2)
+
+- **A0**: `origin/main` HEAD `ab2d237` (= local HEAD after fetch). `GET /actions/runs?head_sha=ab2d2373d35194ea3c8a30445faf7fa9e4574b04`
+  ⇒ `total_count: 0` — docs-only SHA, paths-ignore intact, nothing to wait on.
+- **Box ticked: §6 "The binary's `--version` matches the version being released."**
+  Downloaded the published `gpn-linux.tar.gz` (347,068,583 B, sha256 `3f89c29b…906a`) and ran the
+  extracted binary: `./gpn-node --version` ⇒ `gpn-node 0.3.71`, rc 0. On Windows, the exe inside the
+  cosign-verified `gpn-windows.zip` (sha256 `f732547b…973a`, 71,306,240 B) is byte-identical to box 1's
+  deployed `C:\gpn\bin\gpn-node.exe`, which answers `gpn-node.exe 0.3.71` over SSH.
+  Note found on the way: `jeremyzguo/gpn_coin` is **private**, so its anonymous release URLs 404 —
+  that is expected, and §8's anonymous check must go through the public mirror `crewlyllc/gpn_coin`
+  (anonymous `crewlyllc` linux-latest URL answers 302 to the CDN, as it should).
+- **Next box: §7 "Refuse to cut unless §5's attestation checks passed"** (cheap check), then the
+  `release-cut.sh` dispatch — that run will hand off a handle and END, not wait.
+- No blockers, no [TRIAGE].
+
 ## 18:05 PT 0.3.71 §6 box 1 DONE — new literals found in the shipped gpn_scheduler.exe
 
 - **A0**: `origin/main` HEAD `20fd7c2` (= local HEAD after fetch). `GET /actions/runs?head_sha=20fd7c233104d6d4b1af82e4358e978667c6b2c5`
