@@ -23,7 +23,18 @@
 #               rename-then-upload then verify the mirror's digest.
 #   5. SIGN     gen-release-manifest.py with the local ed25519 key; self-verify.
 #   6. PUBLISH  commit only website/releases.json, push, poll the live URL.
-#   7. VERIFY   anonymous download of each mirrored asset, sha256 vs manifest.
+#   7. VERIFY   anonymous download of each mirrored asset, sha256 vs manifest, and
+#               every manifest filename must exist exactly in the release it names
+#               (queue #246 — the §8 bug: a green tick against a 404). The same
+#               check runs standalone, so §8 can be filled from a command:
+#
+#                 scripts/release-cut.sh --verify-published [--version X.Y.Z]
+#
+#               It takes no lock and writes nothing: it fetches the live manifest
+#               anonymously, requires each asset filename to exist verbatim in the
+#               release its URL points at, range-GETs each URL (206 required) and
+#               downloads both assets to compare sha256 and size. Exit 0 means a
+#               stranger can install it.
 #
 # WHY SIGNING IS LOCAL: the private key never leaves this box. Putting it in
 # GitHub Actions would mean one leaked repo secret (or a compromised action)
@@ -40,6 +51,7 @@
 #                   temp dir and prints the manifest it *would* publish)
 #   --version       assert the version the bundles must contain
 #   --skip-mirror   assets are already in the public repo (sync workflow fixed)
+#   --verify-published  run only the §8 stranger check against the live manifest
 #   --min-version   override the cutoff (default: keep the published one)
 #   --timeout       seconds to wait for https://gpncoin.ai/releases.json (300)
 #   --yes           non-interactive (default; kept for symmetry)
@@ -90,6 +102,7 @@ POLL_INTERVAL="${GPN_POLL_INTERVAL:-10}"
 
 DRY=0
 SKIP_MIRROR=0
+VERIFY_PUBLISHED=0
 DECLARED_VERSION=""
 MIN_VERSION=""
 MIN_VERSION_SET=0
@@ -99,6 +112,7 @@ while [ $# -gt 0 ]; do
   case "$1" in
     --dry-run)      DRY=1; shift ;;
     --skip-mirror)  SKIP_MIRROR=1; shift ;;
+    --verify-published) VERIFY_PUBLISHED=1; shift ;;   # queue #246: §8 as a command
     --version)      DECLARED_VERSION="${2:?--version needs X.Y.Z}"; shift 2 ;;
     --min-version)  MIN_VERSION="${2:?--min-version needs X.Y.Z}"; MIN_VERSION_SET=1; shift 2 ;;
     --timeout)      TIMEOUT="${2:?--timeout needs seconds}"; shift 2 ;;
@@ -263,6 +277,121 @@ with open(sys.argv[1],"rb") as f:
 print(h.hexdigest())' "$1"; }
 
 size_of() { stat -c %s -- "$1"; }
+
+# ── the stranger's view (queue #246) ───────────────────────────────────────
+# Every check below is deliberately CREDENTIAL-FREE: no -K config, no token,
+# no cookie jar. The 0.3.68 §8 boxes were ticked against a URL that answered
+# 404 to anonymous callers, so a check that borrows the release's own token
+# proves nothing about what a stranger can fetch.
+anon_status() { # url -> HTTP status for a 1 KiB range request (no auth)
+  # -L, because GitHub release downloads answer an anonymous request with a 302
+  # to objects.githubusercontent.com; a stranger's browser follows it, so a check
+  # that stops at the 302 would refuse every healthy release. What must hold is
+  # the FINAL code: 206 (a 200 here means an HTML page, not the asset).
+  curl -sSL --max-time 30 --retry 2 --retry-delay 2 -r 0-1023 \
+    -o /dev/null -w '%{http_code}' "$1" 2>/dev/null || true
+}
+
+anon_asset_names() { # repo tag -> one asset name per line (no auth)
+  curl -sS --max-time 20 --retry 2 --retry-delay 2 \
+    -H 'Accept: application/vnd.github+json' \
+    "$GPN_GH_API/repos/$1/releases/tags/$2" 2>/dev/null | "$PY" -c '
+import json, sys
+try:
+    d = json.load(sys.stdin)
+except Exception:
+    sys.exit(0)
+for a in d.get("assets") or []:
+    print(a.get("name", ""))
+' || true
+}
+
+manifest_asset_fields() { # manifest os -> "sha256 size"
+  "$PY" -c '
+import json, sys
+m = json.load(open(sys.argv[1]))
+for a in m.get("assets") or []:
+    if a.get("os") == sys.argv[2]:
+        print(a.get("sha256", ""), a.get("size", ""))
+        break
+' "$1" "$2"
+}
+
+stranger_check() { # <manifest path|url> [expected version] [1 = download+hash]
+  local src="$1" want_ver="${2:-}" full="${3:-0}"
+  local tmp ver rows os url repo tag name code got f want_sha want_size anames
+  tmp="$(mktemp "${TMP:-${TMPDIR:-/tmp}}/stranger.XXXXXX")"
+  case "$src" in
+    http://*|https://*)
+      curl -sS --max-time 30 --retry 3 --retry-delay 2 -o "$tmp" "$src" || {
+        echo "ABORT: stranger check could not fetch $src anonymously" >&2
+        rm -f "$tmp"; return 1; } ;;
+    *) cp -- "$src" "$tmp" || { rm -f "$tmp"; return 1; } ;;
+  esac
+  ver="$("$PY" -c 'import json,sys; print(json.load(open(sys.argv[1])).get("version",""))' "$tmp" 2>/dev/null || true)"
+  if [ -z "$ver" ]; then
+    echo "ABORT: stranger check: $src is not a JSON manifest" >&2
+    rm -f "$tmp"; return 1
+  fi
+  if [ -n "$want_ver" ] && [ "$ver" != "$want_ver" ]; then
+    echo "ABORT: stranger check: $src serves version $ver, expected $want_ver" >&2
+    rm -f "$tmp"; return 1
+  fi
+  say "stranger check: $src serves version $ver (anonymous, no token, no cookie jar)"
+  rows="$("$PY" - "$tmp" <<'PY'
+import json, sys
+d = json.load(open(sys.argv[1]))
+for a in d.get("assets") or []:
+    url = a.get("url", "")
+    parts = url.rstrip("/").split("/")
+    try:
+        i = parts.index("download")
+        if i >= 1 and parts[i-1] == "releases":       # github.com/<o>/<r>/releases/download/<tag>/<name>
+            repo, tag, name = f"{parts[i-3]}/{parts[i-2]}", parts[i+1], parts[i+2]
+        else:                                          # <base>/download/<o>/<r>/<tag>/<name>
+            repo, tag, name = f"{parts[i+1]}/{parts[i+2]}", parts[i+3], parts[i+4]
+        print("\t".join([a.get("os", "?"), url, repo, tag, name]))
+    except Exception:
+        print("\t".join([a.get("os", "?"), url, "-", "-", "-"]))
+PY
+)" || { rm -f "$tmp"; echo "ABORT: stranger check: unreadable manifest" >&2; return 1; }
+  while IFS=$'\t' read -r os url repo tag name; do
+    [ -n "$os" ] || continue
+    if [ "$name" = "-" ]; then
+      echo "ABORT: $os asset URL is not a /releases/download/<tag>/<file> URL: $url" >&2
+      rm -f "$tmp"; return 1
+    fi
+    anames="$(anon_asset_names "$repo" "$tag")"
+    if ! printf '%s\n' "$anames" | grep -qxF -- "$name"; then
+      echo "ABORT: the manifest names '$name' for $os, but $repo@$tag carries no asset with that exact name. It carries:" >&2
+      printf '%s\n' "$anames" | sed 's/^/       /' >&2
+      rm -f "$tmp"; return 1
+    fi
+    code="$(anon_status "$url")"
+    if [ "$code" != 206 ]; then
+      echo "ABORT: anonymous range GET $url returned '${code:-nothing}', expected 206" >&2
+      rm -f "$tmp"; return 1
+    fi
+    if [ "$full" = 1 ]; then
+      f="$TMP/stranger-$os"
+      curl -L --fail --silent --show-error --retry 3 --connect-timeout 20 \
+        -o "$f" "$url" || {
+          echo "ABORT: anonymous download of $url failed" >&2
+          rm -f "$tmp"; return 1; }
+      read -r want_sha want_size <<< "$(manifest_asset_fields "$tmp" "$os")"
+      got="$(sha_of "$f")"
+      if [ "$got" != "$want_sha" ] || [ "$(size_of "$f")" != "$want_size" ]; then
+        echo "ABORT: $url anonymously served $got / $(size_of "$f") bytes, manifest says $want_sha / $want_size" >&2
+        rm -f "$tmp"; return 1
+      fi
+      say "$os: '$name' downloaded anonymously, $(size_of "$f") bytes, sha256 $got matches the manifest"
+    else
+      say "$os: '$name' exists exactly in $repo@$tag, anonymous range GET 206"
+    fi
+  done <<< "$rows"
+  rm -f "$tmp"
+  return 0
+}
 
 bundle_stamp() { # path -> version ("" when unstamped)
   "$PY" - "$GEN" "$1" <<'PY'
@@ -524,6 +653,21 @@ say "source      $SRC_REPO (CI build output)"
 say "mirror      $MIRROR_REPO (public downloads)"
 say "published   $(published_version || true)"
 [ "$DRY" = 1 ] && say "mode        DRY RUN (no upload, no commit, no push)"
+
+# ───────────────────────────── verify-as-a-stranger mode (#246) ────
+# The §8 boxes used to be done by hand, and were ticked against a URL that
+# returned 404 to anonymous callers. This mode IS that check, as a command:
+# anonymous, filename-exact, and it downloads both assets to compare sha256 and
+# size with the manifest. No lock, no repo writes — it reads the live manifest.
+if [ "$VERIFY_PUBLISHED" = 1 ]; then
+  TMP="$(mktemp -d "${TMPDIR:-/tmp}/gpn-stranger.XXXXXX")"
+  step "verify as a stranger (§8)"
+  if stranger_check "$RELEASES_URL" "$DECLARED_VERSION" 1; then
+    say "PASS: both manifest assets are publicly downloadable by exact filename and match their sha256/size"
+    exit 0
+  fi
+  exit 1
+fi
 
 # ─────────────────────────────────────────────────────────────── 1 detect ──
 acquire_release_lock
@@ -790,13 +934,23 @@ fi
 step "4c/6 the public assets serve the built bytes"
 URL_LINUX="$DL_BASE/linux-latest/gpn-linux.tar.gz"
 URL_WIN="$DL_BASE/windows-latest/gpn-windows.zip"
-anon_status() { # url -> HTTP status for a 1 KiB range request (no auth)
-  curl -sS --max-time 30 --retry 2 --retry-delay 2 -r 0-1023 \
-    -o /dev/null -w '%{http_code}' "$1" 2>/dev/null || true
-}
 if [ "$DRY" = 1 ]; then
   say "DRY RUN: skipping — a dry run does not mirror, so the public URL still serves the previous build"
 else
+# Filename-exact, anonymous (queue #246): the manifest this cut is about to sign
+# names these two files, so the release it points at must carry them under those
+# exact spellings. On 2026-11-22 windows-latest held only
+# `gpn-windows.zip.old-1795385826` while the manifest named `gpn-windows.zip`;
+# the generic 404 never said which side was wrong.
+for pair in "linux-latest:gpn-linux.tar.gz" "windows-latest:gpn-windows.zip"; do
+  tag="${pair%%:*}"; want_name="${pair#*:}"
+  names="$(anon_asset_names "$MIRROR_REPO" "$tag")"
+  printf '%s\n' "$names" | grep -qxF -- "$want_name" || {
+    echo "ABORT: $MIRROR_REPO@$tag does not carry '$want_name' exactly, so the manifest would name an asset that 404s. It carries:" >&2
+    printf '%s\n' "$names" | sed 's/^/       /' >&2
+    exit 1; }
+  say "$tag carries $want_name (exact filename)"
+done
 for pair in "linux:$URL_LINUX:$S_LINUX" "windows:$URL_WIN:$S_WIN"; do
   os="${pair%%:*}"; rest="${pair#*:}"; url="${rest%:*}"; want="${rest##*:}"
   code="$(anon_status "$url")"
@@ -917,6 +1071,15 @@ PY
   fi
   say "$os: ${msha:0:16}… matches the signed manifest ($msize bytes), anonymous GET 206"
 done
+
+# The same check as §8, against the manifest that is actually live: every asset
+# must exist under its exact filename in the release its URL points at, and be
+# readable anonymously. Post-publish the bytes were already fetched in 4c, so
+# this does not download them again — only the post-4c fact (the live manifest
+# names what the tag really carries) is re-proven.
+stranger_check "$RELEASES_URL" "$VER" 0 || {
+  echo "ABORT: the published manifest does not survive the stranger check." >&2
+  exit 1; }
 
 # 6b release the repo lock: the manifest is live and verified, so the release no
 # longer owns the tree. Failure to release is loud but not fatal — the release did

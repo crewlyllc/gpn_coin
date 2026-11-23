@@ -288,6 +288,17 @@ Two different jobs use Windows, and they must not be confused (owner question, 2
 
 ## 8. Verify as a stranger would
 
+**Run the command, do not hand-check** (queue #246). `archive/0.3.68.md` §8 was ticked green
+against a Windows URL that returned 404 to anonymous callers; a hand-tick cannot tell a
+reachable asset from a captive-portal page. This command takes no token and no cookie jar, and
+fails unless every manifest filename exists verbatim in the release its URL points at:
+
+```
+scripts/release-cut.sh --verify-published --version <version>
+```
+
+- [ ] **`--verify-published` exits 0** for this version; paste its three lines (`linux: …`,
+  `windows: …`, `PASS: …`) — they carry the byte counts and sha256 a stranger would get.
 - [ ] Anonymous download of **both** assets from `gpncoin.ai` succeeds.
 - [ ] **sha256 and size match** the manifest for both.
 - [ ] Docs stamp and `downloads.md` show the same version; the live URL was polled, not the repo.

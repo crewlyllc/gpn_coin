@@ -448,10 +448,56 @@ t13_upload_before_rename() {
   teardown
 }
 
+t14_filename_exact() {
+  CURRENT="t14 filename-exact stranger check"
+  # The 2026-11-22 shape, reached the way it actually happened: the mirror is
+  # assumed in place (--skip-mirror, the sync-workflow path), but the tag holds
+  # the *previous* asset renamed aside, so the name the manifest will use does not
+  # exist in that release. The cut must say so by name, not fail on a bare 404.
+  setup 0.3.4 0.3.5
+  set_state "d['mirror']['windows-latest'] = [{'name': 'gpn-windows.zip.old-1795385826', 'file': d['mirror']['windows-latest'][0]['file']}]"
+  cut --skip-mirror --timeout 20
+  check '[ "$RC" != 0 ]' "the cut refuses rather than sign a manifest naming a missing asset"
+  check 'grep -q "does not carry .gpn-windows.zip. exactly" <<< "$OUT"' \
+        "the refusal names the filename mismatch, not a bare 404"
+  check 'grep -q "gpn-windows.zip.old-1795385826" <<< "$OUT"' \
+        "it prints the assets the release actually carries"
+  check '[ "$(commits)" -eq 1 ]' "nothing was published (no manifest commit)"
+  check '! grep -q "released " <<< "$OUT"' "the run sure did not claim a release"
+  teardown
+
+  # And the standalone §8 command must fail the same way on a live manifest whose
+  # asset has since been renamed aside — a §8 tick must be impossible after that,
+  # which is exactly the box that was ticked green in 0.3.68.
+  setup 0.3.4 0.3.5
+  cut --timeout 20
+  check '[ "$RC" = 0 ]' "baseline cut publishes"
+  set_state "d['mirror']['windows-latest'][0]['name'] = 'gpn-windows.zip.old-1'"
+  OUT="$(cd "$R" && ./scripts/release-cut.sh --verify-published 2>&1)"; RC=$?
+  check '[ "$RC" != 0 ]' "--verify-published exits non-zero when a filename does not exist"
+  check 'grep -q "carries no asset with that exact name" <<< "$OUT"' \
+        "it says which side is wrong (manifest name vs release contents)"
+  check '! grep -q "PASS:" <<< "$OUT"' "no PASS line"
+  teardown
+
+  # A healthy release must pass the same command and produce the §8 lines.
+  setup 0.3.4 0.3.5
+  cut --timeout 20
+  check '[ "$RC" = 0 ]' "baseline cut publishes (second)"
+  OUT="$(cd "$R" && ./scripts/release-cut.sh --verify-published --version 0.3.5 2>&1)"; RC=$?
+  check '[ "$RC" = 0 ]' "--verify-published passes on a healthy release"
+  check 'grep -q "downloaded anonymously" <<< "$OUT"' "it downloaded both assets anonymously"
+  check 'grep -q "matches the manifest" <<< "$OUT"' "it compared sha256/size with the manifest"
+  OUT="$(cd "$R" && ./scripts/release-cut.sh --verify-published --version 9.9.9 2>&1)"; RC=$?
+  check '[ "$RC" != 0 ] && grep -q "serves version 0.3.5, expected 9.9.9" <<< "$OUT"' \
+        "a version assertion mismatch fails the stranger check"
+  teardown
+}
+
 ALL=(t1_nothing_to_do t2_detection_and_dry_run t3_digest_mismatch t4_mirror_failure
      t5_dirty_manifest t6_full_publish t7_version_assertion t8_skip_mirror
      t9_ci_gate t10_wrong_tree_aborts t11_docs_only_gap t12_gap_with_code
-     t13_upload_before_rename)
+     t13_upload_before_rename t14_filename_exact)
 
 want=("$@")
 printf '\nrelease-cut.sh — %d scenario(s)\n' "${#ALL[@]}"
