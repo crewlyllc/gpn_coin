@@ -1,3 +1,19 @@
+## 01:26 PT 0.3.70 §8 ticked — stranger download verified end to end (200, sha256, size, live stamps)
+- **A0**: local HEAD was one behind; fast-forwarded to `689b015`. `GET /actions/runs?head_sha=689b015ba4a31f7d31898c387675426389e4e554` (full sha) ⇒ `total_count: 0` — docs-only, expected.
+  Carry-over handle re-checked once: run `45134936613` (`cf0c011`, website change) still `in_progress`
+  since 07:58Z = 1h28m. A0 does not block and §8 is not a build step, so it was left running (not cancelled).
+- **§8 box 1** — anonymous, credential-free download straight from the live manifest URLs (`curl -sSL`, no
+  token/jar): linux `http=200 size=346959113`, windows `http=200 size=253180343`. Mirrors on
+  `crewlyllc/gpn_coin` serve anonymously.
+- **§8 box 2** — `sha256sum` ⇒ linux `ad383ad161ca43d9…c000fd58`, windows `490c3dd5f475de03…c77f24b3a5e19569`;
+  byte counts identical to `releases.json` `assets[].sha256/size`. Hex-for-hex match.
+- **§8 box 3** — polled the live site, not the repo: `/docs/downloads` and `/docs/run-a-node` ⇒
+  `chain spec 53 / release 0.3.70`; `/download` ⇒ `id="current-release">0.3.70`. The one remaining
+  `0.3.69` on `/download` is inside an HTML comment recording the version-history incident, not visible text.
+- **§8 DONE 3/3.** Remaining: §9 (self-update on a real node), §10 (behaviour + peers >5 min), §10b (timing), then §0b filing (2 boxes).
+- **Next box**: §9 box 1 — one node updates itself, no hand-copying (box 1 over SSH; do not dispatch a workflow for it).
+- No blocker, no [TRIAGE].
+
 ## 01:05 PT 0.3.70 §7c ticked — no capability in this bundle; #240's /api/finality is documented live
 - **A0**: local HEAD was one commit behind; pulled to `d0b17ea`. `GET /actions/runs?head_sha=d0b17ea…`
   (full 40-char sha) ⇒ `total_count: 0` — docs-only, paths-ignore, no run expected.
