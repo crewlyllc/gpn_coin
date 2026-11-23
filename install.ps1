@@ -3332,32 +3332,70 @@ Invoke-Step "create $BinDir and copy the release binaries" {
 Say "binaries installed in $BinDir"
 
 # 0a. Refuse to finish an install that is OLDER than the published release.
-#     2026-11-22: the one-command download on gpncoin.ai had no failure detection, so a
-#     blocked/404 download left the previous build in bin\ and this script reinstalled it
+#     2026-11-22 (row 247): the one-command download on gpncoin.ai had no failure detection,
+#     so a blocked/404 download left the previous build in bin\ and this script reinstalled it
 #     happily -- a "fresh install" reported 0.3.64 while the manifest served 0.3.68.
 #     Offline installs are unaffected: no manifest answer means no check.
+#
+#     The comparison lives in functions under the BEGIN/END version-guard markers so
+#     scripts/tests/test-install-version-guard.ps1 can extract and exercise the shipped
+#     text instead of a copy of it.
+# BEGIN version-guard
+function ConvertTo-GpnVersion {
+  # "0.3.70", "v0.3.70", "0.3.70+build7", "0.3.70-rc1", " 0.3.70 " -> [version] 0.3.70.
+  # $null when there is nothing comparable. A cast that throws here used to escape into the
+  # caller's catch and turn the whole guard into "version check skipped" -- a silent
+  # disable, which is the exact failure class row 247 is about, so parsing never throws.
+  param([string]$Text)
+  if (-not $Text) { return $null }
+  $t = ($Text.Trim() -split '\s+')[0]
+  $t = $t -replace '^[^0-9]*', ''      # drop a leading v / product name
+  $t = ($t -split '[+\-]')[0]          # drop +build metadata and -prerelease
+  try { return [version]$t } catch { return $null }
+}
+
+function Get-InstalledNodeVersion {
+  # The version the binaries in $BinDir actually carry. $null = unknown, not "old".
+  param([string]$BinDir)
+  $nodeExe = Join-Path $BinDir 'gpn-node.exe'
+  if (-not (Test-Path -LiteralPath $nodeExe)) { return $null }
+  $vi = (Get-Item -LiteralPath $nodeExe).VersionInfo
+  foreach ($raw in @($vi.ProductVersion, $vi.FileVersion)) {
+    $v = ConvertTo-GpnVersion $raw
+    if ($v) { return $v }
+  }
+  return $null
+}
+
+function Assert-InstallNotOlderThanPublished {
+  # Throws only when both sides are known and installed < published.
+  param($Installed, $Published)
+  if (-not $Installed -or -not $Published) { return }
+  if ($Installed -lt $Published) {
+    throw ("the binaries are {0} but the published release is {1} -- this install would " -f $Installed, $Published) + "leave an OLD version running. Re-download the archive (the one-command install now verifies size and sha256) and run install.ps1 from it."
+  }
+}
+# END version-guard
+
+# The text Assert-InstallNotOlderThanPublished throws is the contract with the catch below;
+# match one phrase that only that throw uses, so a refused install can never be swallowed
+# as a skipped check.
+$script:VersionGuardRefusal = 'would leave an OLD version running'
 try {
   $manifest = Invoke-RestMethod 'https://gpncoin.ai/releases.json' -TimeoutSec 15 -ErrorAction Stop
-  $latest = [string]$manifest.version
-  $here = $null
-  $nodeExe = Join-Path $BinDir 'gpn-node.exe'
-  if (Test-Path -LiteralPath $nodeExe) {
-    $here = (Get-Item -LiteralPath $nodeExe).VersionInfo.ProductVersion
-    if (-not $here) { $here = (Get-Item -LiteralPath $nodeExe).VersionInfo.FileVersion }
-    if ($here) { $here = ($here -split ' ')[0] -replace '^[^0-9]*', '' }
-  }
-  if ($here) {
-    $cmp = [version]($here -replace '-.*$','')
-    $want = [version]($latest -replace '-.*$','')
-    if ($cmp -lt $want) {
-      throw ("the binaries in " + $BinDir + " are $here but the published release is $latest -- " +
-             "this install would leave an OLD build running. Re-download the archive " +
-             "(the one-command install now verifies size and sha256) and run install.ps1 from it.")
-    }
-    Say "version check: installing $here (published latest $latest)"
+  $published = [string]$manifest.version
+  $installed = Get-InstalledNodeVersion $BinDir
+  $want = ConvertTo-GpnVersion $published
+  if (-not $installed) {
+    Warn "version check skipped: no readable version on the binaries in $BinDir (partial bundle?)"
+  } elseif (-not $want) {
+    Warn ("version check skipped: the manifest's version '" + $published + "' is not comparable")
+  } else {
+    Assert-InstallNotOlderThanPublished $installed $want
+    Say "version check: installing $installed (published latest $published)"
   }
 } catch {
-  if ($_.Exception.Message -like '*older build*' -or $_.Exception.Message -like '*published release*') { throw }
+  if ($_.Exception.Message -like ('*' + $script:VersionGuardRefusal + '*')) { throw }
   Warn ("version check skipped: " + $_.Exception.Message + " (offline install?)")
 }
 

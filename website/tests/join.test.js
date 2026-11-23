@@ -38,7 +38,7 @@ test("join.html exists and bakes the code into four install commands", () => {
   const placeholders = page.match(/<span data-ref-arg><\/span>/g) || [];
   assert.strictEqual(placeholders.length, 4, "join.html must carry exactly four ref placeholders");
   // The four shapes the rest of the site advertises.
-  assert.ok(page.includes("-File C:\\gpn\\bin\\install.ps1<span data-ref-arg></span>"),
+  assert.ok(page.includes("-File C:\\gpn\\bin.pending\\install.ps1<span data-ref-arg></span>"),
     "Windows quickstart (install.ps1) must take the ref");
   assert.ok(page.includes("./install.sh<span data-ref-arg></span>"),
     "Linux quickstart (./install.sh) must take the ref");

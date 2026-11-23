@@ -126,7 +126,7 @@ test("the published snippets carry the exact flag order the binary parses", () =
   // node -- so `--ref CODE` has to follow install.ps1, not a gpn_node call.
   const index = fs.readFileSync(path.join(SITE, "index.html"), "utf8");
   assert.ok(
-    index.includes("-File C:\\gpn\\bin\\install.ps1<span data-ref-arg></span>"),
+    index.includes("-File C:\\gpn\\bin.pending\\install.ps1<span data-ref-arg></span>"),
     "Windows quickstart must append the ref to install.ps1"
   );
   // Linux: `./install.sh --ref CODE`
