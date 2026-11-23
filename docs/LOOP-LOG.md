@@ -1,3 +1,25 @@
+## 08:00 PT 0.3.71 §5 box 1 DONE — linux artifact built and published; windows still building
+
+- **A0**: `origin/main` HEAD `07cf4be` (docs-only, "§4 DONE … §5 builds dispatched") ⇒
+  `GET /commits/07cf4be/check-runs` ⇒ only `Workers Builds: gpn-coin` **success** (Cloudflare),
+  `total_count: 1`. No `CI` run exists for a docs SHA — expected under `ci.yml` paths-ignore,
+  nothing red.
+- **Box ticked: §5 `release-linux-selfhosted.yml` → `gpn-linux.tar.gz` on `linux-latest`.**
+  Handle `45208102738` (`3520f70`) ⇒ conclusion **success**, created 15:41:50Z, completed
+  15:55:00Z (17 min, not 40+ — the dispatch-and-end rule is why). All executed steps green,
+  including `canonical runtime WASM (pre-build)`, `package (layout=bundle, verifies canonical
+  WASM + completeness)` and `publish GitHub Release (rolling 'linux-latest')`. Asset confirmed
+  by API, not by the job's word: `GET /releases/tags/linux-latest` ⇒ `gpn-linux.tar.gz`
+  347,068,583 bytes, updated 15:54:55Z, `sha256:3f89c29b…d6906a`.
+- **Handle for the next run: §5 `release-windows.yml` run `45208112910`** (`3520f70`) —
+  `in_progress` at 15:59Z, 18 min into a 40–75 min cold Windows build on box 1's single-slot
+  runner. Not waited on. Ask once next run: `success` ⇒ tick, compare its sha256 with linux;
+  `failure` ⇒ read the failing job's log and quote the line.
+- Also noted: run `45208107351` (`release-unix.yml`, fired by `dispatch-release.sh`) failed 4 s in
+  with zero steps — no macOS runner on this private repo, same signature as `45113572025`.
+  Environment, no release impact. Fix candidate already recorded for the next bundle: drop
+  `release-unix.yml` from the dispatcher.
+- No [TRIAGE], no owner decision needed. §5 now 2/7; checklist total 22/52.
 ## 07:45 PT 0.3.71 §4 DONE (CI green on 3520f70) and §5's two builds dispatched, not awaited
 
 - **A0**: `origin/main` HEAD `baa1cff` (docs-only) ⇒ `GET /actions/runs?head_sha=baa1cff597…` ⇒
