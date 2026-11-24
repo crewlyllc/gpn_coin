@@ -1,3 +1,11 @@
+## 17:20 PT 0.3.72 §3b box 250 ticked — hourly cadence observed on a real supervisor
+
+- **A0**: `GET /commits/main` ⇒ `b80e8652370c87d16279a5db154d29d4ed375ee0` (= local HEAD). `GET /actions/runs?head_sha=b80e865…` ⇒ run **45301441083** (`CI`) `total_count: 1`, `status: pending`, `conclusion: null` — noted, not waited on (the box worked here is code/test proof, not a build/publish step). Nothing red.
+- **Box worked**: §3b item **250** (first unticked box) — update cadence back to hourly.
+- **Evidence**: `gpn-agent/src/update.rs:770` `pub const DEFAULT_CHECK_HOURS: u64 = 1;`; `cargo test --release --lib check_interval_is_clamped` ⇒ `test update::tests::check_interval_is_clamped ... ok` (1 passed; min still clamps to 1 h). Rebuilt `target/release/gpn_node` from this tree and ran a real supervisor (temp prefix `/tmp/gpn250`, spare ports 39933/39944, `GPN_REQUIRE_OLLAMA=0`): `[supervisor 01:15:17] update: auto-update ON — checking https://gpncoin.ai/releases.json every 1h ±5–10% jitter, first check in 16m 22s (phase from account:5E2M…; install spread 0–1200s; restart_to_apply=true)`. Temp prefix deleted after the run; no download started (phase 16m out).
+- Authority: `GPN-LIST.md` row 250 records it as the owner's 2026-11-23 decision (the 6 h value had been set by the assistant on 2026-11-18 under a TEMPORARY label with no owner date).
+- **Next run**: §3b item 251 (re-registration rate limit) — its code+tests are done per the box notes; the remaining proof is live re-registration, which needs §10's node, so if the box cannot be proven now it gets `blocked`-style routing only if it is a real owner decision (it is not) — likely the next workable box is §3 (bump/lockstep/CHANGELOG/seed parity).
+- No blocker, no [TRIAGE].
 ## 17:05 PT 0.3.72 §2 — 252 and 253 implemented; the three red tests are green
 
 - **A0**: `GET /commits/main` ⇒ `06bbc2677bd57c49991e5cffa7346ecae88ca845` (the red-test commit), which equals local HEAD in `~/.openclaw/workspace/projectmanager07`. `GET /actions/runs?head_sha=06bbc267…` ⇒ run **45298958279** `pending`, `conclusion: null` — noted, not waited on; this box is code+tests, which needs no CI result. Nothing red.
