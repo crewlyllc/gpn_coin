@@ -1,3 +1,20 @@
+## 01:55 PT 0.3.73 — §2 box 2 ticked (fmt + CI-identical clippy clean on HEAD)
+
+- **A0**: `origin/main` HEAD `33dcd36fc3ed54075710a094e62952fea7b5f57c` == local HEAD.
+  `GET /actions/runs?head_sha=33dcd36…` ⇒ `total_count: 0` — docs-only commit, expected under
+  `ci.yml` paths-ignore. Nothing red; nothing waited on.
+- **Box worked: §2 "`cargo fmt --check` clean; clippy with CI's `-D warnings` clean."**
+  Ran the exact CI commands with the exact `CLIPPY_ALLOWS` list parsed out of `.github/workflows/ci.yml`:
+  `cargo fmt --all -- --check` in gpn-agent ⇒ 0; in gpn-node ⇒ 0.
+  `cargo clippy --release --all-targets -- <allows> -D warnings` in gpn-agent
+  (`CARGO_TARGET_DIR=~/.ci-cache/gpn-agent-target`) ⇒ `Finished release profile in 11.22s`, exit 0.
+  `cargo clippy --release --workspace --all-targets -- <allows> -D warnings` in gpn-node
+  (`~/.ci-cache/gpn-node-target`) ⇒ `Finished release profile in 16.10s`, exit 0. Only noise was the
+  pre-existing subxt future-incompat note and the gpn-runtime wasm-embed note — neither is a denied lint.
+- **Next**: §2 boxes 3–6 (`full affected suites run, not just the new test`; call site exists; nothing
+  new off by default; change in the release tree). §0e box 1 / §3b row 256 still AWAITING-OWNER
+  ([TRIAGE] item 256: which machine carries lifecycle steps 3–6).
+
 ## 01:30 PT 0.3.73 — §2 box 1 ticked (both narrow tests re-run on HEAD)
 
 - **A0**: HEAD `b57b67d` is docs-only ⇒ `total_count: 0`, no CI conclusion to act on (expected).
