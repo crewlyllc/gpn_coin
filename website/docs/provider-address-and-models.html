@@ -1,0 +1,417 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Provider address and models — GPN docs</title>
+<meta name="description" content="Publishing a dialable provider address, VRAM gating and the public model catalogue." />
+<meta name="theme-color" content="#07090f" />
+<link rel="canonical" href="https://gpncoin.ai/docs/provider-address-and-models" />
+<meta property="og:site_name" content="GPN" />
+<meta property="og:type" content="article" />
+<meta property="og:url" content="https://gpncoin.ai/docs/provider-address-and-models" />
+<meta property="og:title" content="Provider address and models — GPN docs" />
+<meta property="og:description" content="Publishing a dialable provider address, VRAM gating and the public model catalogue." />
+<meta name="twitter:card" content="summary" />
+<meta name="twitter:title" content="Provider address and models — GPN docs" />
+<meta name="twitter:description" content="Publishing a dialable provider address, VRAM gating and the public model catalogue." />
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%237c6cff'/%3E%3Ctext x='16' y='22' font-size='16' font-family='sans-serif' font-weight='700' text-anchor='middle' fill='%2307090f'%3EG%3C/text%3E%3C/svg%3E" />
+<link rel="stylesheet" href="../assets/style.css" />
+<link rel="stylesheet" href="../assets/docs.css" />
+</head>
+<body>
+<a class="skip-link" href="#main">Skip to content</a>
+
+<header class="site-header">
+  <div class="wrap nav">
+    <a class="brand" href=".." aria-label="GPN home"><span class="dot" aria-hidden="true">G</span><span>GPN<br><small>GPU-NATIVE NETWORK</small></span></a>
+    <button class="nav-toggle" id="nav-toggle" aria-expanded="false" aria-controls="nav-links" aria-label="Toggle navigation">☰</button>
+    <nav class="nav-links" id="nav-links" aria-label="Primary">
+      <a href="..">Home</a>
+      <a href="../download">Download</a>
+      <a href="../deploy">Deploy</a>
+      <a href="../ai">AI</a>
+      <a href="../chat">Chat</a>
+      <a href="../access-points">Access Points</a>
+      <a href="../nodes">Nodes</a>
+      <a href="../buy">Buy GPN</a>
+      <a href="./" aria-current="page">Docs</a>
+      <a href="..#join">Join us</a>
+    </nav>
+    <div class="nav-actions"><button class="theme-toggle" id="theme-toggle" aria-pressed="false" title="Switch theme">☾</button></div>
+  </div>
+</header>
+
+<main id="main" class="doc-main">
+  <div class="wrap doc-wrap">
+    <nav class="crumbs" aria-label="Breadcrumb"><a href="..">Home</a> / <a href="./">Docs</a> / <span>Provider address and models</span></nav>
+    <article class="prose">
+<h1>Provider address publication, VRAM gating and the public model catalogue</h1>
+<p><em>Verified against: chain spec 52 / release 0.3.64 — checked 2026-11-20 at block 337,469.</em></p>
+<p>Operator-facing reference for three things a provider publishes:</p>
+<ul>
+<li><code>multiaddrs</code> / <code>listen_addrs</code> — how peers dial it (<code>gpn_provider_status</code>, <code>GET /status</code>)</li>
+<li><code>models[]</code> — what it claims it can serve (VRAM-gated)</li>
+<li><code>GET /v1/models</code> — what the public shop window lists (allowlisted)</li>
+</ul>
+<p>Everything here is enforced in code; this page explains the rules and the
+environment variables that override them.</p>
+<hr />
+<h2 id="1-publishing-a-dialable-address">1. Publishing a dialable address</h2>
+<p>The heartbeat (<code>gpn_provider_status</code>) reads the node's identity over JSON-RPC
+(<code>system_localPeerId</code>, <code>system_localListenAddresses</code>) and publishes:</p>
+<table>
+<thead>
+<tr>
+<th>field</th>
+<th>meaning</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>peer_id</code></td>
+<td><code>12D3Koo…</code> — the node's libp2p identity</td>
+</tr>
+<tr>
+<td><code>multiaddrs</code></td>
+<td>dialable <strong>public</strong> endpoints, each ending in exactly one <code>/p2p/&lt;peer_id&gt;</code></td>
+</tr>
+<tr>
+<td><code>p2p_port</code></td>
+<td>the TCP port to combine with the host the access point reached us on</td>
+</tr>
+<tr>
+<td><code>listen_addrs</code></td>
+<td>the node's own listeners, normalised (diagnostic only)</td>
+</tr>
+<tr>
+<td><code>address_source</code></td>
+<td>which rung of the ladder produced <code>multiaddrs</code> (or <code>none</code>)</td>
+</tr>
+</tbody>
+</table>
+<h3 id="why-listen_addrs-are-normalised">Why <code>listen_addrs</code> are normalised</h3>
+<p>Current litep2p builds report <code>system_localListenAddresses</code> <strong>already carrying</strong>
+<code>/p2p/&lt;peer_id&gt;</code>, and some emit it <strong>doubled</strong>:</p>
+<pre><code>/ip4/127.0.0.1/tcp/30333/p2p/12D3Koo…/p2p/12D3Koo…     ← upstream cosmetic bug
+</code></pre>
+<p>Relaying that verbatim made the access point reject every address (its
+sanitizer — correctly — requires exactly one <code>/p2p/&lt;id&gt;</code>, last, matching the
+advertised <code>peer_id</code>). The heartbeat now strips identity from every listener and
+appends <code>/p2p/&lt;peer_id&gt;</code> exactly once itself. <code>listen_addrs</code> never contain
+<code>/p2p/</code>.</p>
+<p>If you see this line in the heartbeat log, you are on an affected node build —
+it is harmless now:</p>
+<pre><code>[p2p] node RPC reported a doubled /p2p/&lt;id&gt;/p2p/&lt;id&gt; listen address (upstream litep2p bug) — normalised before publication
+</code></pre>
+<h3 id="the-evidence-ladder">The evidence ladder</h3>
+<p>A public endpoint is chosen by the same evidence the node's dialability gate
+uses, strongest first:</p>
+<table>
+<thead>
+<tr>
+<th>#</th>
+<th>rung</th>
+<th>what it means</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>1</td>
+<td><code>GPN_PUBLIC_ADDR</code> / <code>--public-addr</code></td>
+<td>the operator declares it (also supports <code>/dns4/name/tcp/port</code>)</td>
+</tr>
+<tr>
+<td>2</td>
+<td><code>GPN_DIALABILITY_STATE</code> (default <code>~/.gpn/dialability.json</code>)</td>
+<td>the node's gate proved it: an inbound peer was observed, or UPnP-IGD/NAT-PMP mapped the port</td>
+</tr>
+<tr>
+<td>3</td>
+<td>a public <strong>listen</strong> address</td>
+<td>the classic VPS case — the node is bound to a public IP</td>
+</tr>
+<tr>
+<td>4</td>
+<td>a STUN mapping <strong>on the listen port</strong></td>
+<td>port-preserving NAT; a port-rewriting NAT is reported, not published</td>
+</tr>
+</tbody>
+</table>
+<p>Never published: <code>127.0.0.0/8</code>, <code>::1</code>, <code>10/8</code>, <code>172.16/12</code>, <code>192.168/16</code>,
+<code>169.254/16</code>, <code>100.64/10</code> (CGNAT), <code>fc00::/7</code>, <code>fe80::/10</code>, <code>0.0.0.0</code>.</p>
+<p>If every rung fails, <code>multiaddrs</code> is <code>[]</code> <strong>and the heartbeat log says why</strong>:</p>
+<pre><code>[p2p] publishing NO public address for peer 12D3Koo… — peers cannot dial this box:
+[p2p]   - GPN_PUBLIC_ADDR unset (no operator-declared endpoint)
+[p2p]   - no node dialability state (node never observed an inbound peer or mapped a port)
+[p2p]   - node listens only on non-routable addresses (/ip4/192.168.1.20/tcp/30333); set GPN_PUBLIC_ADDR to the forward
+[p2p]   - STUN probing unavailable or not port-preserving
+[p2p]   fix: set GPN_PUBLIC_ADDR=/ip4/&lt;wan-ip&gt;/tcp/&lt;port&gt; (or enable UPnP) and restart the heartbeat
+</code></pre>
+<p>An empty <code>multiaddrs</code> is <strong>not</strong> an error: the access point can still route work
+over the outbound <code>GET /assignments</code> poll. It only means other peers cannot dial
+this box directly.</p>
+<h3 id="environment">Environment</h3>
+<table>
+<thead>
+<tr>
+<th>variable</th>
+<th>default</th>
+<th>purpose</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>GPN_PUBLIC_ADDR</code></td>
+<td>unset</td>
+<td>the endpoint peers should dial (wins over every other rung)</td>
+</tr>
+<tr>
+<td><code>GPN_DIALABILITY_STATE</code></td>
+<td><code>~/.gpn/dialability.json</code></td>
+<td>state file written by <code>gpn-node</code> when the gate passes</td>
+</tr>
+<tr>
+<td><code>GPN_STUN</code></td>
+<td>on</td>
+<td><code>off</code> disables the STUN probe (air-gapped hosts)</td>
+</tr>
+<tr>
+<td><code>GPN_STUN_SERVER</code></td>
+<td><code>stun.l.google.com:19302</code></td>
+<td>STUN server</td>
+</tr>
+<tr>
+<td><code>GPN_NODE_KEY_FILE</code></td>
+<td>unset</td>
+<td>per-machine libp2p key file (<code>gpn-node key generate-node-key --file …</code>)</td>
+</tr>
+</tbody>
+</table>
+<h3 id="troubleshooting-two-boxes-with-the-same-peer_id">Troubleshooting: two boxes with the SAME <code>peer_id</code></h3>
+<p>The peer id is the libp2p node key, not the account. A <strong>copied</strong> <code>--node-key</code>
+(or a shared <code>run-fleet.sh</code>) gives every box the same identity: the directory
+collapses them into one entry, peers dial whichever host resolved first, and jobs
+land on a box that never polled for them.</p>
+<p>Check:</p>
+<pre><code class="language-bash">grep -n 'node-key' ~/.gpn/fleet/run-fleet.sh   # a literal 64-hex key = shared
+curl -s http://127.0.0.1:8093/status | grep peer_id
+</code></pre>
+<p>Fix, on the box that must change identity:</p>
+<pre><code class="language-bash">gpn-node key generate-node-key --file ~/.gpn/node-key     # 64 hex chars, mode 600
+sed -i 's|--node-key [0-9a-f]\{64\}|--node-key-file '&quot;$HOME&quot;'/.gpn/node-key|' ~/.gpn/fleet/run-fleet.sh
+# or, for the supervisor: unset GPN_NODE_KEY; export GPN_NODE_KEY_FILE=~/.gpn/node-key
+gpn-node key inspect-node-key --file ~/.gpn/node-key      # print the new peer id
+systemctl --user restart gpn-provider gpn-provider-heartbeat
+</code></pre>
+<p>The supervisor now warns loudly if it starts with the shared fleet key, and
+supports <code>GPN_NODE_KEY_FILE</code> as the preferred (per-machine) shape. Expect the
+peer id to change: republish the node's address if it is registered on-chain.</p>
+<hr />
+<h2 id="2-vram-aware-model-gating">2. VRAM-aware model gating</h2>
+<p>A model must not be advertised — or claimed — if its weights cannot fit the
+box's VRAM. The size table lives in <code>gpn_agent::models</code>:</p>
+<table>
+<thead>
+<tr>
+<th>model</th>
+<th>weights (GB)</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>qwen2.5:0.5b</code></td>
+<td>0.4</td>
+</tr>
+<tr>
+<td><code>qwen2.5:1.5b</code> / <code>deepseek-r1:1.5b</code></td>
+<td>1.2</td>
+</tr>
+<tr>
+<td><code>llama3.2:1b</code></td>
+<td>1.3</td>
+</tr>
+<tr>
+<td><code>qwen2.5:3b</code></td>
+<td>2.0</td>
+</tr>
+<tr>
+<td><code>llama3.2:3b</code> / <code>phi3:mini</code></td>
+<td>2.4</td>
+</tr>
+<tr>
+<td><code>mistral:7b</code> / <code>deepseek-r1:7b</code> / <code>qwen2.5:7b</code></td>
+<td>4.4–4.7</td>
+</tr>
+<tr>
+<td><code>llama3.1:8b</code> / <code>deepseek-r1:8b</code></td>
+<td>5.0</td>
+</tr>
+<tr>
+<td><code>deepseek-r1:14b</code> / <code>qwen2.5:14b</code></td>
+<td>9.0</td>
+</tr>
+</tbody>
+</table>
+<p>A <strong>headroom factor</strong> of 1.15 is applied (KV cache + runtime), so <code>qwen2.5:7b</code>
+needs ~5.4 GB and an 8 GB card is fine, a 4 GB card is not.</p>
+<p>Applied at three points:</p>
+<ol>
+<li><code>GET /status models[]</code> — the heartbeat drops models that cannot fit
+   (<code>gpn_provider_status</code>).</li>
+<li>The provider's claim/inference path — <code>resolve_model</code> removes unfittable
+   installed models and falls back to one that fits (<code>gpn_llm_provider</code>).</li>
+<li>The access point's routing — <code>pick()</code> skips a provider whose advertised VRAM
+   cannot hold the requested model (<code>gpn_scheduler</code>).</li>
+</ol>
+<p>Unknown model size or unadvertised VRAM (<code>0</code>) does <strong>not</strong> gate: blocking on
+ignorance would empty every catalogue behind an unprobed box.</p>
+<p>Log line (once per model per process):</p>
+<pre><code>[models] skipping deepseek-r1:14b: needs ~10.3 GB, node has 8.0 GB — not advertised
+</code></pre>
+<h3 id="where-vram_mb-comes-from">Where <code>vram_mb</code> comes from</h3>
+<p><code>gpn_agent::gpu::detect_vram()</code> probes in this order and takes the first
+success (largest adapter wins on a multi-GPU box):</p>
+<ol>
+<li><code>nvidia-smi --query-gpu=memory.total --format=csv,noheader,nounits</code> — true
+   64-bit figure, any card size.</li>
+<li><code>rocm-smi --showmeminfo vram</code> — true 64-bit figure (AMD).</li>
+<li><strong>Windows only:</strong> registry
+   <code>HKLM\SYSTEM\CurrentControlSet\Control\Class\{4d36e968-e325-11ce-bfc1-08002be10318}\0*</code>
+   → <code>HardwareInformation.qwMemorySize</code>. This is a <strong>REG_QWORD</strong> (64-bit), so
+   12 GiB / 24 GiB / 48 GiB cards are reported correctly; rows whose
+   <code>DriverDesc</code> is an iGPU (<code>Intel(R) UHD/Iris</code>, <code>AMD Radeon(TM) Graphics</code>,
+   <code>Radeon 780M</code>, …) are skipped, as are zero, <code>N/A</code>, non-numeric and
+   implausible (&gt;1 TiB) values.</li>
+<li><strong>Windows only, last resort:</strong> <code>Win32_VideoController.AdapterRAM</code>.</li>
+</ol>
+<p>⚠️ <strong><code>AdapterRAM</code> is a uint32 and saturates at 4,294,967,295 bytes = 4095 MiB.</strong>
+It cannot represent a 6 GB+ card. Using it understates VRAM, which makes the
+gate <em>wrongly exclude</em> models the machine can actually serve. When — and only
+when — detection falls through to it, the agent logs, once per process:</p>
+<pre><code>[gpu] VRAM from AdapterRAM (32-bit, capped at 4095 MiB) — value may understate the real total; models larger than 4 GB may be wrongly excluded
+</code></pre>
+<p>A probe that finds <strong>nothing</strong> (no vendor CLI, no registry key, no
+<code>AdapterRAM</code>) logs instead of returning a silent <code>0</code>:</p>
+<pre><code>[gpu] VRAM detection returned 0 MiB (no nvidia-smi, rocm-smi, registry qwMemorySize or AdapterRAM value) — VRAM is NOT advertised and the VRAM model gate is disabled, so oversized models will not be blocked
+</code></pre>
+<p>Either way the fix is the same: pass <code>--vram-mb &lt;MiB&gt;</code> (or <code>VRAM_MB</code>).</p>
+<h3 id="overrides">Overrides</h3>
+<table>
+<thead>
+<tr>
+<th>variable</th>
+<th>example</th>
+<th>effect</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>GPN_MODEL_VRAM_HEADROOM</code></td>
+<td><code>1.3</code></td>
+<td>raise/lower the headroom (values <code>&lt; 1.0</code> are ignored)</td>
+</tr>
+<tr>
+<td><code>GPN_MODEL_VRAM_OVERRIDE</code></td>
+<td><code>qwen2.5:14b</code></td>
+<td>treat that model as fitting regardless of the table</td>
+</tr>
+<tr>
+<td></td>
+<td><code>qwen2.5:14b=6.5</code></td>
+<td>use 6.5 GB as its size instead of the table value</td>
+</tr>
+<tr>
+<td></td>
+<td><code>all</code></td>
+<td>disable the gate entirely (operator knows better)</td>
+</tr>
+</tbody>
+</table>
+<hr />
+<h2 id="3-the-public-model-catalogue">3. The public model catalogue</h2>
+<p><code>GET /v1/models</code> (and therefore the site's model picker) lists <strong>only</strong>
+assistant-grade models. Default allowlist:</p>
+<pre><code>llama3.2:1b  llama3.2:3b  llama3.1:8b
+qwen2.5:0.5b qwen2.5:1.5b qwen2.5:3b qwen2.5:7b qwen2.5:14b
+deepseek-r1:1.5b deepseek-r1:7b deepseek-r1:8b deepseek-r1:14b
+mistral:7b   phi3:mini   gemma2:2b   gemma2:9b
+</code></pre>
+<p>Matched as a prefix, so quantisation tags are fine
+(<code>llama3.2:1b-instruct-q4_K_M</code> appears as <code>llama3.2:1b</code>-family and is listed).</p>
+<p>Always excluded, even with <code>GPN_PUBLIC_MODELS=all</code>:</p>
+<ul>
+<li>fine-tune artifacts — <code>tuned-&lt;job_id&gt;</code> (per-job LoRA merges)</li>
+<li>toy models — <code>stories260K</code>, anything under <strong>0.3B</strong> parameters</li>
+<li>embedding/reranker models (<code>*embed*</code>, <code>*rerank*</code>)</li>
+</ul>
+<p><strong>Excluded ≠ unusable.</strong> A model not in the catalogue is still served when a
+caller names it explicitly, and a provider still runs it. The catalogue is a
+shop window, not a permission system.</p>
+<table>
+<thead>
+<tr>
+<th>variable</th>
+<th>example</th>
+<th>effect</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>GPN_PUBLIC_MODELS</code></td>
+<td><code>llama3.2:1b,qwen2.5:7b</code></td>
+<td>replaces the allowlist</td>
+</tr>
+<tr>
+<td></td>
+<td><code>all</code></td>
+<td>publish everything not in the hard-exclusion set</td>
+</tr>
+</tbody>
+</table>
+<p><code>/v1/models</code> never returns an empty list: with no provider online it advertises
+the <code>llama3.2:1b</code> baseline (clients call it before anything else and treat <code>[]</code>
+as an outage).</p>
+<hr />
+<h2 id="4-gflops-0">4. <code>gflops: 0</code></h2>
+<p><code>gflops</code> is the measured FP32 GEMM throughput written to the attestation
+(<code>compute_gflops</code>). <code>0</code> means one of:</p>
+<ul>
+<li>the benchmark could not open the GPU (<code>GPU compute measurement FAILED (…)</code> in
+  the agent log — driver/OpenCL/runtime problem), or</li>
+<li>the configured <code>--gflops</code>/<code>GFLOPS</code>/<code>GPN_GFLOPS</code> for the heartbeat is missing.</li>
+</ul>
+<p>Consequences, now logged instead of silent:</p>
+<ul>
+<li>the agent warns <code>attested compute is 0 GFLOPS — every marketplace job with
+  min_gflops &gt; 0 will be skipped</code>;</li>
+<li><code>list_claimable_jobs</code> prints <code>[marketplace] skipping N pending job(s) whose
+  min_gflops exceeds this provider (…)</code> at most once a minute;</li>
+<li>the heartbeat prints a startup warning explaining both causes and the fix.</li>
+</ul>
+<p>Jobs with <code>min_gflops = 0</code> (open market) are still claimable, and LLM jobs
+delivered through the access point's pull path are unaffected — this gate is the
+on-chain marketplace only.</p>
+    </article>
+    <p class="doc-updated small muted">Last generated 2026-11-24 from the project documentation set.</p>
+  </div>
+</main>
+
+<footer class="site-footer">
+  <div class="wrap">
+    <div class="foot-grid">
+      <div><a class="brand" href=".." style="margin-bottom:10px"><span class="dot" aria-hidden="true">G</span> <span>GPN</span></a><p class="muted" style="max-width:320px">A GPU-native network for mining and AI compute. <em>Get paid for the GPU time you're wasting.</em></p></div>
+      <div><h4>Product</h4><a href="../download">Download</a><a href="../deploy">Deploy</a><a href="../ai">Access the AI</a><a href="../access-points">Access Points</a><a href="../nodes">Live nodes</a></div>
+      <div><h4>Learn</h4><a href="./">Docs</a><a href="whitepaper">Whitepaper</a><a href="one-pager">One-pager</a><a href="technical-overview">Technical overview</a></div>
+      <div><h4>Project</h4><a href="https://github.com/crewlyllc/gpn_coin" rel="noopener">Source on GitHub</a><a href="run-a-node">Run a node</a><a href="wallet">Wallet</a><a href="../buy">Token &amp; purchasing</a><a href="..#join">Join the team</a></div>
+    </div>
+    <div class="foot-bottom">
+      <p class="small muted">© <span data-year>2026</span> GPN · Public testnet. Not investment advice.</p>
+      <p class="small muted">Testnet only — tokens here have no monetary value.</p>
+    </div>
+  </div>
+</footer>
+
+<script src="../assets/app.js"></script>
+</body>
+</html>

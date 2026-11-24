@@ -11,9 +11,9 @@
 //     half a regeneration-check cannot see until it has already shipped.
 import test from "node:test";
 import assert from "node:assert/strict";
-import { readFileSync, readdirSync } from "node:fs";
+import { existsSync, readFileSync, readdirSync } from "node:fs";
 import { fileURLToPath } from "node:url";
-import { dirname, join } from "node:path";
+import { dirname, join, resolve } from "node:path";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const SITE = join(HERE, "..");
@@ -56,4 +56,34 @@ test("the docs generator's templates emit clean URLs", () => {
   }
   for (const m of src.matchAll(/content="[^"]*\.html"/g)) bad.push(m[0]);
   assert.deepEqual(bad, [], "build-site-docs.py must not template a .html URL");
+});
+
+// A link to a page the generator never publishes is a 404 a reader finds, not a
+// reader of the source finds (queue item #257: run-a-node and technical-overview
+// linked updates / node-gui-and-idle / provider-address-and-models, which were
+// only ever in the repo). Every intra-site href in a generated page must resolve
+// to a file the site actually ships.
+test("every internal docs link resolves to a published page", () => {
+  const pages = readdirSync(DOCS).filter((f) => f.endsWith(".html"));
+  const bad = [];
+  for (const page of pages) {
+    const text = readFileSync(join(DOCS, page), "utf8");
+    for (const m of text.matchAll(/href="([^"]*)"/g)) {
+      const url = m[1];
+      if (!url || /^(?:[a-z]+:|\/\/|#)/i.test(url)) continue;
+      const path = url.split(/[#?]/)[0];
+      if (!path) continue;
+      const base = resolve(DOCS, path);
+      const ok =
+        existsSync(base) ||
+        existsSync(`${base}.html`) ||
+        existsSync(join(base, "index.html"));
+      if (!ok) bad.push(`${page}: href="${url}"`);
+    }
+  }
+  assert.deepEqual(
+    bad,
+    [],
+    "every internal link must resolve to a generated page — add the slug to PAGES in scripts/build-site-docs.py, or fix the link",
+  );
 });

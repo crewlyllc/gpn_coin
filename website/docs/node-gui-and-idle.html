@@ -1,0 +1,647 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Node dashboard and Idle mode — GPN docs</title>
+<meta name="description" content="The node dashboard, and Idle mode: pause mining and AI work without leaving the network." />
+<meta name="theme-color" content="#07090f" />
+<link rel="canonical" href="https://gpncoin.ai/docs/node-gui-and-idle" />
+<meta property="og:site_name" content="GPN" />
+<meta property="og:type" content="article" />
+<meta property="og:url" content="https://gpncoin.ai/docs/node-gui-and-idle" />
+<meta property="og:title" content="Node dashboard and Idle mode — GPN docs" />
+<meta property="og:description" content="The node dashboard, and Idle mode: pause mining and AI work without leaving the network." />
+<meta name="twitter:card" content="summary" />
+<meta name="twitter:title" content="Node dashboard and Idle mode — GPN docs" />
+<meta name="twitter:description" content="The node dashboard, and Idle mode: pause mining and AI work without leaving the network." />
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%237c6cff'/%3E%3Ctext x='16' y='22' font-size='16' font-family='sans-serif' font-weight='700' text-anchor='middle' fill='%2307090f'%3EG%3C/text%3E%3C/svg%3E" />
+<link rel="stylesheet" href="../assets/style.css" />
+<link rel="stylesheet" href="../assets/docs.css" />
+</head>
+<body>
+<a class="skip-link" href="#main">Skip to content</a>
+
+<header class="site-header">
+  <div class="wrap nav">
+    <a class="brand" href=".." aria-label="GPN home"><span class="dot" aria-hidden="true">G</span><span>GPN<br><small>GPU-NATIVE NETWORK</small></span></a>
+    <button class="nav-toggle" id="nav-toggle" aria-expanded="false" aria-controls="nav-links" aria-label="Toggle navigation">☰</button>
+    <nav class="nav-links" id="nav-links" aria-label="Primary">
+      <a href="..">Home</a>
+      <a href="../download">Download</a>
+      <a href="../deploy">Deploy</a>
+      <a href="../ai">AI</a>
+      <a href="../chat">Chat</a>
+      <a href="../access-points">Access Points</a>
+      <a href="../nodes">Nodes</a>
+      <a href="../buy">Buy GPN</a>
+      <a href="./" aria-current="page">Docs</a>
+      <a href="..#join">Join us</a>
+    </nav>
+    <div class="nav-actions"><button class="theme-toggle" id="theme-toggle" aria-pressed="false" title="Switch theme">☾</button></div>
+  </div>
+</header>
+
+<main id="main" class="doc-main">
+  <div class="wrap doc-wrap">
+    <nav class="crumbs" aria-label="Breadcrumb"><a href="..">Home</a> / <a href="./">Docs</a> / <span>Node dashboard and Idle mode</span></nav>
+    <article class="prose">
+<h1>Node dashboard + Idle mode</h1>
+<p><em>Verified against: chain spec 52 / release 0.3.64 — checked 2026-11-20 at block 337,469.</em></p>
+<p>A GPN node is meant to run on a gaming PC. <strong>Idle mode</strong> is the "I want to play
+a game now" switch: it pauses the two things that compete for the GPU — Ethash
+mining and AI job work — while the node <strong>stays a node</strong>: syncing, peering and
+serving the chain to everyone else. At the end of the window it <strong>catches up and
+resumes by itself</strong>; a <strong>Resume now</strong> button (and a CLI verb) ends it early.</p>
+<blockquote>
+<p>Idle is <strong>not</strong> "turn GPN off". Nothing is stopped, uninstalled or
+de-registered. Your node is still online, still synced, still reachable — it
+just stops burning the GPU for a while.</p>
+</blockquote>
+<p><strong>Max one window: 6 hours.</strong> Longer requests are refused with a message that
+names the limit (config-file values are clamped instead of refused).</p>
+<hr />
+<h2 id="1-launch-the-dashboard">1. Launch the dashboard</h2>
+<pre><code class="language-bash">gpn_node --gui                # http://127.0.0.1:8099
+GPN_GUI=1 gpn_node            # same thing via env
+GPN_GUI=1 GPN_GUI_LISTEN=127.0.0.1:9000 gpn_node   # another port
+</code></pre>
+<p><code>--gui</code> adds a child-free HTTP thread inside the <strong>supervisor</strong> (<code>gpn_node</code>), so
+it sees every child process, the chain height, the peer count and the GPU.
+Without <code>--gui</code> the node prints one hint line at startup:</p>
+<pre><code>  dashboard: off — add --gui to serve the local control panel on 127.0.0.1:8099
+</code></pre>
+<p>With <code>--gui</code>:</p>
+<pre><code>  dashboard: http://127.0.0.1:8099 (loopback only — open it in a browser)
+</code></pre>
+<p>Open that URL in any browser. There is no build step and no CDN: the page is
+compiled into the binary (<code>gpn-agent/src/gui/index.html</code>, <code>include_str!</code>), so it
+works offline and on a fresh machine.</p>
+<h3 id="fleet-supervised-nodes-gpn_fleet">Fleet-supervised nodes (<code>gpn_fleet</code>)</h3>
+<p>The same dashboard is available when the node is supervised by <code>gpn_fleet</code>
+(the fleet/seed deployments) — same flags, same port, same page:</p>
+<pre><code class="language-bash"># locally
+gpn_fleet --gui
+# or in the unit / run-fleet.sh
+export GPN_GUI=1
+</code></pre>
+<p>Idle needs no extra wiring there: it is <strong>one file</strong> (<code>~/.gpn/idle.json</code>) read by
+the node's miner (<code>gpn-node</code>, every 500 ms) and by every provider's claim gate,
+so a file written by the dashboard parks the miner and stops new claims no
+matter which supervisor launched the processes. <code>gpn_fleet</code> adds the node
+child's state to <code>GET /api/status</code> (the provider services are separate systemd
+units, so they are not listed as children).</p>
+<h3 id="loopback-only-by-design">Loopback only, by design</h3>
+<p>The dashboard can stop the miner, which makes it a control surface. It therefore
+<strong>only</strong> binds <code>127.0.0.1</code> (<code>localhost</code> is normalised to <code>127.0.0.1</code>). Any other
+address — <code>0.0.0.0</code>, <code>192.168.x.x</code>, a hostname — is <strong>refused at startup</strong> with a
+clear error, and the node keeps running without the dashboard:</p>
+<pre><code>[gpn_node] dashboard not started: refusing to bind the dashboard to 0.0.0.0:8099:
+it only ever listens on 127.0.0.1 (a LAN-reachable dashboard would be an
+unauthenticated remote control for the miner)
+</code></pre>
+<p>There is no authentication because there is no network exposure. If you need
+remote access, use an SSH tunnel (<code>ssh -L 8099:127.0.0.1:8099 user@host</code>) — do
+not try to bind the dashboard to a LAN address.</p>
+<h3 id="windows-shortcut">Windows shortcut</h3>
+<p><code>gpn-agent/windows/gpn-dashboard.cmd</code> starts <code>gpn_node.exe --gui</code> (idempotently —
+it checks <code>tasklist</code> first) and opens the dashboard in the default browser.
+Right-click → <em>Send to</em> → <em>Desktop (create shortcut)</em> and rename it "GPN Node".</p>
+<h3 id="what-the-page-shows">What the page shows</h3>
+<pre><code>┌ GPN node  v0.2.0                                   ● active ─────────────┐
+│                                                                          │
+│  MODE      PEERS     BLOCK HEIGHT   MINING   GPU          CURRENT JOB     │
+│  Active    12        #107535        on       RTX 4070     none            │
+│  mining +  p2p       synced                  VRAM 512/…                   │
+│  serving                                                                  │
+│  MODELS SERVED 1     EARNINGS TODAY —                                     │
+│                                                                          │
+│  ┌ Idle mode ──────────────────────────────── ● resuming in 1h 59m ────┐  │
+│  │ Pauses mining and AI job claims so games get the GPU — the node     │  │
+│  │ keeps syncing, peering and serving the chain.                       │  │
+│  │ How long?  [30 min] [1 hour] [2 hours] [4 hours] [6 hours]          │  │
+│  │ [ Go idle ]  [ Resume now ]                                         │  │
+│  │ ── Step aside automatically when my other GPU work runs  [ on ]     │  │
+│  │ Why idle: gaming (manual)                                           │  │
+│  └─────────────────────────────────────────────────────────────────────┘  │
+│                                                                          │
+│  PROCESSES   node up · heartbeat up · provider up · diffuse up · …        │
+└──────────────────────────────────────────────────────────────────────────┘
+</code></pre>
+<p>It refreshes every 3 s (the countdown ticks locally every second and re-syncs on
+each poll). Everything is labelled, keyboard reachable (<code>Tab</code> to the duration
+radio group, <code>Space</code> to select, <code>Enter</code> on a button), and readable at 1280 px
+and at phone width (the cards wrap, the buttons go full width). Dark theme
+matches gpncoin.ai (<code>#07090f</code> background, <code>#7c6cff</code> → <code>#22d3ee</code> accent).</p>
+<hr />
+<h2 id="2-idle-semantics-precisely-what-stops-and-what-does-not">2. Idle semantics — precisely what stops and what does not</h2>
+<table>
+<thead>
+<tr>
+<th>Component</th>
+<th>While idle</th>
+<th>Why</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Chain node (<code>gpn-node</code>)</td>
+<td><strong>keeps running</strong>, syncing, peering, serving blocks/state</td>
+<td>it is the network's value; idle must never degrade it</td>
+</tr>
+<tr>
+<td>Ethash miner (GPU or CPU thread)</td>
+<td><strong>parked</strong> — searches no nonces (0 % GPU)</td>
+<td>this is the thing games fight with</td>
+</tr>
+<tr>
+<td><code>gpn_llm_provider</code></td>
+<td><strong>no new claims</strong> (no poll of the AP, no <code>accept</code>, no <code>start</code>)</td>
+<td>no AI work starts</td>
+</tr>
+<tr>
+<td><code>gpn_diffusion_provider</code> / <code>gpn_ml_provider</code> / <code>gpn_finetune_provider</code></td>
+<td><strong>no new claims</strong></td>
+<td>same</td>
+</tr>
+<tr>
+<td>Job already running</td>
+<td><strong>finishes normally</strong></td>
+<td>a half-run job would wedge escrow</td>
+</tr>
+<tr>
+<td>Heartbeat (<code>:8093</code>), discovery, RPC</td>
+<td><strong>unchanged</strong></td>
+<td>the node must stay visible</td>
+</tr>
+<tr>
+<td>Wallet, staking, on-chain identity</td>
+<td><strong>unchanged</strong></td>
+<td>idle is local and temporary</td>
+</tr>
+</tbody>
+</table>
+<p>A job is claimed <strong>and</strong> executed inside a single provider pass, so nothing is
+ever cut in half: the pass either claims or it does not. The reconcile pass at
+the top of every LLM cycle still runs while idle, so a job that was left in
+<code>AwaitingVerification</code> (e.g. a tx confirmed after a timeout) is still driven to
+its terminal, payable state — idle never strands a job.</p>
+<h3 id="the-state-file">The state file</h3>
+<p><code>~/.gpn/idle.json</code> (mode <code>0600</code>; override the path with <code>GPN_IDLE_FILE</code>):</p>
+<pre><code class="language-json">{&quot;until&quot;: 1760003600, &quot;reason&quot;: &quot;gaming&quot;, &quot;started&quot;: 1760000000}
+</code></pre>
+<ul>
+<li><code>until</code> is unix seconds. <strong><code>now &lt; until</code> ⇒ idle</strong>; at <code>until</code> the node is
+  active again (the deadline is inclusive).</li>
+<li>An <strong>expired file is not idle</strong>: every reader treats it as absent and removes
+  it. So a node that was powered off past the deadline simply starts <strong>active</strong>
+  — there is no way to leave a box idled forever by mistake.</li>
+<li>A missing, empty or corrupt file is also "active" — an unreadable file must
+  never be able to park the miner.</li>
+<li>The file is the <em>only</em> state, so idle survives a supervisor restart, a crash,
+  or a reboot. Start <code>gpn_node</code> again inside the window and the startup banner
+  says <code>IDLE: resuming in 42m 10s (until …)</code>.</li>
+</ul>
+<p>The same file is read by three independent processes:</p>
+<ul>
+<li>the miner (<code>gpn-node</code> → <code>service.rs</code>, <code>park_reason()</code>), checked every 500 ms
+  in the miner loop — the miner thread stays alive and parked, so resuming is
+  immediate (no process or thread restart, no re-DAG);</li>
+<li>every provider (at its claim boundary, <code>gpn_agent::idle::claims_allowed()</code>);</li>
+<li>the dashboard (<code>GET /api/status</code>, the countdown).</li>
+</ul>
+<h3 id="auto-resume">Auto-resume</h3>
+<p>At <code>until</code> the file is pruned and the miner's park loop sees "no reason → mine",
+logging:</p>
+<pre><code>⛏  idle ended, resuming mining
+[provider] idle ended, resuming job claims
+</code></pre>
+<p>"Catches up" is automatic: the node never stopped importing blocks, so there is
+nothing to replay — it was already at tip. If the box was suspended/asleep
+during the idle window, the node syncs normally on wake (the miner is parked
+until the deadline either way).</p>
+<h3 id="manual-resume">Manual resume</h3>
+<ul>
+<li><strong>Dashboard:</strong> the <em>Resume now</em> button (<code>POST /api/resume</code>).</li>
+<li><strong>CLI:</strong> <code>gpn_node resume</code> — takes effect within a second, no restart.</li>
+<li><strong>File:</strong> deleting <code>~/.gpn/idle.json</code> works too (documented, not recommended).</li>
+</ul>
+<h3 id="auto-idle-step-aside-for-your-other-gpu-work">Auto-idle — step aside for <em>your other</em> GPU work</h3>
+<p>Idle was built for "I want the GPU now". Auto-idle removes the click: when
+something that is <strong>not GPN</strong> starts using the card, the node steps aside, and
+when that work stops it comes back by itself.</p>
+<blockquote>
+<p>Auto-idle steps aside for your other GPU work; it is <strong>opt-in</strong> and <strong>never
+overrides you</strong>.</p>
+</blockquote>
+<p>Enable it once, either way:</p>
+<pre><code class="language-bash">GPN_IDLE_AUTO=1 gpn_node --gui      # for this run
+</code></pre>
+<p>or flip <strong>“Step aside automatically when my other GPU work runs”</strong> in the Idle
+panel — that toggle is persisted in <code>~/.gpn/idle-auto.json</code>, so it survives a
+restart. Default is <strong>off</strong>.</p>
+<p><strong>What counts as foreign load.</strong> All three must hold:</p>
+<ol>
+<li><code>nvidia-smi</code> utilisation ≥ <strong>40 %</strong> (<code>GPN_IDLE_AUTO_UTIL_PCT</code>), <strong>and</strong></li>
+<li>GPN's own GPU lock is <strong>free</strong> — a job of ours is expected load, not foreign, <strong>and</strong></li>
+<li>at least <strong>512 MiB</strong> of VRAM (<code>GPN_IDLE_AUTO_MIN_FOREIGN_VRAM_MB</code>) is held by
+   processes that are not ours. "Ours" means <code>gpn-*</code> and anything under
+   <code>~/.gpn/</code> (including the bundled <code>llama-server</code>). Failing that, only when no
+   GPN process holds GPU memory at all.</li>
+</ol>
+<p>Rule 3 is what stops the desktop from triggering it: Xorg + the compositor sit
+at ~275 MiB permanently, below the threshold. A game or a second model loads
+gigabytes.</p>
+<p><strong>Debouncing.</strong> One sample is never enough:</p>
+<table>
+<thead>
+<tr>
+<th>What</th>
+<th>Samples</th>
+<th>Spacing</th>
+<th>Total</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>enter idle</td>
+<td><code>GPN_IDLE_AUTO_BUSY_SAMPLES</code> = 3</td>
+<td><code>GPN_IDLE_AUTO_BUSY_SAMPLE_SECS</code> = 5 s</td>
+<td>~15 s</td>
+</tr>
+<tr>
+<td>resume</td>
+<td><code>GPN_IDLE_AUTO_QUIET_SAMPLES</code> = 3</td>
+<td><code>GPN_IDLE_AUTO_QUIET_SAMPLE_SECS</code> = 20 s</td>
+<td>~60 s</td>
+</tr>
+</tbody>
+</table>
+<p>The window is <code>GPN_IDLE_AUTO_MINUTES</code> (default <strong>30</strong>, clamped to the same 6 h
+ceiling as a manual idle). Auto-idle resumes on whichever comes first: quiet for
+the debounce, or the deadline.</p>
+<p><strong>It never fights you.</strong></p>
+<ul>
+<li>A <strong>manual</strong> idle (any reason not starting with <code>auto:</code>) is <strong>never</strong> auto-resumed.</li>
+<li>If you click <em>Resume now</em> while auto-idle is active, auto-idle stays disarmed
+  for <code>GPN_IDLE_AUTO_COOLDOWN_SECS</code> (default <strong>600 s</strong>) — no immediate
+  re-engagement while you are still at the keyboard.</li>
+<li>The <strong>sole-authority</strong> valve applies: if this node has no peers (or its RPC is
+  unreadable) it will not auto-idle, even under full load. It logs one line per
+  load episode instead.</li>
+<li>Your other idle choices are untouched: choosing 2 hours by hand behaves
+  exactly as before.</li>
+</ul>
+<p><strong>Why it is idle</strong> is shown in the panel (<code>Why idle: auto: foreign GPU load
+87% (auto — foreign GPU work detected)</code> vs <code>… gaming (manual)</code>), and
+<code>idle.reason</code> in <code>/api/status</code> carries the same string. The toggle's hint line
+shows the live evidence (<code>GPU now: 87% util, 2304 MiB non-GPN</code>).</p>
+<p>Log lines, with the evidence attached:</p>
+<pre><code>[idle-auto] idle: foreign GPU load (87% util): util 87%, VRAM 6000/8188 MiB,
+  2304 MiB non-GPN (2 foreign PIDs), GPU lock free — stepping aside for 30 min (until 1760003600)
+[idle-auto] resume: foreign load gone for 3 samples (util 3%, VRAM 1200/8188 MiB,
+  80 MiB non-GPN (1 foreign PIDs), GPU lock free) — mining and job claiming resume
+[idle-auto] manual resume seen — auto-idle disarmed for 600s (the operator is in charge)
+[idle-auto] NOT stepping aside despite …: this node has no peers, so it may be the
+  only block producer — idling would stop the chain.
+</code></pre>
+<hr />
+<h2 id="3-safety-valve-never-idle-the-last-block-producer">3. Safety valve — never idle the last block producer</h2>
+<p>If this node is the <strong>only</strong> block-producing authority, idling it halts the
+chain for everyone. GPN's miner is the node itself, so "no miner" really does
+mean "no blocks".</p>
+<p>Before honouring a request, the supervisor reads the node's own
+<code>system_health</code> RPC:</p>
+<ul>
+<li><strong>peers ≥ 1</strong> → allowed. (We cannot prove a peer is an authority, but a lone
+  authority has <em>no peers at all</em>, so this rules the dangerous case out.)</li>
+<li><strong>peers = 0</strong> → <strong>refused</strong> (HTTP <code>409</code>, CLI exit code <code>3</code>) with:</li>
+</ul>
+<pre><code>this node has no peers, so it may be the only block producer — idling would
+stop the chain. Start another authority (or pass --force-idle /
+GPN_IDLE_FORCE=1 for a single-box dev chain).
+</code></pre>
+<ul>
+<li><strong>RPC unreachable</strong> (node starting, crashed, wrong port) → <strong>refused</strong>: "I
+  cannot see another node" is exactly the state in which idling is dangerous.</li>
+</ul>
+<p>Overrides, for a single-box dev chain or an operator who knows better:</p>
+<pre><code class="language-bash">gpn_node --gui --force-idle
+GPN_IDLE_FORCE=1 gpn_node --gui
+</code></pre>
+<p>A refused request writes <strong>no</strong> state file, logs loudly, and leaves the node
+mining. The dashboard shows the refusal message in the idle panel (and a
+<code>no peers — idle is blocked</code> hint under the Peers card).</p>
+<hr />
+<h2 id="4-endpoints">4. Endpoints</h2>
+<p>All JSON, same-origin (no CORS needed), <code>Cache-Control: no-store</code>.</p>
+<table>
+<thead>
+<tr>
+<th>Method</th>
+<th>Path</th>
+<th>Body</th>
+<th>Response</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>GET</code></td>
+<td><code>/</code></td>
+<td>—</td>
+<td>the dashboard (<code>text/html</code>)</td>
+</tr>
+<tr>
+<td><code>GET</code></td>
+<td><code>/api/status</code></td>
+<td>—</td>
+<td><code>200</code> status document</td>
+</tr>
+<tr>
+<td><code>POST</code></td>
+<td><code>/api/idle</code></td>
+<td><code>{"minutes": 60, "reason": "gaming"}</code></td>
+<td><code>200</code> <code>{ok, minutes, until, started, reason, idle}</code> · <code>400</code> bad body/duration · <code>409</code> sole-authority refusal · <code>500</code> cannot write the file</td>
+</tr>
+<tr>
+<td><code>POST</code></td>
+<td><code>/api/resume</code></td>
+<td>—</td>
+<td><code>200</code> <code>{ok, resumed: &lt;bool&gt;, idle}</code> (<code>resumed:false</code> = was already active)</td>
+</tr>
+<tr>
+<td><code>POST</code></td>
+<td><code>/api/idle/auto</code></td>
+<td><code>{"enabled": true}</code></td>
+<td><code>200</code> <code>{ok, auto_idle}</code> (persists the toggle) · <code>400</code> non-boolean · <code>409</code> sampler not running</td>
+</tr>
+</tbody>
+</table>
+<p><code>GET /api/status</code> (trimmed):</p>
+<pre><code class="language-json">{
+  &quot;node&quot;: &quot;up&quot;,
+  &quot;peers&quot;: 12,
+  &quot;syncing&quot;: false,
+  &quot;best&quot;: 107535,
+  &quot;mining&quot;: true,
+  &quot;standby&quot;: false,
+  &quot;gpu&quot;: &quot;NVIDIA GeForce RTX 4070&quot;,
+  &quot;vram&quot;: &quot;VRAM 512/12282 MiB · 3% util · 41C&quot;,
+  &quot;current_job&quot;: null,
+  &quot;models&quot;: [&quot;llama3.2:1b&quot;],
+  &quot;children&quot;: [{&quot;label&quot;: &quot;node&quot;, &quot;up&quot;: true, &quot;pid&quot;: 1234, &quot;restarts&quot;: 0, &quot;detail&quot;: &quot;&quot;}],
+  &quot;chain&quot;: &quot;testnet&quot;,
+  &quot;rpc_port&quot;: 9944,
+  &quot;account&quot;: &quot;5Grwva…&quot;,
+  &quot;earnings_today&quot;: null,
+  &quot;earnings_note&quot;: &quot;not tracked locally — see the explorer&quot;,
+  &quot;spec&quot;: &quot;0.2.0&quot;,
+  &quot;idle&quot;: {&quot;active&quot;: true, &quot;until&quot;: 1760003600, &quot;started&quot;: 1760000000,
+           &quot;reason&quot;: &quot;auto: foreign GPU load 87%&quot;, &quot;auto&quot;: true,
+           &quot;remaining_secs&quot;: 3517},
+  &quot;auto_idle&quot;: {&quot;enabled&quot;: true, &quot;engaged&quot;: true, &quot;foreign&quot;: true,
+                &quot;util_percent&quot;: 87, &quot;foreign_vram_mb&quot;: 2304, &quot;threshold_pct&quot;: 40,
+                &quot;min_foreign_vram_mb&quot;: 512, &quot;minutes&quot;: 30, &quot;cooldown_secs&quot;: 0},
+  &quot;now&quot;: 1760000083,
+  &quot;max_idle_minutes&quot;: 360,
+  &quot;durations&quot;: [30, 60, 120, 240, 360],
+  &quot;force_idle&quot;: false,
+  &quot;version&quot;: &quot;0.2.0&quot;,
+  &quot;dashboard&quot;: {&quot;listen&quot;: &quot;127.0.0.1:8099&quot;, &quot;loopback&quot;: true}
+}
+</code></pre>
+<p>Notes on honesty of the numbers:</p>
+<ul>
+<li><code>mining</code> is <code>false</code> during an idle window, during version <strong>standby</strong>, and
+  when the node child is down. It is not a GPU probe.</li>
+<li><code>current_job</code> is non-null only while a provider holds the one-GPU job flag
+  (<code>~/.gpn/gpu-yield</code>) — it reports <code>{"kind":"ai job"}</code> because the flag carries
+  no job id.</li>
+<li><code>earnings_today</code> is <code>null</code>: per-block reward accounting is not tracked
+  off-chain. The dashboard renders <code>—</code> with the note above rather than inventing
+  a number. (Making this real would need the explorer or a reward indexer — a
+  product decision, not a dashboard one.)</li>
+<li><code>models</code> comes from the local ollama <code>/api/tags</code> with a 700 ms timeout; an
+  unreachable ollama yields an empty list, never a hang.</li>
+</ul>
+<hr />
+<h2 id="5-cli">5. CLI</h2>
+<pre><code class="language-bash">gpn_node idle 30      # pause mining + claims for 30 min (max 360)
+gpn_node idle 360     # the max: 6 hours
+gpn_node idle 600     # -&gt; refused: &quot;…longer than the 360 min (6 h) maximum&quot; (exit 2)
+gpn_node resume       # back to active immediately
+gpn_node --gui        # start normally, with the dashboard
+</code></pre>
+<p>Both verbs answer <strong>before</strong> the update / ollama / network gates: pausing the
+machine must never depend on a manifest fetch or a GPU probe. They exit
+immediately and do not start a node — they edit the same file the running node
+watches.</p>
+<p>Exit codes: <code>0</code> done, <code>2</code> bad duration/usage, <code>3</code> refused by the safety valve.</p>
+<hr />
+<h2 id="6-config">6. Config</h2>
+<table>
+<thead>
+<tr>
+<th>Env</th>
+<th>Flag</th>
+<th>Config file</th>
+<th>Default</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>GPN_GUI=1</code></td>
+<td><code>--gui</code></td>
+<td><code>gui = true</code></td>
+<td>off</td>
+</tr>
+<tr>
+<td><code>GPN_GUI_LISTEN</code></td>
+<td><code>--gui-listen</code></td>
+<td><code>gui_listen = "127.0.0.1:8099"</code></td>
+<td><code>127.0.0.1:8099</code> (loopback only)</td>
+</tr>
+<tr>
+<td><code>GPN_IDLE_FORCE=1</code></td>
+<td><code>--force-idle</code></td>
+<td><code>force_idle = true</code></td>
+<td>off</td>
+</tr>
+<tr>
+<td><code>GPN_IDLE_FILE</code></td>
+<td>—</td>
+<td>—</td>
+<td><code>~/.gpn/idle.json</code></td>
+</tr>
+<tr>
+<td><code>GPN_IDLE_AUTO=1</code></td>
+<td>—</td>
+<td>—</td>
+<td><strong>off</strong> (also flipped by the dashboard toggle)</td>
+</tr>
+<tr>
+<td><code>GPN_IDLE_AUTO_FILE</code></td>
+<td>—</td>
+<td>—</td>
+<td><code>~/.gpn/idle-auto.json</code> (persisted toggle)</td>
+</tr>
+<tr>
+<td><code>GPN_IDLE_AUTO_UTIL_PCT</code></td>
+<td>—</td>
+<td>—</td>
+<td><code>40</code> (clamped 10…100)</td>
+</tr>
+<tr>
+<td><code>GPN_IDLE_AUTO_MIN_FOREIGN_VRAM_MB</code></td>
+<td>—</td>
+<td>—</td>
+<td><code>512</code></td>
+</tr>
+<tr>
+<td><code>GPN_IDLE_AUTO_BUSY_SAMPLES</code></td>
+<td>—</td>
+<td>—</td>
+<td><code>3</code> (clamped 1…20)</td>
+</tr>
+<tr>
+<td><code>GPN_IDLE_AUTO_QUIET_SAMPLES</code></td>
+<td>—</td>
+<td>—</td>
+<td><code>3</code> (clamped 1…20)</td>
+</tr>
+<tr>
+<td><code>GPN_IDLE_AUTO_BUSY_SAMPLE_SECS</code></td>
+<td>—</td>
+<td>—</td>
+<td><code>5</code></td>
+</tr>
+<tr>
+<td><code>GPN_IDLE_AUTO_QUIET_SAMPLE_SECS</code></td>
+<td>—</td>
+<td>—</td>
+<td><code>20</code></td>
+</tr>
+<tr>
+<td><code>GPN_IDLE_AUTO_MINUTES</code></td>
+<td>—</td>
+<td>—</td>
+<td><code>30</code> (clamped to the 6 h ceiling)</td>
+</tr>
+<tr>
+<td><code>GPN_IDLE_AUTO_COOLDOWN_SECS</code></td>
+<td>—</td>
+<td>—</td>
+<td><code>600</code> (after a manual resume)</td>
+</tr>
+</tbody>
+</table>
+<p>Typical <code>~/.gpn/node.toml</code> for a home gaming box:</p>
+<pre><code class="language-toml"># local dashboard for the idle switch
+gui = true
+gui_listen = &quot;127.0.0.1:8099&quot;
+</code></pre>
+<p>Then the desktop shortcut (or <code>http://127.0.0.1:8099</code>) is all a family member
+needs: pick "2 hours", click <em>Go idle</em>, play, and the node comes back on its own.</p>
+<h3 id="running-it-as-a-service">Running it as a service</h3>
+<p>The dashboard is served by the supervisor, so with a systemd user unit it is
+available whenever the node is:</p>
+<pre><code class="language-bash">systemctl --user restart gpn-node     # after adding gui = true
+curl -s http://127.0.0.1:8099/api/status | jq .idle
+</code></pre>
+<p><code>gpn_node idle 120</code> works from any shell as that user — the running service
+picks the change up from the file within a second. No <code>sudo</code>, no restart.</p>
+<hr />
+<h2 id="7-tests">7. Tests</h2>
+<p>All of this is unit/integration tested without a chain, GPU or ollama:</p>
+<ul>
+<li><code>gpn-agent/src/idle.rs</code> (14): file round-trip + <code>0600</code>, 6 h ceiling and
+  zero/over-long rejection with the ceiling in the message, config clamping,
+  deadline boundary (just-before/at/after), restart with an expired file starts
+  active, corrupt/missing file ⇒ active, clear semantics, <code>claims_allowed()</code>.</li>
+<li><code>gpn-agent/src/gui.rs</code> (13): routing (<code>/</code>, <code>/api/status</code>, <code>/api/idle</code>,
+  <code>/api/resume</code>, <code>/api/idle/auto</code>), 200/400/404/405/409 shapes, over-long refusal text, loopback
+  enforcement (<code>0.0.0.0</code>, LAN IPs, hostnames refused), a real socket round-trip
+  including <code>POST</code> + stop, and no external asset in the page.</li>
+<li><code>gpn-agent/src/idle_auto.rs</code> (23): foreign-load classification (our own job,
+  the desktop baseline, the VRAM threshold, unreadable probe), debounce
+  (one spike vs 3 spaced samples, samples inside the spacing window), auto-resume
+  after M quiet samples, deadline expiry vs manual resume (cooldown), manual idle
+  wins and is never resumed, restart adopting a live auto window, sole-authority
+  refusal, clamped env config, default-off, and the <code>nvidia-smi</code> table parser.</li>
+<li><code>gpn-agent/tests/idle_auto.rs</code> (5): the real sampler thread with a fake probe —
+  sustained load writes an <code>auto:</code> <code>idle.json</code> and quiet removes it; a single
+  spike never writes one; the dashboard toggle gates it; a manual idle is left
+  untouched; a manual resume wins and cools down.</li>
+<li><code>gpn-agent/tests/idle_mode.rs</code> (6): public-API state machine, claim gate,
+  HTTP endpoints end-to-end, lone-authority 409 and its force override,
+  non-loopback bind refusal.</li>
+<li><code>gpn-node/node/src/service.rs</code> (<code>idle_mode_tests</code>, 4): deadline boundary,
+  expired/corrupt file ⇒ mining, <code>mining_allowed(role, idle)</code> respects the role
+  gate, and one log line per parking transition.</li>
+<li><code>gpn-agent/src/bin/gpn_node.rs</code> (<code>idle_cli_tests</code>, 4): <code>idle</code>/<code>resume</code> verbs —
+  over-long rejected, safety-valve refusal (exit 3), forced write + resume
+  clears, and a plain start runs no verb.</li>
+</ul>
+<hr />
+<h2 id="8-troubleshooting">8. Troubleshooting</h2>
+<table>
+<thead>
+<tr>
+<th>Symptom</th>
+<th>Cause / fix</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>dashboard: off</code> and no page</td>
+<td>started without <code>--gui</code>; add the flag or <code>gui = true</code></td>
+</tr>
+<tr>
+<td><code>dashboard not started: refusing to bind … 0.0.0.0</code></td>
+<td>the listen address is not loopback — use <code>127.0.0.1:&lt;port&gt;</code></td>
+</tr>
+<tr>
+<td><em>Go idle</em> answers 409 <code>sole-authority</code></td>
+<td><code>peers = 0</code>: start a second node, or <code>--force-idle</code> on a dev chain</td>
+</tr>
+<tr>
+<td><code>cannot read the node's peer count</code></td>
+<td>the node child is down/starting; check the <code>[node]</code> log</td>
+</tr>
+<tr>
+<td>Idle "does nothing" (<code>mining</code> still on)</td>
+<td>you are running an older binary; the miner gate needs this release</td>
+</tr>
+<tr>
+<td>Countdown is wrong after a long suspend</td>
+<td>the file stores absolute <code>until</code>; the page re-syncs every 3 s</td>
+</tr>
+<tr>
+<td>Node still warm while idle</td>
+<td>idle stops the <em>miner</em>; ollama may keep a model resident — <code>ollama stop &lt;model&gt;</code> if it matters</td>
+</tr>
+</tbody>
+</table>
+    </article>
+    <p class="doc-updated small muted">Last generated 2026-11-24 from the project documentation set.</p>
+  </div>
+</main>
+
+<footer class="site-footer">
+  <div class="wrap">
+    <div class="foot-grid">
+      <div><a class="brand" href=".." style="margin-bottom:10px"><span class="dot" aria-hidden="true">G</span> <span>GPN</span></a><p class="muted" style="max-width:320px">A GPU-native network for mining and AI compute. <em>Get paid for the GPU time you're wasting.</em></p></div>
+      <div><h4>Product</h4><a href="../download">Download</a><a href="../deploy">Deploy</a><a href="../ai">Access the AI</a><a href="../access-points">Access Points</a><a href="../nodes">Live nodes</a></div>
+      <div><h4>Learn</h4><a href="./">Docs</a><a href="whitepaper">Whitepaper</a><a href="one-pager">One-pager</a><a href="technical-overview">Technical overview</a></div>
+      <div><h4>Project</h4><a href="https://github.com/crewlyllc/gpn_coin" rel="noopener">Source on GitHub</a><a href="run-a-node">Run a node</a><a href="wallet">Wallet</a><a href="../buy">Token &amp; purchasing</a><a href="..#join">Join the team</a></div>
+    </div>
+    <div class="foot-bottom">
+      <p class="small muted">© <span data-year>2026</span> GPN · Public testnet. Not investment advice.</p>
+      <p class="small muted">Testnet only — tokens here have no monetary value.</p>
+    </div>
+  </div>
+</footer>
+
+<script src="../assets/app.js"></script>
+</body>
+</html>

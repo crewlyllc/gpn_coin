@@ -84,6 +84,24 @@ PAGES = {
         "Operational checklist for the mainnet launch: genesis, keys, bootstrap and go/no-go.",
         "Mainnet has not launched. This is the internal runbook, published for transparency; it is not a launch announcement.",
     ),
+    "updates": (
+        "updates.md",
+        "Updates",
+        "Auto-update, the minimum-version cutoff and release signing: why an old node is a network problem.",
+        None,
+    ),
+    "node-gui-and-idle": (
+        "node-gui-and-idle.md",
+        "Node dashboard and Idle mode",
+        "The node dashboard, and Idle mode: pause mining and AI work without leaving the network.",
+        None,
+    ),
+    "provider-address-and-models": (
+        "provider-address-and-models.md",
+        "Provider address and models",
+        "Publishing a dialable provider address, VRAM gating and the public model catalogue.",
+        None,
+    ),
     "design-assume-valid-checkpoint": (
         "design/design-assume-valid-checkpoint.md",
         "Design: assume-valid checkpoint",
@@ -293,6 +311,9 @@ def write_index():
         "fast-sync": ("Fast sync", "Snapshots, checkpoints and sync times."),
         "peer-discovery": ("Peer discovery", "Bootnodes, seed lists and DNS seeds."),
         "mainnet-launch-runbook": ("Mainnet launch runbook", "Operational go/no-go checklist (internal, published for transparency)."),
+        "updates": ("Updates", "Auto-update, minimum version and release signing."),
+        "node-gui-and-idle": ("Node dashboard + Idle mode", "Pause the GPU without leaving the network."),
+        "provider-address-and-models": ("Provider address and models", "Dialable address, VRAM gating, model catalogue."),
     }
     for slug, (label, blurb) in meta.items():
         _src, _title, _desc, _notice = PAGES[slug]

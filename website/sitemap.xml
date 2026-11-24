@@ -86,6 +86,21 @@
     <priority>0.6</priority>
   </url>
   <url>
+    <loc>https://gpncoin.ai/docs/updates</loc>
+    <lastmod>2026-11-24</lastmod>
+    <priority>0.6</priority>
+  </url>
+  <url>
+    <loc>https://gpncoin.ai/docs/node-gui-and-idle</loc>
+    <lastmod>2026-11-24</lastmod>
+    <priority>0.6</priority>
+  </url>
+  <url>
+    <loc>https://gpncoin.ai/docs/provider-address-and-models</loc>
+    <lastmod>2026-11-24</lastmod>
+    <priority>0.6</priority>
+  </url>
+  <url>
     <loc>https://gpncoin.ai/access-points</loc>
     <lastmod>2026-11-07</lastmod>
     <priority>0.6</priority>

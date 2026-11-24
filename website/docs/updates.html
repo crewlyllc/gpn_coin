@@ -1,0 +1,1528 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Updates — GPN docs</title>
+<meta name="description" content="Auto-update, the minimum-version cutoff and release signing: why an old node is a network problem." />
+<meta name="theme-color" content="#07090f" />
+<link rel="canonical" href="https://gpncoin.ai/docs/updates" />
+<meta property="og:site_name" content="GPN" />
+<meta property="og:type" content="article" />
+<meta property="og:url" content="https://gpncoin.ai/docs/updates" />
+<meta property="og:title" content="Updates — GPN docs" />
+<meta property="og:description" content="Auto-update, the minimum-version cutoff and release signing: why an old node is a network problem." />
+<meta name="twitter:card" content="summary" />
+<meta name="twitter:title" content="Updates — GPN docs" />
+<meta name="twitter:description" content="Auto-update, the minimum-version cutoff and release signing: why an old node is a network problem." />
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%237c6cff'/%3E%3Ctext x='16' y='22' font-size='16' font-family='sans-serif' font-weight='700' text-anchor='middle' fill='%2307090f'%3EG%3C/text%3E%3C/svg%3E" />
+<link rel="stylesheet" href="../assets/style.css" />
+<link rel="stylesheet" href="../assets/docs.css" />
+</head>
+<body>
+<a class="skip-link" href="#main">Skip to content</a>
+
+<header class="site-header">
+  <div class="wrap nav">
+    <a class="brand" href=".." aria-label="GPN home"><span class="dot" aria-hidden="true">G</span><span>GPN<br><small>GPU-NATIVE NETWORK</small></span></a>
+    <button class="nav-toggle" id="nav-toggle" aria-expanded="false" aria-controls="nav-links" aria-label="Toggle navigation">☰</button>
+    <nav class="nav-links" id="nav-links" aria-label="Primary">
+      <a href="..">Home</a>
+      <a href="../download">Download</a>
+      <a href="../deploy">Deploy</a>
+      <a href="../ai">AI</a>
+      <a href="../chat">Chat</a>
+      <a href="../access-points">Access Points</a>
+      <a href="../nodes">Nodes</a>
+      <a href="../buy">Buy GPN</a>
+      <a href="./" aria-current="page">Docs</a>
+      <a href="..#join">Join us</a>
+    </nav>
+    <div class="nav-actions"><button class="theme-toggle" id="theme-toggle" aria-pressed="false" title="Switch theme">☾</button></div>
+  </div>
+</header>
+
+<main id="main" class="doc-main">
+  <div class="wrap doc-wrap">
+    <nav class="crumbs" aria-label="Breadcrumb"><a href="..">Home</a> / <a href="./">Docs</a> / <span>Updates</span></nav>
+    <article class="prose">
+<h1>Updates — auto-update, the minimum-version cutoff, and release signing</h1>
+<p><em>Verified against: chain spec 52 / release 0.3.64 — checked 2026-11-20 at block 337,469.</em></p>
+<p>A GPN node is a <strong>consensus participant</strong>, so "run an old binary" is not a
+neutral choice: an out-of-date node can seal blocks that the rest of the network
+rejects (it looks like a chain stall), serve jobs with an incompatible schema, or
+talk a libp2p dialect its peers have dropped. GPN therefore has two related
+mechanisms:</p>
+<table>
+<thead>
+<tr>
+<th></th>
+<th>What it does</th>
+<th>Opt-in?</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>Auto-update</strong></td>
+<td>Downloads, verifies and installs a new release for you</td>
+<td><strong>Yes</strong> — off unless you ask</td>
+</tr>
+<tr>
+<td><strong>Minimum-version cutoff</strong></td>
+<td>Refuses to let a build that is too old <strong>mine or announce</strong></td>
+<td>No — always on</td>
+</tr>
+</tbody>
+</table>
+<p>The deal an operator gets:</p>
+<ul>
+<li><strong>Opt in to auto-update</strong> → signed updates are installed automatically, with a
+  short restart, at whatever hour a release lands. Nothing to do, nothing to
+  watch.</li>
+<li><strong>Update manually</strong> → completely fine, <em>until</em> a release raises
+  <code>min_version</code>. From then on the node keeps <strong>syncing</strong> but stops <strong>mining</strong>
+  and stops <strong>announcing</strong> until it is upgraded. It is not banned and not
+  slashed; it is simply not allowed to produce blocks it would have to be
+  reorged out of.</li>
+</ul>
+<p>Both paths verify the same thing: an <strong>ed25519 signature</strong> over a canonical form
+of the release manifest, made with the GPN release key.</p>
+<hr />
+<h2 id="1-version-numbering">1. Version numbering</h2>
+<p>There is <strong>exactly one version</strong> in GPN, and one tool that changes it:</p>
+<pre><code class="language-text">Cargo.toml  ──▶  CARGO_PKG_VERSION  ──▶  gpn_node --version
+     │                                        │
+     │                                        ├─▶ gpn-build-v1 stamp in the binary
+     │                                        │        │
+     └── scripts/bump-version.py               │        ▼
+                                              │   scripts/gen-release-manifest.py
+                                              │        │   (reads the stamp, not a flag)
+                                              ▼        ▼
+                                       updater compares manifest.version with its own
+</code></pre>
+<p>Never edit a version by hand, and never type one into a release command. A
+version that only exists in a hand-typed <code>--version 0.2.0</code> flag is how 0.1.0
+came to be reported by every build from 2026-10-14 to 2026-10-21: the manifest
+copied a value that never moved, so <code>is_newer()</code> was always false and the
+<code>min_version</code> cutoff could never fire.</p>
+<h3 id="the-commands">The commands</h3>
+<pre><code class="language-bash">scripts/bump-version.py patch        # 0.2.0 -&gt; 0.2.1
+scripts/bump-version.py minor        # 0.2.1 -&gt; 0.3.0
+scripts/bump-version.py major        # 0.3.0 -&gt; 1.0.0
+scripts/bump-version.py --set 0.2.0  # explicit; refuses to go backwards
+scripts/bump-version.py --check      # print the version; fail if the crates disagree
+</code></pre>
+<p>It updates <code>gpn-agent/Cargo.toml</code> (<code>[package]</code>), <code>gpn-node/Cargo.toml</code>
+(<code>[workspace.package]</code>), every workspace member's literal version, and prepends
+a <code>CHANGELOG.md</code> stub. It validates strict <code>MAJOR.MINOR.PATCH</code> (no <code>-rc1</code>, no
+<code>+build</code> — <code>update.rs::parse_version</code> ignores suffixes, so two builds could
+compare equal and the updater would never fire), is idempotent, and refuses to
+guess when the crates disagree.</p>
+<h3 id="what-each-level-means">What each level means</h3>
+<table>
+<thead>
+<tr>
+<th>Level</th>
+<th>When</th>
+<th><code>min_version</code></th>
+<th>libp2p protocol id</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>MAJOR</strong></td>
+<td>Breaking change to the <strong>wire, consensus or p2p</strong>: block/extrinsic format, the RPC a peer or the scheduler depends on, the p2p message set, the release-manifest canonical form. Also: a release that makes older nodes' data wrong.</td>
+<td><strong>Raise it to the new version</strong> (in the same release)</td>
+<td><strong>Bump</strong></td>
+</tr>
+<tr>
+<td><strong>MINOR</strong></td>
+<td>New features, backwards compatible: a new endpoint, a new optional field, a new tool. An old node still interoperates.</td>
+<td>Leave it, unless the release genuinely requires everyone to move</td>
+<td>Leave it</td>
+</tr>
+<tr>
+<td><strong>PATCH</strong></td>
+<td>Fixes only — no format, no schema, no new capability.</td>
+<td>Leave it</td>
+<td>Leave it</td>
+</tr>
+</tbody>
+</table>
+<p>A runtime-only change (<code>set_code</code>) is <strong>not</strong> a reason to bump either the
+protocol id or <code>min_version</code>: the runtime ships forklessly at a known block and
+old and new <em>nodes</em> interoperate fine while it happens. Bumping the protocol id
+is the network half of the cutoff — it isolates an incompatible peer instead of
+letting it half-work (§7.2).</p>
+<p>Bump <strong>exactly one</strong> level, in the commit that carries the change it describes,
+and land the bump with that change — not in a later "release" commit. The
+<code>0.x</code> line is not an excuse: while <code>MAJOR</code> is 0, a <code>MINOR</code> bump <em>may</em> break
+compatibility, so <code>MINOR</code> + a raised <code>min_version</code> is the pre-1.0 way to ship a
+breaking change. It is still a separate decision per release: nothing in this
+repo raises a cutoff automatically.</p>
+<h3 id="where-the-version-lives">Where the version lives</h3>
+<table>
+<thead>
+<tr>
+<th>Path</th>
+<th>Field</th>
+<th>Written by</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>gpn-agent/Cargo.toml</code></td>
+<td><code>[package] version</code> → <code>CARGO_PKG_VERSION</code> of the node/agents</td>
+<td><code>bump-version.py</code></td>
+</tr>
+<tr>
+<td><code>gpn-node/Cargo.toml</code></td>
+<td><code>[workspace.package] version</code></td>
+<td><code>bump-version.py</code></td>
+</tr>
+<tr>
+<td><code>gpn-node/{runtime,node,gpn-shield,pallets/*}/Cargo.toml</code></td>
+<td><code>[package] version</code> (literal, not inherited)</td>
+<td><code>bump-version.py</code></td>
+</tr>
+<tr>
+<td><code>gpn-agent/Cargo.lock</code>, <code>gpn-node/Cargo.lock</code></td>
+<td><code>version</code> of every first-party <code>[[package]]</code></td>
+<td><code>bump-version.py</code> (and audited by <code>--check</code>)</td>
+</tr>
+<tr>
+<td><code>CHANGELOG.md</code></td>
+<td>newest <code>## [x.y.z]</code> heading</td>
+<td><code>bump-version.py</code> (stub) then a human</td>
+</tr>
+<tr>
+<td>artifact bytes</td>
+<td><code>gpn-build-v1 version=x.y.z sha=&lt;sha&gt; spec=&lt;n&gt;</code></td>
+<td><code>gpn-agent/build.rs</code> at compile time</td>
+</tr>
+<tr>
+<td><code>website/releases.json</code></td>
+<td><code>version</code> / <code>min_version</code></td>
+<td><code>gen-release-manifest.py</code> (reads the artifact stamp)</td>
+</tr>
+</tbody>
+</table>
+<p><code>Cargo.lock</code> used to be left alone on the theory that "cargo rewrites it on the
+next build". It does — which is why a stale lock hides: the worktree goes dirty
+instead of failing, and nothing in CI builds with <code>--locked</code>. Twice the label
+was published behind the tree that way (<code>0.3.43</code>, then <code>0.3.49</code> shipping
+<code>gpn-agent/Cargo.lock</code> at <code>0.3.48</code>), and <code>cargo metadata --locked</code> fails on a
+clean checkout. <code>bump-version.py</code> now writes those lines too and <code>--check</code>
+fails if any first-party entry disagrees. Only crates this tree defines are
+touched — a crates.io package whose name merely starts with <code>gpn-</code> is left as
+cargo resolved it.</p>
+<h3 id="a-release-never-replaces-a-newer-local-build">A release never replaces a newer local build</h3>
+<p><code>gpn_update --apply</code> compares the commit in the <strong>build stamp</strong>, not just the
+version. The stamp is now linked into every <code>gpn-agent</code> binary
+(<code>firstrun::GPN_BUILD_STAMP</code>, <code>#[used]</code>), not only the ones that print a
+version, so this works for <code>gpn_scheduler</code> and the providers too.</p>
+<p>Two installs are refused, and the refusal leaves <code>current</code> and every file in the
+install dir untouched (exit <code>3</code> — "a release exists but was not applied", the
+same code <code>GPN_AUTO_UPDATE=0</code> uses, so an hourly timer fire that correctly
+declines is not a failed unit):</p>
+<table>
+<thead>
+<tr>
+<th>Installed</th>
+<th>Release</th>
+<th>Verdict</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>0.3.28</code> <code>sha=e188444</code></td>
+<td><code>0.3.28</code> <code>sha=77e3292</code></td>
+<td><strong>refused</strong> — same version, different commit</td>
+</tr>
+<tr>
+<td><code>10.0.0</code></td>
+<td><code>9.9.9</code></td>
+<td><strong>refused</strong> — downgrade</td>
+</tr>
+<tr>
+<td><code>0.3.27</code> <code>sha=c59114f</code></td>
+<td><code>0.3.28</code> <code>sha=77e3292</code></td>
+<td>installed</td>
+</tr>
+<tr>
+<td><code>sha=unknown</code> (either side)</td>
+<td>anything</td>
+<td>installed — unknown is not evidence</td>
+</tr>
+</tbody>
+</table>
+<p>Why it exists: a host that deploys a locally built <code>HEAD</code> (this testnet does,
+via <code>scripts/deploy-bin.sh</code>) is running version <code>0.3.28</code> <em>of a later commit</em>
+than the signed <code>0.3.28</code> cut. A version comparison sees "0.3.28 → 0.3.28, up to
+date" — or, worse, "0.3.27 → 0.3.28, go ahead" when only the <strong>supervisor</strong> is
+older than the release, which is exactly how a timer fire silently replaced a
+newer <code>gpn_scheduler</code> (2026-11-07, <code>#148</code>).</p>
+<p><code>--force</code> is the deliberate override (re-installing the shipped build over a
+local one, or rolling back by hand). Do not put it in the timer.</p>
+<h2 id="2-the-release-manifest">2. The release manifest</h2>
+<p><code>https://gpncoin.ai/releases.json</code></p>
+<pre><code class="language-json">{
+  &quot;version&quot;: &quot;0.2.0&quot;,
+  &quot;min_version&quot;: &quot;0.1.0&quot;,
+  &quot;published_at&quot;: &quot;2026-10-21T20:41:16Z&quot;,
+  &quot;assets&quot;: [
+    {
+      &quot;os&quot;: &quot;linux&quot;,
+      &quot;arch&quot;: &quot;x86_64&quot;,
+      &quot;url&quot;: &quot;https://github.com/crewlyllc/gpn_coin/releases/download/linux-latest/gpn-linux.tar.gz&quot;,
+      &quot;sha256&quot;: &quot;f0fa377f417b52560bb487154ceff48e0883865d0339167f51c0a010a057f9f8&quot;,
+      &quot;size&quot;: 331643208,
+      &quot;layout&quot;: &quot;bundle&quot;
+    },
+    {
+      &quot;os&quot;: &quot;windows&quot;,
+      &quot;arch&quot;: &quot;x86_64&quot;,
+      &quot;url&quot;: &quot;https://github.com/crewlyllc/gpn_coin/releases/download/windows-latest/gpn-windows.zip&quot;,
+      &quot;sha256&quot;: &quot;dab95de5deea3d7a14468f527789a7aeef8295b32ac49193c940d6e588400879&quot;,
+      &quot;size&quot;: 225578343,
+      &quot;layout&quot;: &quot;bundle&quot;
+    }
+  ],
+  &quot;signing_key&quot;: &quot;&lt;64 hex ed25519 public key&gt;&quot;,
+  &quot;signature&quot;: &quot;&lt;128 hex ed25519 signature&gt;&quot;
+}
+</code></pre>
+<table>
+<thead>
+<tr>
+<th>Field</th>
+<th>Meaning</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>version</code></td>
+<td>The newest release. <code>M.m.p</code>, numeric comparison (so <code>0.10.0 &gt; 0.9.9</code>).</td>
+</tr>
+<tr>
+<td><code>min_version</code></td>
+<td><strong>The cutoff.</strong> A node whose own version is below this must not mine or announce. Empty = no cutoff.</td>
+</tr>
+<tr>
+<td><code>published_at</code></td>
+<td>Informational (ISO-8601 UTC). Not used for any decision.</td>
+</tr>
+<tr>
+<td><code>assets[]</code></td>
+<td>One entry per <code>os</code>/<code>arch</code>: <code>linux</code>/<code>windows</code>/<code>macos</code> × <code>x86_64</code>/<code>aarch64</code> (<code>amd64</code>/<code>arm64</code> also accepted). <code>size: 0</code> means "not declared" — the hash is still checked.</td>
+</tr>
+<tr>
+<td><code>assets[].layout</code></td>
+<td><code>bundle</code> (an archive of the whole release) or <code>single</code> (one binary). <strong>Absent means infer from the URL</strong>: <code>.tar.gz</code>/<code>.tgz</code>/<code>.tar</code>/<code>.zip</code> → bundle.</td>
+</tr>
+<tr>
+<td><code>assets[].files</code></td>
+<td>Optional <code>{relative path: sha256}</code> for a bundle. Signed. The build-stamp check already pins the version; this pins individual files.</td>
+</tr>
+<tr>
+<td><code>signing_key</code></td>
+<td>The key that produced <code>signature</code>. Must equal the key compiled into the node, otherwise the manifest is rejected <strong>before anything is downloaded</strong>.</td>
+</tr>
+<tr>
+<td><code>signature</code></td>
+<td>ed25519 over the canonical text below.</td>
+</tr>
+</tbody>
+</table>
+<h3 id="what-exactly-is-signed">What exactly is signed</h3>
+<p><strong>Not the JSON.</strong> The signature covers a canonical, line-oriented text blob, so
+the signer (Python/PyNaCl) and the verifier (Rust/ed25519-dalek) cannot disagree
+about JSON formatting, key order or whitespace:</p>
+<pre><code class="language-text">gpn-release-v1
+version=0.2.0
+min_version=0.1.0
+published_at=2026-10-21T20:41:16Z
+signing_key=&lt;64 hex, lower-case&gt;
+asset=linux/x86_64 https://github.com/crewlyllc/gpn_coin/releases/download/linux-latest/gpn-linux.tar.gz &lt;sha256&gt; 331643208
+asset=windows/x86_64 https://github.com/crewlyllc/gpn_coin/releases/download/windows-latest/gpn-windows.zip &lt;sha256&gt; 225578343
+</code></pre>
+<p>Rules (both sides implement them; <code>gpn-agent/src/update.rs::canonical_text</code> is
+the reference implementation):</p>
+<ul>
+<li>assets are sorted by <code>(os, arch, url)</code> — file order does not matter;</li>
+<li>every line ends with <code>\n</code>, including the last;</li>
+<li>the two hex fields are lower-cased before hashing;</li>
+<li>the field names and <code>gpn-release-v1</code> prefix are load-bearing. Changing them is
+  a manifest format change and needs a node release.</li>
+</ul>
+<h4 id="the-extended-rendering-sign-layout">The extended rendering (<code>--sign-layout</code>)</h4>
+<p>A bundle can carry two more signed fields, appended to their asset's line:</p>
+<pre><code class="language-text">asset=linux/x86_64 https://…/gpn-linux.tar.gz &lt;sha256&gt; 331643208 layout=bundle
+file=linux/x86_64 gpn_node &lt;sha256&gt;
+file=linux/x86_64 gpn-node &lt;sha256&gt;
+</code></pre>
+<p>This is <strong>additive</strong>: with neither field present the rendering is byte-identical
+to the pre-bundle format. The verifier tries the extended text first, then the
+legacy one, so a manifest signed either way is accepted.</p>
+<p>It is <strong>off by default</strong> (<code>--sign-layout</code> turns it on) for one concrete reason:
+a node built before this work computes only the legacy text, so it rejects
+anything else. The 0.2.0 manifest is signed in the legacy rendering precisely so
+that the already-deployed 0.1.x/0.2.0 fleet can verify it and update — verified
+on a real pre-bundle binary:</p>
+<pre><code>  update: manifest verified (https://gpncoin.ai/releases.json): latest=0.2.0 min=0.1.0
+  result: this node (0.2.0) is supported — it would mine
+</code></pre>
+<p>Nothing is lost by leaving it off: what a <em>bundle</em> is comes from the signed
+<code>url</code> (<code>.tar.gz</code>/<code>.zip</code>), never from the <code>layout</code> field. An attacker who edits
+<code>layout</code> in a proxy-served manifest cannot turn a signed 331 MB archive URL into
+"the new <code>gpn_node</code>" — see <code>asset_layout()</code> in <code>gpn-agent/src/update.rs</code>. From
+0.3.0 on, once every node can verify both renderings, publish with
+<code>--sign-layout</code> to bind <code>layout</code> and per-file hashes too.</p>
+<p>This binds <strong>everything</strong>: the version, the cutoff, the assets and their hashes.
+Editing a single character of <code>min_version</code> or of an asset's <code>sha256</code> invalidates
+the signature.</p>
+<hr />
+<h2 id="3-bundles-releases-are-archives-installs-are-versioned-directories">3. Bundles: releases are archives, installs are versioned directories</h2>
+<p>A GPN release is <strong>not one binary</strong>. <code>gpn_node</code> is a supervisor that spawns
+<code>gpn-node</code>, <code>gpn_scheduler</code>, <code>gpn_llm_provider</code>, <code>gpn_provider_status</code>, … — about
+60 executables in <code>gpn-linux.tar.gz</code> (~331 MB) and <code>gpn-windows.zip</code> (~225 MB).
+Replacing only <code>gpn_node</code> leaves the supervisor and every child it spawns on
+different versions: different RPC schemas, different job formats, a node that
+fails in ways that look like a chain problem. So the updater installs a <strong>whole
+tree per version</strong> and switches between them.</p>
+<h3 id="layout">Layout</h3>
+<pre><code class="language-text">~/.gpn/node/update/                  # &lt;base_path&gt;/update
+  versions/
+    0.2.0/                           # complete, stamp-verified release
+      gpn_node  gpn-node  gpn_scheduler  …  scripts/  gpn-node.example.toml
+    0.3.0/                           # the version staged/last installed
+  current -&gt; versions/0.3.0          # symlink (a directory junction on Windows)
+  current.previous -&gt; versions/0.2.0 # one-step rollback target
+  pending-update.json                # what is staged, not yet switched
+  update-state.json                  # cached latest/min version (offline cutoff)
+</code></pre>
+<h3 id="the-flow-never-half-swapped">The flow (never half-swapped)</h3>
+<ol>
+<li>fetch the manifest, <strong>verify the signature</strong> — nothing is downloaded before it
+   verifies;</li>
+<li>stream the bundle to a temp file (not into RAM: 331 MB on a small VPS is how
+   an updater gets OOM-killed mid-update);</li>
+<li>verify the bundle's <code>sha256</code> <strong>and</strong> <code>size</code>;</li>
+<li>extract into <code>versions/.&lt;version&gt;.tmp-&lt;pid&gt;/</code> — a hidden staging directory;</li>
+<li><strong>prove identity</strong>: the extracted <code>gpn_node</code> must carry the
+   <code>gpn-build-v1 version=&lt;manifest version&gt;</code> stamp, every other stamp in the
+   tree must agree, <code>gpn-node</code> must be present, and every per-file hash the
+   manifest declares must match. A bundle that says 0.1.9 while the manifest
+   says 0.2.0 is refused here;</li>
+<li><code>rename</code> the staging directory to <code>versions/&lt;version&gt;</code> (same directory, so it
+   is atomic; the live tree is untouched until now);</li>
+<li>write <code>pending-update.json</code>;</li>
+<li>on restart, re-verify the version directory, then <strong>flip <code>current</code></strong>: build
+   the link under a temporary name and <code>rename</code> it over <code>current</code> — one atomic
+   directory-entry replacement. <code>current</code> points at a complete tree or the old
+   one, never at a half-written one;</li>
+<li>write <code>current.previous</code>, re-exec the supervisor from <code>versions/&lt;new&gt;/gpn_node</code>.</li>
+</ol>
+<p>Directories older than <em>current</em> and <em>previous</em> are pruned after a successful
+switch, so a node keeps at most two copies (~660 MB) instead of growing by one
+release every time.</p>
+<p>Windows has no symlinks without Developer Mode, so <code>current</code> is a <strong>directory
+junction</strong> (<code>mklink /J</code>, no privileges needed) built under a temp name and moved
+into place. Removing a junction deletes the link only — the version tree stays.</p>
+<h3 id="why-the-stamps-not-just-the-hash">Why the stamps, not just the hash</h3>
+<p>The signature proves <em>GPN published this bundle</em>. The build stamp proves <em>this
+tree is the version the manifest names</em> — it comes from <code>gpn-agent/build.rs</code> and
+is baked in at compile time, so it cannot be fabricated without rebuilding. That
+is the check that catches "the bundle asset was not re-uploaded after the bump",
+which would otherwise install a 0.1.9 tree as 0.2.0 and then blame the release.</p>
+<p>Only <code>gpn_node</code> actually carries the stamp — <code>build.rs</code> lives in <code>gpn-agent</code>, and
+<code>gpn-node</code> is a separate workspace crate with no build script. So the rule is:
+the supervisor <strong>must</strong> be stamped with the manifest version, and any <em>other</em>
+stamp found in the tree must agree with it. Requiring a stamp on <code>gpn-node</code> too
+(the first version of this check) rejected every real release. Verified against
+the published artifact:</p>
+<pre><code>$ GPN_REAL_BUNDLE_TREE=/tmp/gpnstage cargo test --lib real_release_tree_verifies -- --ignored
+switched-in: gpn_node 0.2.0 (spec 41, 7e9ff08)
+</code></pre>
+<h3 id="-check-updates-is-bundle-aware"><code>--check-updates</code> is bundle-aware</h3>
+<pre><code>  update: manifest verified (https://gpncoin.ai/releases.json): latest=0.2.0 min=0.1.0
+  update: asset linux/x86_64 layout=bundle 331643208 bytes sha256=f0fa377f417b5256
+  update: 0.2.0 is already installed at /home/op/.gpn/node/update/versions/0.2.0 — nothing to do
+
+  result: this node (0.2.0) is supported — it would mine — installed bundle: 0.2.0
+</code></pre>
+<p>It is still read-only: it fetches the manifest, reports, and installs nothing.</p>
+<hr />
+<h2 id="4-key-custody">4. Key custody</h2>
+<table>
+<thead>
+<tr>
+<th></th>
+<th>Where it lives</th>
+<th>Who has it</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>Private</strong> key (32-byte ed25519 seed)</td>
+<td>Offline with GPN release operations. Default on an ops machine: <code>~/.openclaw/credentials/gpn-release-key.txt</code> (mode <code>0600</code>). <strong>Never in the repo, never in CI logs, never in a chat, never a GitHub Actions secret.</strong> Only <code>scripts/release-cut.sh</code> (local, or local cron) reads it.</td>
+<td>Release ops only</td>
+</tr>
+<tr>
+<td><strong>Public</strong> key</td>
+<td>Compiled into every node: <code>gpn-agent/src/update.rs::RELEASE_PUBKEY_HEX</code></td>
+<td>Everyone</td>
+</tr>
+<tr>
+<td>Fingerprint</td>
+<td><code>scripts/gpn-release-key.sh --show</code> → first 16 hex of <code>sha256(pubkey)</code></td>
+<td>Published with each release</td>
+</tr>
+</tbody>
+</table>
+<p>Consequences worth being explicit about:</p>
+<ul>
+<li><strong>A compromised web host is not enough to own the network.</strong> An attacker who
+  can serve a forged <code>releases.json</code> from <code>gpncoin.ai</code> cannot sign it, so nodes
+  reject it and keep running.</li>
+<li><strong>Rotating the key needs a node release.</strong> That is a feature: it means the
+  trust root only changes when operators install something they chose to
+  install.</li>
+<li><strong>Losing the private key</strong> means: publish one more build signed with the
+  <em>current</em> key (or a hand-verified download) carrying the <em>new</em> embedded public
+  key, then switch. Never overwrite the embedded key silently.</li>
+<li>Back the key up offline (two copies, separate locations). It is a 32-byte
+  secret; a printed hex string in a safe is a legitimate backup.</li>
+</ul>
+<p>Create or inspect the key:</p>
+<pre><code class="language-bash">scripts/gpn-release-key.sh --show     # print public key + fingerprint
+scripts/gpn-release-key.sh            # create if absent (never overwrites)
+scripts/gpn-release-key.sh --force    # regenerate — BREAKS every deployed node
+</code></pre>
+<p>If you regenerate, you <strong>must</strong> update <code>RELEASE_PUBKEY_HEX</code> in
+<code>gpn-agent/src/update.rs</code> and ship that build before it can receive any update.</p>
+<hr />
+<h2 id="5-cutting-a-release">5. Cutting a release</h2>
+<p>Three steps: <strong>bump</strong>, <strong>dispatch the build workflows</strong>, <strong>cut</strong>. The third one
+is automated and idempotent — you can run it by hand, or let cron do it.</p>
+<h3 id="1-bump-one-level-with-the-change-that-earned-it">1. Bump — one level, with the change that earned it</h3>
+<pre><code class="language-bash">scripts/bump-version.py minor
+$EDITOR CHANGELOG.md                 # replace the TODOs; this text ships
+scripts/bump-version.py --check      # all crates agree, version is strict semver
+</code></pre>
+<p>Land the bump in the same commit as the change. The build stamps the version and
+git SHA <strong>into the binary</strong>, so an uncommitted tree ships under a SHA that does
+not contain it.</p>
+<h3 id="2-build-dispatch-the-two-workflows">2. Build — dispatch the two workflows</h3>
+<pre><code class="language-bash">gh workflow run release-unix.yml    --repo jeremyzguo/gpn_coin
+gh workflow run release-windows.yml --repo jeremyzguo/gpn_coin
+</code></pre>
+<p>They upload <code>gpn-linux.tar.gz</code> to release <code>linux-latest</code> and <code>gpn-windows.zip</code>
+to <code>windows-latest</code> in the build repo (<code>jeremyzguo/gpn_coin</code>). Windows builds on
+its own runner; see <code>windows-build-log.md</code>.</p>
+<h3 id="3-cut-mirror-sign-publish-verify">3. Cut — mirror, sign, publish, verify</h3>
+<pre><code class="language-bash">scripts/release-cut.sh --dry-run     # what it would publish, touches nothing
+scripts/release-cut.sh               # do it
+</code></pre>
+<p>That single command is the whole former 30-minute last mile:</p>
+<ol>
+<li><strong>detects</strong> whether the built assets are already the published ones —
+   <code>already released 0.3.5 — nothing to do.</code> and exit 0 when they are, so it is
+   safe to run on a timer;</li>
+<li><strong>downloads</strong> both bundles and verifies each sha256 against the digest
+   GitHub reports — a truncated upload can never be signed. Interrupted runs
+   resume from <code>~/.cache/gpn-release-cut</code> (the cached copy is pinned to the
+   expected digest, so a new build never resumes onto an old partial file);</li>
+<li><strong>reads the version out of the bundles</strong> (<code>gpn-build-v1 version=…</code>); it never
+   guesses. <code>--version X.Y.Z</code> is accepted as an <em>assertion</em> and a mismatch
+   aborts before anything is uploaded;
+3b. <strong>proves the bundles carry the code, not just the version</strong> —
+   <code>scripts/verify-release-artifact.py</code> extracts <code>gpn-node</code>/<code>gpn-node.exe</code> and
+   requires the marker strings of the feature being released (default: the
+   heaviest-chain fork choice — <code>fork-choice</code>, <code>gpn-forked</code>, <code>deep-fork</code>,
+   <code>primary-authoritative</code>, <code>gpncs/2</code>) plus the <code>gpn-node/&lt;version&gt;</code> User-Agent
+   stamp, and reads <code>MAX_REORG_DEPTH = 288</code> out of the source of the build
+   commit (a <code>const</code> is folded to an immediate, so it cannot be grepped out of
+   the image — see below). A build from the wrong tree has the right version
+   and the wrong code, so this refuses <em>before</em> the asset reaches the public
+   repo. <code>0.3.50</code> shipped fork-choice code that existed in git and in no
+   published build (queue #192/#193); this step is what makes that
+   unrepeatable;</li>
+<li><strong>mirrors</strong> both assets into the public repo <code>crewlyllc/gpn_coin</code>, renaming
+   the previous asset aside first so a failed upload leaves a complete mirror
+   rather than a 404 for every auto-updating node, then verifies the mirror's
+   digest and deletes the superseded copies;</li>
+<li><strong>signs</strong> <code>website/releases.json</code> with the local ed25519 key and verifies its
+   own signature against the key compiled into the node;</li>
+<li><strong>publishes</strong> (commits only <code>website/releases.json</code>, pushes <code>main</code>) and polls
+   <code>https://gpncoin.ai/releases.json</code> until it serves the new version;</li>
+<li><strong>verifies</strong> by downloading each mirrored asset anonymously and comparing its
+   sha256 to the signed manifest. Any mismatch fails loudly.</li>
+</ol>
+<p><code>min_version</code> is <strong>carried over</strong> from the published manifest unless you pass
+<code>--min-version</code>, so an automated cut never silently cuts off a segment of the
+fleet.</p>
+<p>Useful flags: <code>--dry-run</code>, <code>--skip-mirror</code> (once the sync workflow mirrors the
+assets itself), <code>--version</code>, <code>--min-version</code>, <code>--timeout N</code> (seconds to wait for
+the live manifest, default 300).</p>
+<p>It refuses to run at all if <code>website/releases.json</code> is dirty in the working
+tree — that is somebody else's edit, and signing it would launder it.</p>
+<h4 id="the-artifact-content-gate-on-its-own">The artifact-content gate, on its own</h4>
+<pre><code class="language-bash"># after the fact: does what the world downloads still carry the code?
+scripts/verify-release-artifact.py            # live manifest, both platforms
+scripts/verify-release-artifact.py --os windows --version 0.3.50
+
+# in a release, before signing: the bundles release-cut already downloaded
+scripts/verify-release-artifact.py --no-manifest \
+    --bundle linux=/cache/gpn-linux.tar.gz \
+    --bundle windows=/cache/gpn-windows.zip --version 0.3.51
+
+# a new feature: state the strings that prove it is in the image
+scripts/verify-release-artifact.py --marker 'my-feature=log line it emits'
+</code></pre>
+<p>Exit codes: <code>0</code> verified, <code>2</code> manifest/signature, <code>3</code> asset digest, <code>4</code> missing
+marker, <code>5</code> version stamp, <code>6</code> source constant. Modes: the default verifies the
+<strong>signed</strong> manifest first (an unsigned manifest can describe any digest), then
+the downloaded bytes, then the binary. <code>--bundle</code> skips the download and checks
+a local archive against the manifest's digest when one is available.</p>
+<p>What it deliberately does <em>not</em> claim: a <code>const</code> has no runtime string, so
+<code>MAX_REORG_DEPTH</code> is verified in <code>gpn-node/node/src/fork_choice.rs</code> at
+<code>--source-rev</code> (default: the <code>sha=</code> in the bundle's build stamp). The
+binary-visible consequences of that bound are <code>deep-fork</code> and <code>gpn-forked</code>,
+which are scanned. The behaviour itself — a shallow fork reorgs, a &gt;288-block
+fork is refused — is a live test (queue #194), not something a grep can prove.</p>
+<p><strong>Cron does this for you.</strong> An OpenClaw job runs <code>scripts/release-cut.sh</code> every
+30 minutes in an isolated session and announces only when it publishes or
+fails. So the normal flow is: dispatch the workflows, walk away, and get a
+message when a signed release is live. Nothing is announced when there is
+nothing new.</p>
+<p>If you must do it by hand (a non-GitHub mirror, an unusual cutoff), the
+underlying commands are still:</p>
+<pre><code class="language-bash"># digest READ from GitHub, never typed; --version is an assertion
+scripts/gen-release-manifest.py \
+    --bundle linux/x86_64=https://github.com/crewlyllc/gpn_coin/releases/download/linux-latest/gpn-linux.tar.gz \
+    --bundle windows/x86_64=https://github.com/crewlyllc/gpn_coin/releases/download/windows-latest/gpn-windows.zip \
+    --version 0.3.5 --min-version 0.1.0 \
+    --key ~/.openclaw/credentials/gpn-release-key.txt \
+    --out website/releases.json
+scripts/commit-paths.sh -m &quot;release: sign 0.3.5&quot; website/releases.json &amp;&amp; git push origin main
+</code></pre>
+<p><code>layout: "bundle"</code> is written to the JSON but not into the signature (no
+<code>--sign-layout</code>) so pre-bundle nodes can still verify the manifest.</p>
+<h3 id="4-watch-one-node-do-the-real-thing-before-announcing">4. Watch one node do the real thing before announcing</h3>
+<pre><code class="language-bash">GPN_AUTO_UPDATE=1 GPN_UPDATE_CHECK_HOURS=1 journalctl --user -u gpn-node -f
+# &quot;downloading 0.3.5 (linux/x86_64, layout=bundle)&quot; → &quot;downloaded 317/302 MiB&quot;
+#   → &quot;staged bundle 0.3.5 at …/versions/0.3.5&quot; → &quot;restarting to apply&quot;
+#   → &quot;0.3.5 verified and switched in; previous build kept at …/versions/0.3.4&quot;
+gpn_node --check-updates      # read-only: manifest + asset digest, installs nothing
+</code></pre>
+<h3 id="why-signing-stays-on-this-machine-not-in-ci">Why signing stays on this machine, not in CI</h3>
+<p>The private key is deliberately <strong>not</strong> a GitHub Actions secret and the release
+workflows cannot sign anything. A CI job can only produce an <em>unsigned</em> asset;
+<code>release-cut.sh</code> refuses to sign one whose version stamp disagrees with what it
+was told to publish, and it verifies the bytes it downloaded against the digest
+GitHub recorded. Putting the key in Actions would trade that boundary for
+convenience: one leaked repo secret, or one compromised third-party action,
+could then sign a release that every auto-updating node installs. Build
+infrastructure being writable by CI is acceptable; the trust root is not.</p>
+<p>The cost is that cutting needs this box awake. That is why the automation is a
+local cron job rather than a workflow — and why a completed build can no longer
+sit unsigned for days.</p>
+<p><strong>Do not</strong> sign or publish a manifest over a bundle that does not match the
+commit you built from: the signature makes it authoritative, and every
+auto-updating node will install it. If a release is wrong, publish a new version
+(a PATCH); do not re-sign the same one. In particular, if you bump the version
+and forget to re-upload the bundle, the <em>node</em> catches it — the extracted build
+stamp will not match the manifest and the update is refused — but only after
+every node has downloaded 331 MB.</p>
+<h3 id="publishing-without-a-github-release">Publishing without a GitHub release</h3>
+<p>For a non-GitHub mirror, declare the digest yourself — it is still verified on
+the node:</p>
+<pre><code class="language-bash">scripts/gen-release-manifest.py \
+  --bundle linux/x86_64=https://dl.example/gpn-linux.tar.gz \
+  --bundle-digest linux/x86_64=$(sha256sum gpn-linux.tar.gz | cut -d' ' -f1):$(stat -c%s gpn-linux.tar.gz) \
+  --version 0.2.0 --min-version 0.1.0 --out website/releases.json
+</code></pre>
+<h3 id="the-pre-020-workflow-for-reference">The pre-0.2.0 workflow (for reference)</h3>
+<p>This documented a hand-typed version and a hand-typed <code>min_version</code>:</p>
+<pre><code class="language-bash">scripts/gen-release-manifest.py \
+    --version 0.2.0 \
+    --min-version 0.1.5 \
+    --asset linux/x86_64=dist/gpn_node \
+    --asset windows/x86_64=dist/gpn_node.exe \
+    --url-base https://gpncoin.ai/dl \
+    --key ~/.openclaw/credentials/gpn-release-key.txt \
+    --out website/releases.json
+</code></pre>
+<p><code>--version</code> still exists, but only as an <strong>assertion</strong>: if it disagrees with
+what the artifact was built from, the script now fails instead of publishing a
+manifest nobody's binary matches (that mismatch — <code>0.2.0</code> in the manifest,
+<code>0.1.0</code> in the binary — is what made the first auto-update a no-op). A
+cutoff-only manifest (<code>--allow-empty-assets</code>) still needs <code>--version</code>, because
+there is no artifact to read.</p>
+<p>The script <strong>verifies its own output before finishing</strong> — it will not leave an
+unsigned or mis-signed <code>releases.json</code> behind. Deploy <code>website/releases.json</code>
+with the site (the Worker serves it at <code>/releases.json</code>; see
+<code>worker/worker.js::releaseManifest</code>).</p>
+<p>Ordering matters:</p>
+<ol>
+<li>upload the <strong>artifacts</strong> first (so <code>url</code> resolves),</li>
+<li>then upload <code>releases.json</code> (so no node ever sees a manifest pointing at a
+   404),</li>
+<li><code>min_version</code> only rises <strong>after</strong> the new binaries are downloadable.</li>
+</ol>
+<p>Raising <code>min_version</code> with <code>--allow-empty-assets</code> is supported, so a cutoff can
+be published before (or without) a binary — useful for a coordinated upgrade
+window, or to force everyone off a bad build.</p>
+<hr />
+<h2 id="6-auto-update-at-setup-on-by-default">6. Auto-update at setup (ON by default)</h2>
+<h3 id="at-setup">At setup</h3>
+<p><code>gpn_node --setup</code> asks once, after the ollama check. The prompt is <strong>opt-out</strong>:
+the capital letter marks the default, and <code>Currently:</code> echoes what the config
+says at that moment (a fresh node is <strong>ON</strong>):</p>
+<pre><code>  Keep this node auto-updated? [Y/n]
+    yes: verify + install GPN releases automatically (signed manifest,
+         ed25519), restarting briefly when one is published. Recommended:
+         the network drops nodes that fall below the minimum version, and an
+         old node cannot mine.
+    no : you update manually. This node will REFUSE TO MINE once its
+         version is below the published minimum (it keeps syncing).
+  Currently: ON
+  &gt;
+</code></pre>
+<p><code>n</code>/<code>no</code> writes <code>auto_update = false</code> into the config file; <code>y</code>/<code>yes</code> writes
+<code>auto_update = true</code>; both survive restarts with no env var needed. Pressing
+Enter changes nothing — it keeps the current value, which is <strong>ON</strong> unless you
+previously opted out. With no TTY (systemd, CI) the question is skipped with
+<code>auto-update: unchanged (ON)</code> rather than silently disabling updates. The same
+opt-out is available as <code>GPN_AUTO_UPDATE=0</code> / <code>auto_update = false</code>.</p>
+<h3 id="later">Later</h3>
+<pre><code class="language-bash"># env (a single run)
+GPN_AUTO_UPDATE=1 gpn_node
+
+# or the config file (~/.gpn/node.toml)
+auto_update = true
+</code></pre>
+<h3 id="what-it-actually-does">What it actually does</h3>
+<p>On a <strong>per-node randomized schedule</strong> (see "The schedule" below) — first check
+somewhere in the first <code>GPN_UPDATE_CHECK_HOURS</code> after start, then roughly every
+<code>GPN_UPDATE_CHECK_HOURS</code> (default 6):</p>
+<ol>
+<li><code>GET https://gpncoin.ai/releases.json</code> — 15 s timeout, no retries.</li>
+<li><strong>Verify the signature.</strong> Wrong key, missing signature, tampered field, or
+   unparseable JSON → log one line, do nothing else. There is no code path that
+   downloads without a valid signature.</li>
+<li>Compare <code>version</code> with this binary. Not newer → nothing to do (one log line
+   only when it <em>is</em> newer).</li>
+<li>Select the <code>os</code>/<code>arch</code> asset. None for this platform → log and stop.
+4b. Wait a random <code>[0, GPN_UPDATE_SPREAD_SECS]</code> (default 20 min) <strong>before
+   downloading</strong> — the install stagger, so release day does not turn into N
+   simultaneous 300 MB pulls. Logged with the reason; <code>0</code> disables it.</li>
+<li>Is it a <strong>bundle</strong> (<code>layout: "bundle"</code>, or a <code>.tar.gz</code>/<code>.zip</code> URL)?
+   * <strong>bundle</strong> — stream it to a temp file, verify <code>sha256</code>+<code>size</code>, extract into
+     <code>versions/.&lt;version&gt;.tmp-&lt;pid&gt;/</code>, prove <code>gpn_node</code> <strong>and</strong> <code>gpn-node</code> carry
+     the <code>gpn-build-v1 version=&lt;manifest version&gt;</code> stamp (plus every per-file
+     hash the manifest declares), then <code>rename</code> the directory to
+     <code>versions/&lt;version&gt;</code>. A mismatch deletes the staging directory and stops.
+   * <strong>single</strong> — download into memory, hash it, compare with the manifest's
+     <code>sha256</code> (and <code>size</code> when declared). Mismatch → discard, log, stop.</li>
+<li>Stage: bundle → the versioned directory (above); single →
+   <code>&lt;gpn_node&gt;.new.tmp-&lt;pid&gt;</code> → <code>rename</code> → <code>&lt;gpn_node&gt;.new</code> (same directory as
+   the binary, so a half-written file is never visible under a name we would
+   exec).</li>
+<li>Bundle: re-verify the version directory from disk immediately before the
+   switch, then flip <code>current</code> with one atomic <code>rename</code>. Single: hash the staged
+   file <strong>from disk</strong> and verify again, then <code>rename</code> it over the binary.</li>
+<li>One line per action in the log. Then, when <code>GPN_UPDATE_RESTART</code> is on
+   (default): stop the children cleanly, apply, re-exec from the new bin dir.</li>
+</ol>
+<p>The log looks like this:</p>
+<pre><code>[supervisor 03:14:07] update: auto-update ON — checking https://gpncoin.ai/releases.json every 6h ±5–10% jitter, first check in 2h 41m (phase from account:5Grwva…; install spread 0–1200s; restart_to_apply=true)
+[supervisor 05:55:09] update: downloading 0.2.0 (linux/x86_64, layout=bundle) sha256=… size=331643208
+</code></pre>
+<p>On release day the download is preceded by the stagger line:</p>
+<pre><code>[supervisor 05:55:08] update: 0.2.0 is available — waiting 7m 12s before downloading so the fleet does not stampede the release host (GPN_UPDATE_SPREAD_SECS=1200s, chosen for this node and version from its identity; 0 disables)
+</code></pre>
+<p>…and after each check the next wait is logged:</p>
+<pre><code>[supervisor 05:56:41] update: next check in 6h 24m 31s (+1471s)
+</code></pre>
+<h4 id="the-schedule-why-not-every-6-hours-from-now">The schedule (why not "every 6 hours from now")</h4>
+<p>A fleet of identical nodes installed from one image would otherwise check the
+manifest in the same second and, on release day, pull the same 331 MB archive in
+the same second. That is a self-inflicted DDoS on the release host, and it is
+entirely avoidable without a server-side scheduler. Three independent pieces:</p>
+<ol>
+<li><strong>Per-node phase.</strong> The first check happens at <code>start + phase</code>, where</li>
+</ol>
+<pre><code>seed  = sha256(&quot;gpn-update-phase-v1&quot; NUL identity)     # identity = payout account, else base path
+phase = (seed[0..8] XOR (hash(seed, start_unix)[0..8] &amp; 0xFFF)) mod interval
+</code></pre>
+<p><code>phase ∈ [0, interval)</code>, is stable for a given node (same identity + same
+   start second → same phase), and covers the whole interval across a fleet. The
+   restart term is only 12 bits of bounce, so a restart re-rolls the phase
+   <em>lightly</em> instead of moving a node to the far side of the day. The identity is
+   the payout account (public, unique per node, survives upgrades) or the base
+   path when no account exists yet. The signer is never hashed: it may be a
+   secret URI.</p>
+<ol start="2">
+<li><strong>Per-check jitter.</strong> After each check the wait is</li>
+</ol>
+<pre><code>jitter = ±[5 %, 10 %] of interval, from sha256(&quot;gpn-update-jitter-v1&quot; seed counter)
+wait   = interval + jitter
+</code></pre>
+<p>so nodes that happened to start together drift apart instead of staying
+   locked in step forever.</p>
+<ol start="3">
+<li><strong>Install spread.</strong> Finding a newer release does not start the download: the
+   node waits <code>hash("gpn-update-spread-v1", seed, version) mod (spread + 1)</code>,
+   i.e. uniform in <code>[0, GPN_UPDATE_SPREAD_SECS]</code> (default 1200 s = 20 min).
+   Deterministic per <code>(node, version)</code>, so a retry after a failed download waits
+   the same amount rather than re-rolling.</li>
+</ol>
+<p>All of it runs on the auto-update thread, which is spawned after the supervisor
+is already up: <strong>a starting node never waits for the phase or the spread.</strong> Both
+sleeps are interruptible in 500 ms steps, so shutdown is prompt.</p>
+<table>
+<thead>
+<tr>
+<th>Knob</th>
+<th>Default</th>
+<th>Meaning</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>GPN_UPDATE_CHECK_HOURS</code> / <code>update_check_hours</code></td>
+<td><code>6</code></td>
+<td>base interval, clamped to 1–168 h; the real wait is this ±5–10 %</td>
+</tr>
+<tr>
+<td><code>GPN_UPDATE_SPREAD_SECS</code> / <code>update_spread_secs</code></td>
+<td><code>1200</code></td>
+<td>max delay between "update found" and starting the download (clamped to ≤ 86400); <code>0</code> disables the stagger</td>
+</tr>
+<tr>
+<td><code>GPN_UPDATE_RESTART</code></td>
+<td><code>1</code></td>
+<td>apply immediately (short outage) vs. on the next start</td>
+</tr>
+</tbody>
+</table>
+<p>With 100 simulated nodes the phase schedule occupies 87 distinct one-minute
+buckets of a 6 h interval, with no minute ever holding more than 5 % of the
+fleet — versus all 100 in the same second without it.</p>
+<h3 id="the-restart-is-a-short-outage-by-design">The restart is a short outage — by design</h3>
+<p>Applying a new binary means executing new code, and there is no way to do that
+without a restart. It is deliberately the <em>smallest possible</em> one: children are
+stopped gracefully (not killed mid-job; a running job is finished or released as
+on any shutdown), the swap is a single atomic <code>rename</code>, and the supervisor
+re-execs itself immediately. Expect seconds, not minutes. Chain sync resumes from
+the last block — no re-sync.</p>
+<p>If you would rather choose the moment:</p>
+<pre><code class="language-bash">GPN_UPDATE_RESTART=0   # download + verify + stage now, apply on the next start
+</code></pre>
+<p>Then a normal restart (or a service restart) applies it.</p>
+<h3 id="opting-out-pausing">Opting out / pausing</h3>
+<table>
+<thead>
+<tr>
+<th>Want</th>
+<th>Do</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Never auto-update</td>
+<td>set <code>auto_update = false</code> or <code>GPN_AUTO_UPDATE=0</code></td>
+</tr>
+<tr>
+<td>Pause for a while</td>
+<td>the same — it is checked at start, so <code>GPN_AUTO_UPDATE=0</code> disables the thread</td>
+</tr>
+<tr>
+<td>Air-gapped / no manifest access</td>
+<td><code>GPN_UPDATE_CHECK=0</code> — disables <em>all</em> manifest fetches. ⚠ the cutoff cannot be evaluated either, so the node trusts its ≤ last verified state</td>
+</tr>
+<tr>
+<td>Keep checking but never restart</td>
+<td><code>GPN_UPDATE_RESTART=0</code></td>
+</tr>
+</tbody>
+</table>
+<hr />
+<h2 id="6b-every-deployment-mode-gpn_update">6b. Every deployment mode: <code>gpn_update</code></h2>
+<p>Auto-update used to exist <strong>only inside <code>gpn_node</code></strong>. That is fine for hosts
+started by the installer, but a host can run the same binaries a different way:</p>
+<table>
+<thead>
+<tr>
+<th>Deployment</th>
+<th>What starts</th>
+<th>Was it ever checked?</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>installer / systemd</td>
+<td><code>gpn-node.service</code> → <code>gpn_node</code></td>
+<td>yes — the supervisor's own thread</td>
+</tr>
+<tr>
+<td>fleet</td>
+<td><code>run-fleet.sh</code> → <code>gpn_fleet</code></td>
+<td><strong>no</strong> — froze at the tarball's version</td>
+</tr>
+<tr>
+<td>hand-run / container / process manager</td>
+<td><code>gpn-node</code>, <code>gpn_scheduler</code>, …</td>
+<td><strong>no</strong></td>
+</tr>
+<tr>
+<td>Windows zip</td>
+<td><code>gpn_node.exe</code></td>
+<td>yes</td>
+</tr>
+</tbody>
+</table>
+<p>Replacing the fleet with <code>gpn_node</code> is not an option: the fleet carries the
+fleet directive, <code>GPN_MINER_ACCOUNT</code> and the challenge-verifier secrets. So the
+check is its own binary, shipped in every bundle and installer alongside the
+node:</p>
+<pre><code class="language-text">gpn_update --check    # default: fetch + verify the manifest, download NOTHING
+gpn_update --apply    # download, verify, install, copy, restart, CONFIRM
+                      # (rolls back by itself when the new build does not come up)
+gpn_update --confirm --expect 0.3.31   # wait for the RUNNING node to report it
+gpn_update --rollback                  # flip `current` back one version
+gpn_update --repair-launcher           # Windows: aim start-node.cmd at `current`
+</code></pre>
+<p>It reuses <code>gpn_agent::update</code> — the same manifest parser, the same ed25519
+verification against the compiled-in release key, the same size+sha256 checks,
+the same <code>versions/&lt;v&gt;/</code> extraction and <code>current</code> flip. Nothing about
+verification is re-implemented.</p>
+<h3 id="-check-read-only"><code>--check</code> (read-only)</h3>
+<pre><code class="language-text">$ gpn_update --check
+  current      0.3.30   /home/me/.local/bin/gpn_node
+  latest       0.3.31   published 2026-11-09T01:22:34Z
+  min_version  0.1.0    (supported)
+  asset        linux/x86_64 layout=bundle 324.2 MB sha256=13ad9e69…
+  -&gt; update available: 0.3.31 (run `gpn_update --apply`)
+</code></pre>
+<p>The version on the left is read from the <strong><code>current</code> junction</strong> when one
+exists, else from the <strong>installed</strong> <code>gpn_node</code> build stamp (falling back to the
+updater's own version). If the two disagree — a mid-copy failure leaves
+<code>current</code> new and the install dir mixed — the <strong>lower</strong> version is reported, so
+the next <code>--apply</code> repairs it instead of hiding it.</p>
+<table>
+<thead>
+<tr>
+<th>Exit</th>
+<th>Meaning</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>0</code></td>
+<td>up to date</td>
+</tr>
+<tr>
+<td><code>1</code></td>
+<td>error: bad signature/key, no asset for this platform, I/O</td>
+</tr>
+<tr>
+<td><code>2</code></td>
+<td>the manifest could not be fetched, or the body was not a manifest (offline, DNS, HTTP ≠ 2xx, captive portal)</td>
+</tr>
+<tr>
+<td><code>3</code></td>
+<td>a <strong>newer verified</strong> release exists — the scriptable "update me" signal</td>
+</tr>
+<tr>
+<td><code>4</code></td>
+<td><code>--confirm</code> did not see the expected version running before its deadline</td>
+</tr>
+</tbody>
+</table>
+<h3 id="-apply"><code>--apply</code></h3>
+<ol>
+<li>Fetch + verify the manifest (same checks as above).</li>
+<li>If the version is not newer → exit <code>0</code>, nothing touched.</li>
+<li>Refuse when <code>GPN_AUTO_UPDATE=0</code> → exit <code>3</code>, <strong>no download</strong>.</li>
+<li>Download the asset to a temp file whose extension comes from the signed URL
+   (<code>.tar.gz</code>/<code>.tgz</code>/<code>.tar</code>/<code>.zip</code>), verify <code>sha256</code>+<code>size</code>, extract to
+   <code>versions/&lt;v&gt;/</code>, prove the build stamps say <code>&lt;v&gt;</code>.</li>
+<li>Flip <code>current</code>, keep <code>current.previous</code>, prune older version directories.</li>
+<li>Copy every <code>gpn*</code> file from <code>versions/&lt;v&gt;/</code> into the install dir
+   (<code>GPN_UPDATE_TARGET_DIR</code>, default <code>~/.local/bin</code>), <strong>one atomic rename per
+   file</strong> (<code>.&lt;name&gt;.tmp-&lt;pid&gt;</code> → <code>&lt;name&gt;</code>). A crash leaves either the old
+   file or the complete new one — never a half-written executable.</li>
+<li>Run <code>GPN_UPDATE_RESTART_CMD</code> if set; otherwise print the command to run.
+   <strong>Nothing is restarted by default.</strong></li>
+</ol>
+<p><code>--json</code> prints one object; <code>--quiet</code> prints nothing (the timer uses it).</p>
+<p>First run on a host that has never been updated: the binaries in the install dir
+are snapshotted into <code>versions/&lt;running&gt;/</code> before the flip, so even the first
+update has a real rollback target instead of a one-way door.</p>
+<p>If the copy step fails, the tree and <code>current</code> are already new but the install
+dir is mixed. Re-run <code>gpn_update --apply</code>: it re-verifies and reuses the tree
+instead of downloading again, then finishes the copy.</p>
+<h3 id="the-timer-the-installer-ships">The timer the installer ships</h3>
+<p><code>scripts/gpn-autostart.sh install</code> writes four user units: <code>gpn-ollama.service</code>,
+<code>gpn-node.service</code>, <code>gpn-update.service</code> and <code>gpn-update.timer</code>.
+(<code>install-updater</code> writes only the last two — see "Enabling it on a
+<code>gpn_fleet</code> host" below.)</p>
+<pre><code class="language-ini"># ~/.config/systemd/user/gpn-update.service
+[Unit]
+Description=GPN signed-release updater (one check + apply)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+Environment=GPN_UPDATE_DIR=/home/me/.gpn/update
+Environment=GPN_UPDATE_TARGET_DIR=/home/me/.local/bin
+Environment=&quot;GPN_UPDATE_RESTART_CMD=systemctl --user restart gpn-node.service&quot;
+Nice=10
+SuccessExitStatus=0 2 3
+ExecStart=/home/me/.local/bin/gpn_update --apply --quiet
+
+[Install]
+WantedBy=default.target
+</code></pre>
+<pre><code class="language-ini"># ~/.config/systemd/user/gpn-update.timer
+[Unit]
+Description=Check for GPN releases every 6 hours (randomized across the fleet)
+
+[Timer]
+OnBootSec=10min
+OnUnitActiveSec=6h
+RandomizedDelaySec=30min
+AccuracySec=1min
+Persistent=true
+Unit=gpn-update.service
+
+[Install]
+WantedBy=timers.target
+</code></pre>
+<p><code>SuccessExitStatus=0 2 3</code> is deliberate: being offline (<code>2</code>) or holding at
+<code>GPN_AUTO_UPDATE=0</code> (<code>3</code>) is not a unit failure; only a real error (<code>1</code>) is.
+<code>RandomizedDelaySec</code> is what stops a fleet from pulling 300 MB in lockstep.</p>
+<h3 id="the-timer-the-windows-installer-ships-gpn-update">The timer the Windows installer ships (<code>GPN-Update</code>)</h3>
+<p>Windows has no systemd, and a Windows node does <strong>not</strong> keep checking the
+manifest between starts the way a Linux one does — a box that never reboots can
+sit on an old build for days (that is exactly what box 1 did). <code>install.ps1</code>
+therefore registers a scheduled task, <code>GPN-Update</code>, that is the Windows
+equivalent of <code>gpn-update.timer</code>:</p>
+<table>
+<thead>
+<tr>
+<th></th>
+<th>Value</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Task name</td>
+<td><code>GPN-Update</code></td>
+</tr>
+<tr>
+<td>Cadence</td>
+<td>every <strong>1 hour</strong>, with <code>&lt;RandomDelay&gt;PT10M&lt;/RandomDelay&gt;</code> (jitter is drawn per repetition, so the fleet drifts apart). TEMPORARY review-window cadence, 2026-11-12 — reverts with <code>DEFAULT_CHECK_HOURS</code>.</td>
+</tr>
+<tr>
+<td>Action</td>
+<td><code>powershell.exe -NoProfile -ExecutionPolicy Bypass -File "C:\gpn\update-and-restart.ps1"</code></td>
+</tr>
+<tr>
+<td>Concurrency</td>
+<td><code>MultipleInstancesPolicy = IgnoreNew</code> <strong>and</strong> an exclusive lock file <code>C:\gpn\update.lock</code></td>
+</tr>
+<tr>
+<td>Missing a run (box off)</td>
+<td><code>StartWhenAvailable = true</code></td>
+</tr>
+<tr>
+<td>Run level</td>
+<td><code>HighestAvailable</code>, as the installing user (<code>InteractiveToken</code>)</td>
+</tr>
+<tr>
+<td>Task Scheduler refuses</td>
+<td>a per-user Startup shortcut runs <code>C:\gpn\update-loop.ps1</code> (same wrapper, hourly ±10 min, single-instance). Standard accounts on boxes 1/2/4 cannot create the task at all — without this fallback those boxes had <strong>no</strong> updater.</td>
+</tr>
+</tbody>
+</table>
+<p>The task is registered from XML (<code>schtasks /Create /TN GPN-Update /XML ... /F</code>)
+and not from <code>schtasks /SC DAILY /RI 360</code>: the CLI cannot express jitter, and
+the ScheduledTasks module's <code>-RandomDelay</code> only dithers the <em>initial</em>
+StartBoundary, not every repetition. <code>/F</code> replaces the task by name, so running
+the installer twice never creates a second task or a duplicate trigger.</p>
+<h4 id="the-wrappers-control-flow">The wrapper's control flow</h4>
+<pre><code class="language-text">update check started
+  repair start-node.cmd             idempotent: the launcher must run the tree
+                                    the updater selects, not bin\gpn_node.exe
+  gpn_update --check                 -&gt; 0  up to date        -&gt; log, exit 0   (node NOT restarted)
+                                     -&gt; 2  manifest offline  -&gt; log, exit 0   (node NOT restarted)
+                                     -&gt; 3  update available  -&gt; continue
+                                     -&gt; 1  verification error-&gt; log, message box, exit 1
+  schtasks /End /TN GPN-Node         (Windows locks a running .exe, so the copy
+                                      cannot succeed while the node runs)
+  wait up to 60 s for gpn* to exit; force-stop the stragglers if it does not
+  gpn_update --apply                 (download, verify, extract, flip `current`,
+                                      copy into C:\gpn\bin, prune)
+  schtasks /Run /TN GPN-Node         ALWAYS - even if --apply failed
+  CONFIRM                            poll JSON-RPC system_version for up to
+                                     120 s; it must equal the version in
+                                     data\update\current
+    confirmed                      -&gt; log CONFIRMED, exit 0
+    not confirmed                  -&gt; roll the junction back one version,
+                                      restart, confirm the old build,
+                                      message box, exit 1
+</code></pre>
+<p>Four rules are load-bearing:</p>
+<ul>
+<li><strong>Stop before apply.</strong> The updater reports a locked <code>.exe</code> as an error; the
+  wrapper prevents the case instead of relying on the error.</li>
+<li><strong>Always restart.</strong> A failed update must never leave a box with nothing
+  running. The restart happens <em>before</em> any dialog, so a modal message box
+  cannot be the reason the node stays down.</li>
+<li><strong>Confirm before calling it done.</strong> "Applied" describes files on disk. Until
+  2026-11-14 nothing asked the running process what build it was, and box 3 sat
+  on 0.3.45 for eight hours with 0.3.46 staged, verified and "installed".</li>
+<li><strong>Roll back, never leave it down.</strong> If the new build does not report itself
+  within the window, <code>current</code> goes back one version, the node is restarted on
+  it, and that is confirmed too. One attempt per release per boot is recorded
+  in <code>data\update\update-attempts.json</code>, so a broken release cannot
+  restart-loop a machine — a reboot (or <code>--force</code>) re-arms it.</li>
+</ul>
+<h4 id="what-actually-gets-run-current-not-bin">What actually gets run: <code>current</code>, not <code>bin</code></h4>
+<p>The launcher starts <code>%GPN_BIN%\gpn_node.exe</code>, and <code>GPN_BIN</code> is
+<code>C:\gpn\data\update\current</code> — a junction the updater flips — with
+<code>C:\gpn\bin</code> as the fallback for a first install or a broken link. That is why
+an update needs no locked-file write at all: the swap is a directory-entry
+change, and the next start picks the new tree. The copy into <code>bin</code> still
+happens (it is what Linux runs, and the fallback), but it is no longer the
+mechanism the update depends on.</p>
+<p>The restart window is the time the supervisor takes to come back — typically
+<strong>10-30 s</strong> (children stop gracefully, chain sync resumes from the last block,
+no re-sync). <code>gpn_update --apply</code> downloads the ~225 MB Windows bundle first,
+so a release day cycle takes minutes, not seconds; the node is only down for
+the swap itself plus the confirmation poll (which normally answers on the
+first request).</p>
+<h4 id="checking-what-happened">Checking what happened</h4>
+<pre><code class="language-powershell">Get-Content C:\gpn\update.log -Tail 40
+schtasks /Query /TN GPN-Update /V /FO LIST   # last run time + last result
+schtasks /Run  /TN GPN-Update                # run a cycle now
+</code></pre>
+<p><code>C:\gpn\update.log</code> is append-only and always ends with either
+<code>up to date - nothing to do (node NOT restarted)</code>, <code>update cycle complete</code>, or
+<code>FAILED: ...</code> with the reason. When an update fails, the same text is shown in
+a message box (via the generated <code>report-exit.ps1</code>, the only channel a hidden
+task has) and the node is already back up.</p>
+<p>Update state lives in <code>C:\gpn\data\update\</code> (the same <code>versions/</code>, <code>current</code>,
+<code>current.previous</code> layout the node itself uses); binaries are installed into
+<code>C:\gpn\bin</code>. Removing the auto-update is part of the normal uninstall:</p>
+<pre><code class="language-powershell">powershell -ExecutionPolicy Bypass -File .\install.ps1 -Uninstall
+</code></pre>
+<p>That stops and deletes <code>GPN-Node</code> and <code>GPN-Update</code>, and removes
+<code>update-and-restart.ps1</code> (the log and the chain data are kept).</p>
+<p>Existing boxes heal themselves: the release deploy step runs
+<code>install.ps1 -UpdateTaskOnly</code>, which writes the wrapper and registers the task
+without re-copying binaries, touching ollama, or restarting the node. It is
+guarded, so a checkout without <code>install.ps1</code> only warns.</p>
+<p>The supervisor still has its own in-process auto-update thread. Both paths use
+the same signed manifest, the same <code>versions/&lt;v&gt;/</code> trees and the same <code>current</code>
+junction, and both are idempotent (an already-installed version is reused, not
+re-downloaded), so they do not fight. If you want exactly one updater on a
+Windows box, set <code>auto_update = false</code> in <code>%USERPROFILE%\.gpn\node.toml</code> and let
+<code>GPN-Update</code> own it.</p>
+<h3 id="enabling-it-on-a-gpn_fleet-host">Enabling it on a <code>gpn_fleet</code> host</h3>
+<p>A fleet host's node is owned by <code>gpn-fleet.service</code>, not by the installer's
+<code>gpn-node.service</code>, so <code>install</code> would start a <strong>second</strong> supervisor against the
+same base path. Use the updater-only action — it writes just the two units and
+picks <code>gpn-fleet.service</code> as the restart hook when that unit exists:</p>
+<pre><code class="language-bash"># gpn_update ships in every release bundle; it must sit next to gpn_node
+scripts/gpn-autostart.sh install-updater --prefix &quot;$HOME/.gpn&quot; --bin-dir &quot;$HOME/.local/bin&quot;
+</code></pre>
+<p>On this repo checkout the binary is <code>gpn-agent/target/release/gpn_update</code>; copy
+it into the bin dir first if the bundle did not (that is also how it gets
+upgraded afterwards).</p>
+<p>The generated unit then carries exactly these three <code>Environment=</code> lines:</p>
+<pre><code class="language-ini">[Service]
+Environment=GPN_UPDATE_DIR=%h/.gpn/update
+Environment=GPN_UPDATE_TARGET_DIR=%h/.local/bin
+Environment=&quot;GPN_UPDATE_RESTART_CMD=systemctl --user restart gpn-fleet.service&quot;
+</code></pre>
+<p>(Write them by hand in <code>~/.config/systemd/user/gpn-update.service</code> if you prefer
+— <code>install-updater</code> only generates that file plus the timer shown above.)</p>
+<p>Two details that matter on a fleet box:</p>
+<ul>
+<li><code>GPN_UPDATE_RESTART_CMD</code> must name the unit that owns <code>gpn_fleet</code>. If the
+  fleet is started from a shell or a different unit, <strong>leave it unset</strong> — the
+  updater then installs and prints the command instead of guessing, and a wrong
+  guess cannot take the network down. <code>install-updater</code> leaves it unset when it
+  finds neither <code>gpn-fleet.service</code> nor <code>gpn-node.service</code>.</li>
+<li><code>GPN_UPDATE_DIR</code> is separate from the fleet's base path (<code>~/.gpn/node</code>) on
+  purpose: the updater owns <code>versions/</code>, <code>current</code> and <code>current.previous</code>, and
+  must not be confused with the chain database next door.</li>
+</ul>
+<p>Verify without changing anything:</p>
+<pre><code class="language-bash">~/.local/bin/gpn_update --check; echo &quot;exit=$?&quot;
+systemctl --user list-timers gpn-update.timer
+journalctl --user -u gpn-update.service -n 50
+</code></pre>
+<p>Undo just the updater (never touches the node/fleet units):</p>
+<pre><code class="language-bash">scripts/gpn-autostart.sh remove-updater
+</code></pre>
+<hr />
+<h2 id="7-the-minimum-version-cutoff">7. The minimum-version cutoff</h2>
+<p>Three layers, weakest to strongest. Only the first is implemented in this
+release; the other two are <strong>designed and staged</strong> (see
+<code>docs/design/design-min-node-version.md</code>).</p>
+<h3 id="51-node-self-check-shipped">5.1 Node self-check — <strong>SHIPPED</strong></h3>
+<p>The supervisor checks the signed manifest on <strong>every start</strong>, whether or not
+auto-update is on (a manual updater still needs to be told). If
+<code>version &lt; min_version</code>:</p>
+<pre><code>  ============================================================
+  !! UPGRADE REQUIRED — this node is 0.3.28, the network requires &gt;= 0.3.31
+  ============================================================
+  This node will SYNC (so its data stays useful) but will NOT MINE and
+  will NOT ANNOUNCE itself. An out-of-date node can otherwise produce blocks
+  the rest of the network rejects — and that looks like a chain stall.
+  Fix: install the current release from https://gpncoin.ai/downloads
+       (or set GPN_AUTO_UPDATE=1 and restart — it updates itself).
+</code></pre>
+<p>Mechanically, in standby the supervisor launches the chain node with
+<code>--no-seed --no-discoverable</code> and <code>GPN_STANDBY=1</code>, and <code>gpn-node</code> downgrades its
+role from <code>Authority</code> to <code>Full</code>, so <strong>neither the block proposer nor the miner
+starts</strong>. It still syncs, still serves its RPC, and can be upgraded in place.</p>
+<p>Why it must be this way: a stale node that keeps mining does not "keep the chain
+alive" — it produces blocks with an outdated runtime/schema that the upgraded
+majority will reject, forcing reorgs and confusing every explorer. Syncing-only
+is the useful, honest state.</p>
+<p>The cutoff survives being offline: the last <strong>verified</strong> manifest is cached in
+<code>&lt;base&gt;/update/update-state.json</code>, and that <code>min_version</code> keeps applying when the
+fetch fails. A node never "forgets" it is too old just because the network is
+down.</p>
+<p>Escape hatch: <code>GPN_MIN_VERSION_ENFORCE=0</code> (or <code>min_version_enforce = false</code>)
+mines anyway, with a loud warning. It exists for one scenario — GPN publishes a
+bad <code>min_version</code> and needs to unwind it — and it is <strong>not</strong> a supported
+configuration: blocks such a node seals may be rejected by upgraded peers.</p>
+<h3 id="52-peernetwork-policy-staged">5.2 Peer/network — <strong>POLICY (staged)</strong></h3>
+<p>libp2p peers only talk to peers speaking the same protocol id. When a change is
+consensus- or wire-incompatible, bump the network protocol id/version so
+incompatible peers are <strong>dropped naturally</strong> instead of half-working:</p>
+<ul>
+<li><strong>Bump the protocol id</strong> when: block format, extrinsics, RPC the scheduler
+  depends on, or the p2p message set changes; anything where an old peer would
+  serve data a new peer misinterprets.</li>
+<li><strong>Do not bump</strong> for a runtime-only change: those ship forklessly via
+  <code>set_code</code>, and old/new <em>nodes</em> interoperate fine while the runtime is
+  upgraded on-chain at a known block.</li>
+<li>Bumping is the <em>network</em> half of the cutoff: even a node that ignores
+  <code>min_version</code> (or uses the escape hatch) ends up isolated, which is the safe
+  failure mode — no peers, no propagation, no damage.</li>
+</ul>
+<p>Rollout: bump in the release that raises <code>min_version</code>, never before, so the two
+mechanisms agree. See <code>docs/design/design-min-node-version.md</code> §3.</p>
+<h3 id="53-on-chain-minnodeversion-staged-not-applied">5.3 On-chain <code>MinNodeVersion</code> — <strong>STAGED, NOT APPLIED</strong></h3>
+<p>The durable version: a <code>MinNodeVersion</code> storage item in the runtime, settable by
+governance, readable by every node. That makes the cutoff part of consensus
+rather than of a web server, and lets a node prove to itself (and to anyone
+auditing) what the network requires.</p>
+<p><strong>Nothing is applied.</strong> The design (storage item, governance call, migration,
+WASM upgrade path, review gate) is in
+<code>docs/design/design-min-node-version.md</code>, and the staged-artifact pointer is
+<code>wasm/README-pending-upgrade.md</code>. Applying it means building a spec-42 WASM and
+submitting <code>sudo(System.set_code)</code> — a review-first, chain-wide action that is
+explicitly <strong>out of scope</strong> for this change. The canonical genesis WASM is
+untouched.</p>
+<hr />
+<h2 id="8-rollback">8. Rollback</h2>
+<p>A bundle install keeps the <strong>previous complete version directory</strong> and the
+pointer to it, so a rollback is one link flip — no binary copying, nothing to
+download.</p>
+<pre><code class="language-bash">ls -l ~/.gpn/node/update/          # current -&gt; versions/0.3.0
+cat ~/.gpn/node/update/current.previous     # the rollback target
+</code></pre>
+<p>(<code>gpn_update</code> deployments: the same files under <code>~/.gpn/update/</code>. To roll a fleet
+box back, flip that link <strong>and</strong> re-run <code>gpn_update</code>'s copy step by re-applying
+the old manifest, or copy <code>versions/&lt;old&gt;/gpn*</code> over the install dir by hand.)</p>
+<pre><code class="language-bash">systemctl --user stop gpn-node
+
+# Flip `current` back to the previous version directory (stop the node first:
+# on Windows a junction under a running image cannot be replaced).
+ln -sfn &quot;$(dirname $(readlink -f ~/.gpn/node/update/current))&quot; /tmp/prev
+rm ~/.gpn/node/update/current
+ln -s &quot;$(cat ~/.gpn/node/update/current.previous)&quot; ~/.gpn/node/update/current
+
+# make sure it stays: pin the version until the fix ships
+#   auto_update = false   (~/.gpn/node.toml)
+
+systemctl --user start gpn-node
+~/.gpn/node/update/current/gpn_node --version     # the old version, again
+</code></pre>
+<p>Windows (PowerShell, <strong>not</strong> <code>ln</code>):</p>
+<pre><code class="language-powershell">Stop-Service gpn-node
+Remove-Item C:\gpn\data\update\current            # removes the junction only
+New-Item -ItemType Junction -Path C:\gpn\data\update\current `
+         -Target (Get-Content C:\gpn\data\update\current.previous)
+Start-Service gpn-node
+</code></pre>
+<p>Practical notes:</p>
+<ul>
+<li>The rollback target is <strong>one step deep</strong> — <code>current.previous</code> names the build
+  that was live before the last switch. Older version directories are pruned
+  after a successful switch (current + previous are kept, ~660 MB total).</li>
+<li>Each version directory is a <em>complete</em> tree, so the supervisor and every child
+  it spawns always come from the same version. There is no "half-rolled-back"
+  state.</li>
+<li>If a release was bad, GPN publishes a new <code>releases.json</code> with a fixed
+  <code>version</code> (and leaves <code>min_version</code> alone) — auto-updaters recover on their
+  next check, which is why rollback is a stopgap rather than a strategy.</li>
+<li>Rolling back below <code>min_version</code> puts the node in standby (sync-only). That is
+  intentional: roll back to a version that is still supported, or accept
+  sync-only until the fix ships.</li>
+<li>A <strong>single-layout</strong> install (the pre-bundle shape, or a manifest that points at
+  a lone binary) still keeps <code>&lt;gpn_node&gt;.bak</code> next to the binary: <code>mv</code> it back.</li>
+</ul>
+<h3 id="-check-updates"><code>--check-updates</code></h3>
+<p>Read-only. Fetches the manifest, verifies the signature, applies the cutoff logic
+and prints the verdict — no download, no install, no children started:</p>
+<pre><code class="language-bash">$ gpn_node --check-updates
+  updates: auto=off (manual) every 6h restart_to_apply=true manifest=https://gpncoin.ai/releases.json
+  update: manifest verified (https://gpncoin.ai/releases.json): latest=0.2.0 min=0.1.5
+
+  result: this node (0.1.0) is supported — it would mine
+</code></pre>
+<p>This is the first thing to run when a node stops mining unexpectedly: it
+distinguishes "below the cutoff" from "no peers", "no ollama", or a stuck miner.</p>
+<h3 id="if-an-update-fails">If an update fails</h3>
+<table>
+<thead>
+<tr>
+<th>Symptom</th>
+<th>Meaning</th>
+<th>Action</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>manifest signature does NOT verify against the GPN release key</code></td>
+<td>Tampered file, or a key rotation shipped without a node update</td>
+<td>Do <strong>not</strong> bypass. Report it. The node stays on its current build.</td>
+</tr>
+<tr>
+<td><code>manifest is signed by key …, but this node only trusts …</code></td>
+<td>Key rotated</td>
+<td>Upgrade by hand once, then auto-update resumes</td>
+</tr>
+<tr>
+<td><code>downloaded file hash … does not match</code></td>
+<td>Truncated/corrupted download, or a mismatched artifact</td>
+<td>Transient — it retries next cycle. Persistent → the published artifact and manifest disagree; tell GPN.</td>
+</tr>
+<tr>
+<td><code>staged … could not be swapped in while running</code></td>
+<td>Windows locks a running <code>.exe</code></td>
+<td>Normal: applied at the next service start</td>
+</tr>
+<tr>
+<td><code>staged update REJECTED at swap time</code></td>
+<td>The staged file changed on disk between download and swap</td>
+<td>Discarded; the old binary keeps running</td>
+</tr>
+<tr>
+<td><code>release manifest not published</code> (HTTP 503)</td>
+<td>No release published yet</td>
+<td>Nothing to do</td>
+</tr>
+</tbody>
+</table>
+<hr />
+<h2 id="9-reference">9. Reference</h2>
+<h3 id="env-vars">Env vars</h3>
+<table>
+<thead>
+<tr>
+<th>Var</th>
+<th>Default</th>
+<th>Meaning</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>GPN_AUTO_UPDATE</code></td>
+<td><code>1</code></td>
+<td><strong>on by default</strong>; <code>0</code>/<code>false</code>/<code>no</code>/<code>off</code> = opt <strong>out</strong> (manual updates)</td>
+</tr>
+<tr>
+<td><code>GPN_UPDATE_URL</code></td>
+<td><code>https://gpncoin.ai/releases.json</code></td>
+<td>manifest URL</td>
+</tr>
+<tr>
+<td><code>GPN_UPDATE_CHECK_HOURS</code></td>
+<td><code>6</code></td>
+<td>interval, clamped to 1–168 h</td>
+</tr>
+<tr>
+<td><code>GPN_UPDATE_RESTART</code></td>
+<td><code>1</code></td>
+<td><code>0</code> = stage now, apply at the next start</td>
+</tr>
+<tr>
+<td><code>GPN_UPDATE_CHECK</code></td>
+<td><code>1</code></td>
+<td><code>0</code> = never fetch the manifest (air-gapped)</td>
+</tr>
+<tr>
+<td><code>GPN_MIN_VERSION_ENFORCE</code></td>
+<td><code>1</code></td>
+<td><code>0</code> = mine even when below <code>min_version</code> (unsupported)</td>
+</tr>
+<tr>
+<td><code>GPN_UPDATE_DIR</code></td>
+<td><code>$GPN_PREFIX/update</code>, else <code>~/.gpn/update</code></td>
+<td><code>gpn_update</code>: where <code>versions/</code>, <code>current</code>, <code>current.previous</code> live</td>
+</tr>
+<tr>
+<td><code>GPN_UPDATE_TARGET_DIR</code></td>
+<td><code>~/.local/bin</code></td>
+<td><code>gpn_update</code>: install dir whose <code>gpn*</code> binaries are replaced</td>
+</tr>
+<tr>
+<td><code>GPN_UPDATE_RESTART_CMD</code></td>
+<td><em>(unset)</em></td>
+<td><code>gpn_update</code>: run after a successful swap, e.g. <code>systemctl --user restart gpn-fleet</code>. Unset = print, never restart</td>
+</tr>
+</tbody>
+</table>
+<p>Config-file equivalents (<code>~/.gpn/node.toml</code>): <code>auto_update</code>, <code>update_url</code>,
+<code>update_check_hours</code>, <code>update_restart</code>, <code>update_check</code>, <code>min_version_enforce</code>.</p>
+<h3 id="files">Files</h3>
+<table>
+<thead>
+<tr>
+<th>Path</th>
+<th>Contents</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>&lt;base&gt;/update/pending-update.json</code></td>
+<td>the staged marker: version, sha256, size, layout, version dir, per-file hashes</td>
+</tr>
+<tr>
+<td><code>&lt;base&gt;/update/update-state.json</code></td>
+<td>last verified <code>version</code>/<code>min_version</code>, last check time (drives the offline cutoff)</td>
+</tr>
+<tr>
+<td><code>&lt;base&gt;/update/versions/&lt;v&gt;/</code></td>
+<td>one <strong>complete</strong> release tree per installed version</td>
+</tr>
+<tr>
+<td><code>&lt;base&gt;/update/current</code></td>
+<td>symlink → the live <code>versions/&lt;v&gt;</code> (a junction on Windows)</td>
+</tr>
+<tr>
+<td><code>&lt;base&gt;/update/current.previous</code></td>
+<td>the rollback target (<code>versions/&lt;old&gt;</code>)</td>
+</tr>
+<tr>
+<td><code>&lt;base&gt;/update/.&lt;v&gt;.tmp-&lt;pid&gt;/</code></td>
+<td>extraction in progress; never visible as an install</td>
+</tr>
+<tr>
+<td><code>&lt;bin&gt;/gpn_node.new</code></td>
+<td>single-layout staging (only between staging and swap)</td>
+</tr>
+<tr>
+<td><code>&lt;bin&gt;/gpn_node.bak</code></td>
+<td>single-layout rollback copy of the previous binary</td>
+</tr>
+</tbody>
+</table>
+<p><code>gpn_update</code> uses <code>GPN_UPDATE_DIR</code> (default <code>~/.gpn/update</code>) as <code>&lt;base&gt;</code> above;
+the supervisor uses its node base path (<code>~/.gpn/node/update</code>). Both layouts are
+the same on disk.</p>
+<h3 id="code">Code</h3>
+<table>
+<thead>
+<tr>
+<th>Path</th>
+<th>Role</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>gpn-agent/src/update.rs</code></td>
+<td>manifest parse + signature verify, version compare, cutoff decision, <strong>bundle extraction + stamp verification + versioned staging + atomic <code>current</code> switch + rollback</strong>, cached state, the embedded public key</td>
+</tr>
+<tr>
+<td><code>gpn-agent/build.rs</code></td>
+<td>injects <code>GPN_RUNTIME_SPEC_VERSION</code>, <code>GPN_GIT_SHA</code> and the <code>GPN_BUILD_ID</code> stamp</td>
+</tr>
+<tr>
+<td><code>gpn-agent/src/firstrun.rs</code></td>
+<td><code>version_line()</code> → <code>gpn_node &lt;ver&gt; (spec &lt;n&gt;, &lt;sha&gt;)</code></td>
+</tr>
+<tr>
+<td><code>scripts/bump-version.py</code></td>
+<td>the only writer of the version (+ <code>CHANGELOG.md</code> stub)</td>
+</tr>
+<tr>
+<td><code>CHANGELOG.md</code></td>
+<td>one heading per released version, newest first</td>
+</tr>
+<tr>
+<td><code>gpn-agent/src/bin/gpn_node.rs</code></td>
+<td>opt-in policy, startup check, updater thread, restart, <code>--setup</code> question</td>
+</tr>
+<tr>
+<td><code>gpn-agent/src/bin/gpn_update.rs</code></td>
+<td>standalone updater for every other deployment mode (<code>--check</code>/<code>--apply</code>, exit 3/2/1, atomic per-file install, restart hook)</td>
+</tr>
+<tr>
+<td><code>gpn-node/node/src/service.rs</code></td>
+<td><code>GPN_STANDBY</code> → no proposer, no miner</td>
+</tr>
+<tr>
+<td><code>scripts/gen-release-manifest.py</code></td>
+<td>build + sign + verify the manifest (single binaries <strong>and</strong> bundles; digests read from the GitHub API, never typed)</td>
+</tr>
+<tr>
+<td><code>scripts/gpn-release-key.sh</code></td>
+<td>create/inspect the release key</td>
+</tr>
+<tr>
+<td><code>worker/worker.js</code></td>
+<td><code>GET /releases.json</code> (headers, 503 when unpublished)</td>
+</tr>
+<tr>
+<td><code>docs/design/design-min-node-version.md</code></td>
+<td>the staged on-chain cutoff proposal</td>
+</tr>
+</tbody>
+</table>
+    </article>
+    <p class="doc-updated small muted">Last generated 2026-11-24 from the project documentation set.</p>
+  </div>
+</main>
+
+<footer class="site-footer">
+  <div class="wrap">
+    <div class="foot-grid">
+      <div><a class="brand" href=".." style="margin-bottom:10px"><span class="dot" aria-hidden="true">G</span> <span>GPN</span></a><p class="muted" style="max-width:320px">A GPU-native network for mining and AI compute. <em>Get paid for the GPU time you're wasting.</em></p></div>
+      <div><h4>Product</h4><a href="../download">Download</a><a href="../deploy">Deploy</a><a href="../ai">Access the AI</a><a href="../access-points">Access Points</a><a href="../nodes">Live nodes</a></div>
+      <div><h4>Learn</h4><a href="./">Docs</a><a href="whitepaper">Whitepaper</a><a href="one-pager">One-pager</a><a href="technical-overview">Technical overview</a></div>
+      <div><h4>Project</h4><a href="https://github.com/crewlyllc/gpn_coin" rel="noopener">Source on GitHub</a><a href="run-a-node">Run a node</a><a href="wallet">Wallet</a><a href="../buy">Token &amp; purchasing</a><a href="..#join">Join the team</a></div>
+    </div>
+    <div class="foot-bottom">
+      <p class="small muted">© <span data-year>2026</span> GPN · Public testnet. Not investment advice.</p>
+      <p class="small muted">Testnet only — tokens here have no monetary value.</p>
+    </div>
+  </div>
+</footer>
+
+<script src="../assets/app.js"></script>
+</body>
+</html>
