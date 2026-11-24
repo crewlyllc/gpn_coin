@@ -1,3 +1,22 @@
+## 10:56 PT 0.3.74 §4 CI-conclusion + §5 SSH-evidence boxes ticked [no triage]
+
+- **A0 CI (conclusion only, no waiting)**: docs HEAD `350cfae` (full sha `350cfae6f422e14a…`) ⇒
+  `total_count 0` (paths-ignore intact); code SHA `6c23d0f` ⇒ run **45447907558** `CI`
+  `completed / success` (17:22:48Z→18:48:14Z). `release-linux-selfhosted` run **45457954423**
+  `success` (18:32:41Z), `linux-latest` asset 348,703,626 B sha256 `877212c…`.
+- **§4 box 4 (run for this SHA) — TICKED** with the two full-sha queries above (docs ⇒ 0 runs,
+  code ⇒ success). No short-sha query anywhere.
+- **§5 box 1 (per-item Windows evidence over SSH) — TICKED**: row 259 is the only Windows item and
+  its proof came from box 1 over SSH (`all 20 checks passed` under PS 5.1; live path
+  `process: gpn_node pid 53112`, `task: state=Running principal=Interactive last=267009`,
+  `confirm: started=True witness=process`). No per-iteration dispatches.
+- **Windows release build still in flight**: run **45461486516** on `build/6d5666acf6e7` was
+  `in_progress` at 18:57Z (started 18:37Z, 20 min). Not waited on — next run reads the handle and
+  ticks §5/§6 on its conclusion, or reads the failing step's log.
+- **Next**: §5 windows asset + same-SHA box, then §5 attestation mechanism (check repo visibility
+  first), §6 string scan + `--version`, §7 release-cut.
+- **No [TRIAGE]**: nothing needed a decision.
+
 ## 10:37 PT 0.3.74 §5 — linux artifact PUBLISHED (run 45457954423 success); windows build dispatched (45461486516) [no triage]
 
 - **A0 CI**: docs HEAD `6d5666a` ⇒ `total_count 0` (paths-ignore intact). Code SHA `6c23d0f` ⇒ run
