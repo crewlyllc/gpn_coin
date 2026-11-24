@@ -1,3 +1,12 @@
+## 17:47 PT 0.3.72 §3b box 251 ticked — re-registration rate limit, tests re-run green
+
+- **A0**: `GET /commits/main` ⇒ `9659629bd7c13719327ccdc46ed9aa94be0dee1e` (docs-only tick of box 250). `GET /actions/runs?head_sha=9659629…` ⇒ `total_count: 0` — expected, `ci.yml` ignores `**/*.md`/`docs/**`. The only live run is **45298958279** (`CI`, created 00:39Z) on `06bbc26`, `status: in_progress` — noted, not waited on.
+- **Box worked**: §3b item **251** (first unticked box) — registration free and repeatable via a 24 h per-fingerprint cooldown instead of the permanent `FreeEntryGpus` mark.
+- **Evidence (produced this run)**: `cargo test --release -p pallet-gpu-attestation --lib` in `gpn-node/` ⇒ `65 passed; 0 failed; 0 ignored`, including `test_previously_used_fingerprint_re_registers_after_cooldown`, `test_same_fingerprint_within_cooldown_refused_named`, `test_never_seen_fingerprint_still_pays_proof_of_work` — all `ok`. Runtime `pub const FreeEntryCooldown: BlockNumber = 5_760;` (`gpn-node/runtime/src/lib.rs:574`, bound at `:627`). Client side maps error code 6 `FreeEntryGpuRateLimited` → `entry-free-gpu-rate-limited` (`gpn-agent/src/onboard.rs:196,211`). Code is `FreeEntryGpuLastEntry` (history-only `FreeEntryGpus`), `gpu-attestation/src/lib.rs:435-443,1071-1122`.
+- **Explicitly not claimed**: live chain re-registration by a wiped-then-reinstalled node — that is §10's box and stays open.
+- **Next run**: §3b item 252, then 253, 254, then §3 (bump `--check`, CHANGELOG, seed parity).
+- No blocker, no [TRIAGE].
+
 ## 17:20 PT 0.3.72 §3b box 250 ticked — hourly cadence observed on a real supervisor
 
 - **A0**: `GET /commits/main` ⇒ `b80e8652370c87d16279a5db154d29d4ed375ee0` (= local HEAD). `GET /actions/runs?head_sha=b80e865…` ⇒ run **45301441083** (`CI`) `total_count: 1`, `status: pending`, `conclusion: null` — noted, not waited on (the box worked here is code/test proof, not a build/publish step). Nothing red.
