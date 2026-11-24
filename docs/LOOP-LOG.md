@@ -1,3 +1,29 @@
+## 04:52 PT 0.3.73 — §7 cut refused on the build sha's red CI; both legs REBUILT from `d5d98b96` (dispatched, handles written, run ended)
+
+- **A0**: `head_sha=0bee223157057d4b212698bcb6a8a13cc7accf44` (origin/main HEAD) ⇒ `total_count: 0`
+  — docs-only commit, correct, nothing to read. `45381828261` (sha `69bf900`, earlier gate attempt)
+  is still `in_progress`, and its `fmt + clippy`, `secret-scan`, `Two-node GPU testnet` and linux
+  jobs are green; the audit job's `failure` is `continue-on-error` (row 260). Not waited on.
+- **Box worked — §7 box 2 (`release-cut.sh --timeout 300`), and it refused for a reason the previous
+  run mis-stated.** `--dry-run` got through detect/download/version (built assets = linux
+  `c773b2d5…` 347,036,431 B, windows `85267a45…` 253,204,299 B, both sha256-verified) and then:
+  `ABORT: CI for e33e2c8 is 'completed:failure' -- refusing to sign an unverified build`.
+  The failing line, quoted from run `45360094725` job `fmt + clippy` **step 10
+  `rustfmt (check, agent)`** — the first job of that run, which is why the whole run concluded
+  `failure`; `5366482` fixed it, but a re-run cannot green a tree that is itself unformatted.
+  `release-cut.sh:require_green_ci` checks the **bundle stamp sha**, not "any green descendant" —
+  so the 04:35 note's premise was wrong in exactly one word: it is enough for the *code*, not for
+  the *gate*. Corrected in the box.
+- **Fix in flight, not parked:** tag `build/d5d98b96` pushed (commit `d5d98b96`, CI `completed:success`
+  run `45375310398`, contains `5366482`) and both release legs dispatched from it —
+  `45397558122` Linux binaries (in_progress 12:51Z), `45397562142` Windows binaries (queued 12:51Z,
+  Windows runner `busy=true` = single-slot contention). `git diff e33e2c8 d5d98b96` touches only
+  `ci.yml` (+8, docs clean-URL guard wiring), the two `gpn-agent/examples/*.rs` probes and docs —
+  no shipped crate source, so the rebuilt bytes carry the same 0.3.73 code.
+- **Ended the run on the dispatches** (the dispatch-and-end rule). Next run: poll `45397558122` and
+  `45397562142` once; both green ⇒ re-run `release-cut.sh --timeout 300`.
+- No box ticked (the cut box carries the handle, unticked). No [TRIAGE] item this run.
+
 ## 04:35 PT 0.3.73 — no box worked: §7 cut is gated on the CI conclusion; audit job's 38 RustSec hits filed as row 260
 
 - **A0**: origin/main HEAD `23a33078e794f7ac00f4fbef8604ed630ee4dd27` ⇒ `total_count: 0` — docs-only
