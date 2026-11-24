@@ -1,3 +1,17 @@
+## 09:38 PT 0.3.74 box 5 — §3 seed-parity box ticked (no seed change; all five sources carry the identical bootnode string) [no triage]
+
+- **A0**: CI run **45447907558** for `6c23d0f` (row 261, real code) is **in_progress** at 17:22→17:27Z;
+  observed once, not waited on. No failure conclusion to act on; continued with a box that needs no CI.
+- **§3 seed-parity box — TICKED**: no `seeds.json` in-repo (generated into the published bundle).
+  `142.129.54.88` + `/dns4/gpn-testnet.duckdns.org` bootnode with peer id `12D3KooWAFtUNx…` appear
+  identically in `network.json` (2), `install.sh:52`, `install.ps1:169`, `scripts/run-windows.cmd:165`,
+  `.github/workflows/release-windows.yml:66`, `scripts/gpn-autostart.sh`.
+  `bash scripts/tests/test-launcher-identity.sh` ⇒ `RESULT: PASS` (incl. negative control).
+- Commit `a83a9e0b` pushed (docs-only, no CI run expected).
+- **Next**: §4 `CI is observed` / SHA-run boxes wait on run 45447907558's conclusion; then §5 build
+  (dispatch + end run), §6/§7 after green.
+- **No [TRIAGE]**: nothing needed a decision.
+
 ## 09:45 PT 0.3.74 box 4/4 — row 261 DONE: release-cut names the real lock state [no triage]
 
 - **A0 CI**: `origin/main` HEAD `a84f317` (docs-only loop-log commit) ⇒ `GET /actions/runs?head_sha=a84f317…`
