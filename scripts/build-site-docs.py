@@ -5,11 +5,17 @@ The site itself has NO build step at serve time: this script is run by a human
 (or CI) when docs change, and the generated HTML is committed. Cloudflare Pages
 serves website/ as-is.
 
-Usage:  /usr/bin/python3 scripts/build-site-docs.py
+Usage:  /usr/bin/python3 scripts/build-site-docs.py [--date YYYY-MM-DD]
+
+The generated HTML is committed and served with clean URLs (/docs/<slug>), so the
+templates here must never emit `.html` — see commit 6980e71. `--date` pins the
+"Last generated" stamp so a regeneration can be proven to be a no-op apart from
+intended content changes.
 """
 import datetime
 import pathlib
 import re
+import sys
 
 import markdown
 
@@ -34,7 +40,7 @@ PAGES = {
         "GPN whitepaper v0.96 (draft): a GPU-native network for mining and AI compute.",
         "Whitepaper v0.96 is a draft. A node is always miner + AI provider: mining is the "
         "default and the GPU yields to an assigned job. See "
-        "<a href='technical-overview.html'>Technical overview</a> for the shipped model.",
+        "<a href='technical-overview'>Technical overview</a> for the shipped model.",
     ),
     "technical-overview": (
         "GPN-TECHNICAL-OVERVIEW.md",
@@ -86,22 +92,29 @@ PAGES = {
     ),
 }
 
+# The site serves clean URLs: /docs/<slug>, /download, /ai, … (see commit 6980e71,
+# "seo: 301 the .html URLs, clean the sitemap and internal links"). Every URL this
+# generator emits MUST be clean — emitting .html silently reverts that SEO fix.
 # markdown source path -> generated slug (for links that don't map 1:1)
 LINK_MAP = {
-    "design/design-assume-valid-checkpoint.md": "design-assume-valid-checkpoint.html",
+    "design/design-assume-valid-checkpoint.md": "design-assume-valid-checkpoint",
 }
 
+# markdown source file name -> published slug, so intra-docs .md links stay clean
+SRC_TO_SLUG = {src: slug for slug, (src, _t, _d, _n) in PAGES.items()}
+SRC_TO_SLUG.update(LINK_MAP)
+
 NAV = [
-    ("../index.html", "Home", "index"),
-    ("../download.html", "Download", "download"),
-    ("../deploy.html", "Deploy", "deploy"),
-    ("../ai.html", "AI", "ai"),
-    ("../chat.html", "Chat", "chat"),
-    ("../access-points.html", "Access Points", "access-points"),
-    ("../nodes.html", "Nodes", "nodes"),
-    ("../buy.html", "Buy GPN", "buy"),
-    ("index.html", "Docs", "docs"),
-    ("../index.html#join", "Join us", "join"),
+    ("..", "Home", "index"),
+    ("../download", "Download", "download"),
+    ("../deploy", "Deploy", "deploy"),
+    ("../ai", "AI", "ai"),
+    ("../chat", "Chat", "chat"),
+    ("../access-points", "Access Points", "access-points"),
+    ("../nodes", "Nodes", "nodes"),
+    ("../buy", "Buy GPN", "buy"),
+    ("./", "Docs", "docs"),
+    ("..#join", "Join us", "join"),
 ]
 
 HEAD = """<!DOCTYPE html>
@@ -112,10 +125,10 @@ HEAD = """<!DOCTYPE html>
 <title>{title} — GPN docs</title>
 <meta name="description" content="{desc}" />
 <meta name="theme-color" content="#07090f" />
-<link rel="canonical" href="{site}/docs/{slug}.html" />
+<link rel="canonical" href="{url}" />
 <meta property="og:site_name" content="GPN" />
 <meta property="og:type" content="article" />
-<meta property="og:url" content="{site}/docs/{slug}.html" />
+<meta property="og:url" content="{url}" />
 <meta property="og:title" content="{title} — GPN docs" />
 <meta property="og:description" content="{desc}" />
 <meta name="twitter:card" content="summary" />
@@ -130,7 +143,7 @@ HEAD = """<!DOCTYPE html>
 
 <header class="site-header">
   <div class="wrap nav">
-    <a class="brand" href="../index.html" aria-label="GPN home"><span class="dot" aria-hidden="true">G</span><span>GPN<br><small>GPU-NATIVE NETWORK</small></span></a>
+    <a class="brand" href=".." aria-label="GPN home"><span class="dot" aria-hidden="true">G</span><span>GPN<br><small>GPU-NATIVE NETWORK</small></span></a>
     <button class="nav-toggle" id="nav-toggle" aria-expanded="false" aria-controls="nav-links" aria-label="Toggle navigation">☰</button>
     <nav class="nav-links" id="nav-links" aria-label="Primary">
       {nav}
@@ -144,10 +157,10 @@ FOOT = """
 <footer class="site-footer">
   <div class="wrap">
     <div class="foot-grid">
-      <div><a class="brand" href="../index.html" style="margin-bottom:10px"><span class="dot" aria-hidden="true">G</span> <span>GPN</span></a><p class="muted" style="max-width:320px">A GPU-native network for mining and AI compute. <em>Get paid for the GPU time you're wasting.</em></p></div>
-      <div><h4>Product</h4><a href="../download.html">Download</a><a href="../deploy.html">Deploy</a><a href="../ai.html">Access the AI</a><a href="../access-points.html">Access Points</a><a href="../nodes.html">Live nodes</a></div>
-      <div><h4>Learn</h4><a href="index.html">Docs</a><a href="whitepaper.html">Whitepaper</a><a href="one-pager.html">One-pager</a><a href="technical-overview.html">Technical overview</a></div>
-      <div><h4>Project</h4><a href="https://github.com/crewlyllc/gpn_coin" rel="noopener">Source on GitHub</a><a href="run-a-node.html">Run a node</a><a href="wallet.html">Wallet</a><a href="../buy.html">Token &amp; purchasing</a><a href="../index.html#join">Join the team</a></div>
+      <div><a class="brand" href=".." style="margin-bottom:10px"><span class="dot" aria-hidden="true">G</span> <span>GPN</span></a><p class="muted" style="max-width:320px">A GPU-native network for mining and AI compute. <em>Get paid for the GPU time you're wasting.</em></p></div>
+      <div><h4>Product</h4><a href="../download">Download</a><a href="../deploy">Deploy</a><a href="../ai">Access the AI</a><a href="../access-points">Access Points</a><a href="../nodes">Live nodes</a></div>
+      <div><h4>Learn</h4><a href="./">Docs</a><a href="whitepaper">Whitepaper</a><a href="one-pager">One-pager</a><a href="technical-overview">Technical overview</a></div>
+      <div><h4>Project</h4><a href="https://github.com/crewlyllc/gpn_coin" rel="noopener">Source on GitHub</a><a href="run-a-node">Run a node</a><a href="wallet">Wallet</a><a href="../buy">Token &amp; purchasing</a><a href="..#join">Join the team</a></div>
     </div>
     <div class="foot-bottom">
       <p class="small muted">© <span data-year>2026</span> GPN · Public testnet. Not investment advice.</p>
@@ -204,15 +217,23 @@ def md_to_html(text):
 
 
 def rewrite_links(html):
-    """Point intra-docs .md links at their generated .html pages."""
+    """Point intra-docs .md links at their clean generated URLs (/docs is the base)."""
     def repl(m):
         target = m.group(1)
         if re.match(r"^[a-z]+:", target) or target.startswith("#"):
             return m.group(0)
-        if target in LINK_MAP:
-            return f'href="{LINK_MAP[target]}"'
-        if target.endswith(".md") or ".md#" in target:
-            target = target.replace(".md#", ".html#").replace(".md", ".html")
+        path, sep, frag = target.partition("#")
+        if path:
+            if path in SRC_TO_SLUG:
+                path = SRC_TO_SLUG[path]
+            elif path.endswith(".md"):
+                path = path[:-3]
+            if path.endswith(".html"):
+                # clean URLs: drop the extension the 301 exists to hide
+                path = path[:-5]
+                if path in ("index", "../index"):
+                    path = path[: -len("index")] or "./"
+            target = path + sep + frag
         return f'href="{target}"'
     return re.sub(r'href="([^"]+)"', repl, html)
 
@@ -239,11 +260,14 @@ def write_page(slug, src, title, desc, notice):
     if notice:
         notice_html = f'<div class="doc-notice" role="note">{notice}</div>\n'
 
-    html = HEAD.format(title=title, desc=desc, site=SITE, slug=slug, nav=nav_html("docs"))
+    html = HEAD.format(
+        title=title, desc=desc, site=SITE, slug=slug,
+        url=f"{SITE}/docs/{slug}", nav=nav_html("docs"),
+    )
     html += f"""
 <main id="main" class="doc-main">
   <div class="wrap doc-wrap">
-    <nav class="crumbs" aria-label="Breadcrumb"><a href="../index.html">Home</a> / <a href="index.html">Docs</a> / <span>{title}</span></nav>
+    <nav class="crumbs" aria-label="Breadcrumb"><a href="..">Home</a> / <a href="./">Docs</a> / <span>{title}</span></nav>
     {notice_html}<article class="prose">
 <h1>{page_title}</h1>
 {body}
@@ -273,7 +297,7 @@ def write_index():
     for slug, (label, blurb) in meta.items():
         _src, _title, _desc, _notice = PAGES[slug]
         cards.append(
-            f'<a class="doc-card" href="{slug}.html"><b>{label}</b><span>{blurb}</span></a>'
+            f'<a class="doc-card" href="{slug}"><b>{label}</b><span>{blurb}</span></a>'
         )
 
     html = HEAD.format(
@@ -281,9 +305,9 @@ def write_index():
         desc="GPN documentation: run a node, downloads, technical overview, whitepaper, wallet and peer discovery.",
         site=SITE,
         slug="index",
+        url=f"{SITE}/docs/",
         nav=nav_html("docs"),
     )
-    html = html.replace(f"{SITE}/docs/index.html", f"{SITE}/docs/")
     html += f"""
 <main id="main" class="doc-main">
   <div class="wrap doc-wrap">
@@ -302,10 +326,10 @@ def write_index():
 
     <h2>Quick links</h2>
     <ul>
-      <li><a href="run-a-node.html#make-your-node-dialable">Make your node dialable</a> — port-forwarding, UPnP, CGNAT.</li>
-      <li><a href="../download.html">Download &amp; install</a> — one-command installers and release artifacts.</li>
-      <li><a href="../deploy.html">Deploy</a> — node, access point, Windows path, config and ports.</li>
-      <li><a href="../ai.html">Use the AI marketplace</a> — OpenAI-compatible chat and the job API.</li>
+      <li><a href="run-a-node#make-your-node-dialable">Make your node dialable</a> — port-forwarding, UPnP, CGNAT.</li>
+      <li><a href="../download">Download &amp; install</a> — one-command installers and release artifacts.</li>
+      <li><a href="../deploy">Deploy</a> — node, access point, Windows path, config and ports.</li>
+      <li><a href="../ai">Use the AI marketplace</a> — OpenAI-compatible chat and the job API.</li>
     </ul>
 
     <p class="doc-updated small muted">Last generated {TODAY}.</p>
@@ -318,6 +342,14 @@ def write_index():
 
 
 def main():
+    global TODAY
+    args = sys.argv[1:]
+    for i, arg in enumerate(args):
+        if arg.startswith("--date="):
+            TODAY = arg.split("=", 1)[1]
+        elif arg == "--date" and i + 1 < len(args):
+            TODAY = args[i + 1]
+    datetime.date.fromisoformat(TODAY)  # fail loudly on a malformed stamp
     OUT.mkdir(parents=True, exist_ok=True)
     for slug, (src, title, desc, notice) in PAGES.items():
         write_page(slug, src, title, desc, notice)

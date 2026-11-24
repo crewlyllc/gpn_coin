@@ -1,6 +1,6 @@
 # GPN — Technical Overview
 
-*Last updated: 2026-11-19 · See `GPN-WHITEPAPER.md` for the full paper; `GPN-MASTER-REFERENCE.md` for the single-doc reference. Verified against chain spec 52 / release 0.3.64 — checked 2026-11-20 at block 337,469.*
+*Last updated: 2026-11-20 · See `GPN-WHITEPAPER.md` for the full paper; `GPN-MASTER-REFERENCE.md` for the single-doc reference. Verified against chain spec 52 / release 0.3.65 — checked 2026-11-21 at block 340,878.*
 
 ## The model
 A GPN node is **one entity** — one GPU, one identity/wallet — and it is **always miner + AI provider**:
@@ -42,6 +42,7 @@ designed but **not wired** to the node's internal miner.
 ## Public AI API (LIVE)
 - **`https://gpncoin.ai/api/v1/*`** — an OpenAI-compatible surface over **HTTPS** via a **Cloudflare Worker** that proxies to the access point on a raw socket (the AP speaks plain HTTP on :8092, which a browser page cannot call). Bearer-token auth is injected by the Worker.
 - **Implemented today (exact public paths):** under `/api/v1` — `GET /models`, `POST /chat/completions`, `POST /images/generations`, `GET /images/generations/{id}` (32-hex job id), `GET /images/{id}` (PNG), `POST /finetunes`, `GET /finetunes/{id}`, `GET /finetunes/{id}/artifact`. Outside that prefix — `GET /api/health`, `/api/mode`, `/api/providers` (live provider registry), `/api/jobs/{id}` (on-chain job state) and `/api/network` (node directory). Note the split: provider and job lookup are served at **`/api/providers`** and **`/api/jobs/{id}`**, *not* at `/api/v1/providers` or `/api/v1/jobs/{id}` (those 404). There is **no `/api/pricing`**; the rate card is the access point's internal `GET /pricing` on :8092 and is not proxied publicly.
+- **Settlement is depth, not finality.** This chain has no finality gadget, so `chain_getFinalizedHead` returns genesis; use depth. `GET /api/finality` answers `{"mode":"depth","confirmations":288,"settlement_time_human":"≈72 min at 15 s","finalized_head":null}`, and `/api/network` carries the same fields. A block is settled at 288 confirmations; anything shallower can still be reorged.
 - **Rate-limited** at the edge: chat **12 requests / 10 min / IP**, reads 120/min, with a typed `gpn_rate_limited` error.
 - **Testnet inference is free.** Latency depends on the payment mode: `channel` (the default) settles against an off-chain escrow channel and measures **p50 ≈ 70 ms** AP-local; `settle` pays the per-request on-chain cycle and is dominated by the **create-inclusion wait** (p50 ≈ 38 s, p95 ≈ 90 s at the current cadence), not by inference (~1 s). See `docs/offchain-escrow-channels.md`.
 
@@ -129,4 +130,4 @@ Permissionless, redundant **access points**; **Bitcoin-style peer discovery** (p
 | **Governance hardening (spec 42)** | **APPLIED (testnet)** | 5-member council / 3-of-5 / 10-block testnet timelock; no cancel or referendum track; bootstrap, not a security guarantee |
 
 ---
-*Status (2026-11-20, spec 52 / 0.3.61):* live on a public testnet — chain, LLM/image/fine-tune marketplace, payment channels, shielded spends, on-chain discovery, public HTTPS API, node GUI + Idle, signed auto-update. *Next:* result verification, public CRS ceremony, mainnet (3-day governance timelock), bridge.
+*Status (2026-11-20, spec 52 / 0.3.62):* live on a public testnet — chain, LLM/image/fine-tune marketplace, payment channels, shielded spends, on-chain discovery, public HTTPS API, node GUI + Idle, signed auto-update. *Next:* result verification, public CRS ceremony, mainnet (3-day governance timelock), bridge.

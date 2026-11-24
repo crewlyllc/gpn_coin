@@ -47,8 +47,8 @@
     <nav class="crumbs" aria-label="Breadcrumb"><a href="..">Home</a> / <a href="./">Docs</a> / <span>Fast sync</span></nav>
     <article class="prose">
 <h1>Fast node onboarding — snapshots, checkpoints, and why fast-sync won't help</h1>
-<p><em>Verified against: chain spec 52 / release 0.3.65 — checked 2026-11-21 at block 340,878.</em></p>
-<p><strong>Task:</strong> GPN-TASKS #23 · <strong>Status:</strong> snapshot tooling SHIPPED + live-verified; checkpoint DESIGNED (gated).</p>
+<p><em>Verified against: chain spec 52 / release 0.3.64 — checked 2026-11-20 at block 337,469.</em></p>
+<p><strong>Task:</strong> GPN-TASKS #23 · <strong>Status:</strong> snapshot tooling SHIPPED + live-verified; signed checkpoint v2 SHIPPED (§2b) — the <em>scheduled</em> daily check is not installed yet.</p>
 <p>A fresh GPN node re-verifies every block, including recomputing its <strong>Ethash seal</strong>
 (<code>hashimoto_light</code> on the light cache) for each imported block. So the time to
 reach the tip grows with chain length (~<strong>123k blocks</strong> at the time of writing,
@@ -163,6 +163,51 @@ also read RPC directly if one is reachable.</p>
 <p>Net: onboarding drops from <em>minutes-and-growing</em> (a full re-sync) to <em>seconds</em>
 (the copy + import + the last handful of blocks). For a slower box (e.g. the
 Windows provider) the win is larger, since a full sync there is network-bound.</p>
+<h2 id="2b-signed-checkpoint-how-a-node-knows-it-is-on-the-right-chain">2b. Signed checkpoint — how a node knows it is on the right chain</h2>
+<p><code>snapshot.json</code> <strong>v2</strong> carries <code>genesis</code> and <code>block_hash</code> <em>inside the signed
+canonical text</em> (v1 documents still verify forever; the version prefix is part of
+what is signed). <code>gpn_snapshot verify</code> already rejected forged or half-filled
+checkpoints; <code>gpn_snapshot checkpoint</code> is the half that compares them to <strong>this
+node</strong>:</p>
+<pre><code class="language-bash">gpn_snapshot checkpoint --meta snapshot.json          # read-only
+gpn_snapshot checkpoint --meta snapshot.json --stop-unit gpn-fleet
+</code></pre>
+<p>Exit codes — the contract a supervisor keys on:</p>
+<table>
+<thead>
+<tr>
+<th>exit</th>
+<th>meaning</th>
+<th>what to do</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>0</code></td>
+<td>our hash at the checkpoint height <strong>is</strong> the signed one, or we are not there yet, or the metadata is v1 (no claim)</td>
+<td>nothing</td>
+</tr>
+<tr>
+<td><code>12</code></td>
+<td><strong>wrong chain</strong> — our hash at that height is a different block (or the genesis differs)</td>
+<td>stop the node, re-sync from a trusted source; never reorg onto that fork</td>
+</tr>
+<tr>
+<td><code>1</code></td>
+<td>could not decide (RPC down, signature invalid, unreadable metadata)</td>
+<td>retry; this is <em>not</em> evidence of a fork</td>
+</tr>
+</tbody>
+</table>
+<p>Three-state by design: an unreadable RPC or a fresh node that has not reached
+the height is <strong>never</strong> reported as a fork. Only two matching hashes that differ
+are fatal. <code>--stop-unit</code> additionally runs <code>systemctl --user stop &lt;unit&gt;</code> (best
+effort) so a supervisor that does not watch the exit code still gets the node
+stopped.</p>
+<p><strong>Not installed yet:</strong> nothing schedules this daily, because the check is fatal
+by design and stopping a fleet on a fetched document needs an owner call. Until
+it is wired, run it by hand (or from your own timer) once a snapshot is
+published.</p>
 <h2 id="3-assume-valid-checkpoint-stretch-design-only-gated">3. Assume-valid checkpoint (stretch) — DESIGN only, gated</h2>
 <p>A Bitcoin <code>assumevalid</code>-style checkpoint would skip the expensive seal
 verification for blocks <em>before</em> a trusted block, while fully verifying from the
@@ -248,8 +293,68 @@ existing box keeps working; but a <em>fresh</em> archive import should target
 chain dir and let it re-sync from scratch
 (<code>Rename-Item "$BP\chains" "$BP\chains.old"</code> and restart) — slower, but with
 the new defaults it syncs all the way to the tip without stalling.</p>
+<hr />
+<h2 id="4-automatic-catch-up-the-20000-block-rule-2026-11-15">4. Automatic catch-up — the 20,000-block rule (2026-11-15)</h2>
+<p>On 2026-11-15 a brand-new peer sat at block <strong>69,295</strong> while the tip was about
+<strong>307,300</strong>. A node that far behind is not "catching up in a minute": at the
+measured ~250–300 blocks/s it is hours of Ethash re-verification that the weekly
+snapshot already did — and a node that crawls is also the node most likely to
+settle on another laggard (box 1 did exactly that at 13:00 that day).</p>
+<p>So the rule is now enforced in two places, both <strong>snapshot-first, fall back to
+peer sync</strong>:</p>
+<table>
+<thead>
+<tr>
+<th>where</th>
+<th>fresh install</th>
+<th>far behind an existing DB</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>install.sh</code> (Linux)</td>
+<td>imports the signed snapshot unless <code>--no-fast-sync</code> / <code>GPN_FAST_SYNC=0</code></td>
+<td>refuses to touch an existing DB (never corrupts a working install)</td>
+</tr>
+<tr>
+<td><code>install.ps1</code> (Windows)</td>
+<td><strong>added 2026-11-15</strong> — same flow, same opt-out (<code>--no-fast-sync</code>, <code>GPN_FAST_SYNC=0</code>)</td>
+<td>refuses to touch an existing DB</td>
+</tr>
+<tr>
+<td><code>gpn_fleet</code> / <code>gpn_node</code> self-heal</td>
+<td>—</td>
+<td>re-bootstraps at the next check (5 min cadence)</td>
+</tr>
+</tbody>
+</table>
+<p><strong>How far behind is "far behind":</strong> <code>SNAPSHOT_BEHIND_BLOCKS = 20_000</code>
+(<code>gpn_agent::selfheal</code>). A node more than 20,000 blocks behind the <em>signed</em>
+snapshot imports it; anything closer is left to normal peer sync (re-importing a
+~460 MiB archive to save a few thousand blocks is the worse trade). Override
+with <code>GPN_SNAPSHOT_CATCHUP_MIN_BLOCKS</code> (zero/unparseable → default). The same
+24 h one-recovery ledger a fork repair uses applies, so a failing catch-up
+cannot loop, and the lagging DB is set aside as <code>chains-behind-&lt;ts&gt;</code> (never
+deleted, and named differently from <code>chains-fork-&lt;ts&gt;</code> so an operator can tell
+the two apart).</p>
+<p><strong>An unreadable node is never wiped:</strong> a catch-up needs the node to <em>answer</em>
+with a height. RPC down, or a node not yet up, is <code>None</code> — not evidence of being
+behind — so nothing is touched.</p>
+<p>Every failure of the snapshot path is one log line, not an install failure:</p>
+<pre><code>fast sync unavailable (snapshot metadata not available at &lt;url&gt; (Connection refused)) — falling back to a normal full peer sync (slower, still correct).
+</code></pre>
+<h3 id="signed-anchors-are-handed-to-the-node">Signed anchors are handed to the node</h3>
+<p>The node binary carries no signer key, so it cannot verify <code>snapshot.json</code>.
+<code>gpn_fleet</code> can (it has the release pubkey and verifies the document every
+5 min), and after each successful verification it writes the checkpoints to
+<code>&lt;base-path&gt;/verified-anchors.json</code>. The node reads that file at startup and uses
+it for <strong>peer selection</strong>: a peer whose claimed tip contradicts an anchor, or
+whose tip is below our best and is not a block we hold, is logged once per state
+change and <strong>never used as a sync source</strong> (the link stays up so it can be served
+canonical blocks). Absent or unreadable anchors mean "unknown" for every peer —
+nothing is rejected on a guess.</p>
     </article>
-    <p class="doc-updated small muted">Last generated 2026-11-03 from the project documentation set.</p>
+    <p class="doc-updated small muted">Last generated 2026-11-23 from the project documentation set.</p>
   </div>
 </main>
 
