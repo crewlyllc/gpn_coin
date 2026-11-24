@@ -1,3 +1,36 @@
+## 06:10 PT 0.3.73 — Windows leg executing (step 18/23, packaging); slot is genuinely building, not stale; box 1 still runs 0.3.72 by design; nothing to tick
+
+- **A0**: `origin/main` HEAD `e80cc674fb05f60cc449d8971a49334feac0ce9f` (docs-only, the 05:52 log)
+  ⇒ `GET /actions/runs?head_sha=e80cc67…` `total_count: 0`, expected under `ci.yml` paths-ignore.
+  Local tree was 1 commit behind (`3eceeec`); `pull --ff-only` first, as the stale-tree rule requires.
+- **Polled handle `45397562142` (`d5d98b96`) once.** 06:08 PT: `in_progress`, `run_started_at`
+  12:51:23Z, **job started 13:44:08Z** (the 12:51→13:44 gap was queueing behind CI `45381828261`,
+  which finished 13:44:07Z). Steps 1-17 `success`: encoding guard, build agent, build node,
+  upload, ollama pre-flight, retire legacy provider, hidden launcher, **deploy binaries + restart
+  node to `C:\gpn\bin`**, verify installed launcher. **Step 18 `package release artifact (windows
+  zip)` `in_progress`** since ~14:0xZ; 19-23 (attestation check, attest, sign, provenance gate,
+  publish `windows-latest`) still pending. Build age 26 min ⇒ **not stale, not cancelled**.
+- **Windows slot confirmed busy on our run, not on something else** — runners API:
+  `DESKTOP-USBUADL online busy=true`, `openclawassist online busy=false`.
+- **SSH probe of box 1 (evidence for §9, no dispatch):** running process id 19852, start
+  06:08:10 PT (the workflow's restart), path `C:\gpn\data\update\current\gpn-node.exe`, and that
+  binary answers `gpn-node.exe 0.3.72`; `C:\gpn\bin\gpn-node.exe` (written 06:07:56, 71,312,896 B)
+  answers `0.3.73`. Mechanism, read not guessed: `C:\gpn\start-node.cmd:48-49` —
+  `set "GPN_BIN=C:\gpn\data\update\current"` / `if not exist "%GPN_BIN%\gpn_node.exe" set "GPN_BIN=C:\gpn\bin"`.
+  So the release workflow's deploy step writes `bin` while the launcher keeps preferring the
+  updater's versioned tree — the running node can only reach 0.3.73 through `gpn_update`, which is
+  exactly what §9 box 1 ("updates itself, no hand-copying") is meant to prove, and it cannot be
+  proven until `releases.json` serves 0.3.73. Not a defect; recorded so the next run does not read
+  "deploy failed" into it.
+- **No box ticked.** §7 box 2 (`release-cut.sh`) stays blocked on the Windows publish: mirroring
+  now would pair an `e33e2c8` windows asset with a `d5d98b96` linux asset. §7b/§8/§9/§10/§10b are all
+  downstream of the cut; §0b filing comes after §10; §0e box 1 and §3b row 256 remain
+  `AWAITING-OWNER` (item 256 in `docs/NEEDS-TRIAGE.md`, raised 00:3x, still unanswered).
+- **Next run**: poll `45397562142` once. If `completed:success` and `windows-latest`'s zip digest ≠
+  `85267a45…` ⇒ run `scripts/release-cut.sh --timeout 300` detached, write the handle in §7 box 2,
+  end the run. If `completed:failure` ⇒ read step 18-23's failing line first.
+- No [TRIAGE] item this run.
+
 ## 05:52 PT 0.3.73 — Windows rebuild finally executing (was queued behind CI); nothing to tick, run ended
 
 - **A0**: `origin/main` HEAD `3eceeec` (docs-only) ⇒ `total_count: 0`, expected under `ci.yml`
