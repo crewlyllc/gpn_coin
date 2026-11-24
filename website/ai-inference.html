@@ -1,0 +1,768 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>OpenAI-compatible AI inference on consumer GPUs — GPN</title>
+<meta name="description" content="Free OpenAI-compatible chat, image and speech endpoints served by consumer GPUs on the GPN network. No API key, no signup, honest about model size." />
+<meta name="theme-color" content="#07090f" />
+<link rel="canonical" href="https://gpncoin.ai/ai-inference" />
+<meta property="og:site_name" content="GPN" />
+<meta property="og:url" content="https://gpncoin.ai/ai-inference" />
+<meta property="og:image" content="https://gpncoin.ai/assets/og.png" />
+<meta property="og:image:width" content="1200" />
+<meta property="og:image:height" content="630" />
+<meta name="twitter:card" content="summary_large_image" />
+<meta name="twitter:image" content="https://gpncoin.ai/assets/og.png" />
+<meta property="og:title" content="GPN — OpenAI-compatible inference on a GPU network" />
+<meta property="og:description" content="Chat, images and speech through one endpoint, served by consumer GPUs. No key, no signup." />
+<meta property="og:type" content="website" />
+<meta name="twitter:title" content="GPN — OpenAI-compatible inference on a GPU network" />
+<meta name="twitter:description" content="Chat, images and speech through one endpoint, served by consumer GPUs. No key, no signup." />
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%237c6cff'/%3E%3Ctext x='16' y='22' font-size='16' font-family='sans-serif' font-weight='700' text-anchor='middle' fill='%2307090f'%3EG%3C/text%3E%3C/svg%3E" />
+<link rel="stylesheet" href="assets/style.css" />
+<style>
+  /* Page-scoped additions — same tokens as the rest of the site. */
+  .dir-status { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin-top: 18px; }
+  .dir-status .chip { font-variant-numeric: tabular-nums; }
+  .stat .v.mono { font-family: var(--mono); font-size: 1.02rem; font-weight: 700; word-break: break-all; }
+  .stat .v.tiny { font-size: .95rem; }
+  .dir-table td { font-size: .86rem; }
+  .dir-table td .ma { font-family: var(--mono); font-size: .8rem; word-break: break-all; line-height: 1.5; }
+  .dir-table td .ep { font-family: var(--mono); font-size: .8rem; word-break: break-all; }
+  .dir-table td .ep a { word-break: break-all; }
+  .copy-btn {
+    display: inline-flex; align-items: center; gap: 5px; margin-left: 8px;
+    background: var(--bg-2); border: 1px solid var(--line); color: var(--muted);
+    border-radius: 7px; padding: 3px 8px; font-size: .72rem; font-weight: 700;
+    cursor: pointer; vertical-align: 1px; font-family: var(--font);
+  }
+  .copy-btn:hover { border-color: var(--accent); color: var(--text); }
+  .copy-btn:active { transform: translateY(1px); }
+  .peer-short { font-family: var(--mono); font-size: .8rem; cursor: help; }
+  .role-seed { color: var(--accent-2); }
+  .role-backbone { color: var(--amber); }
+  .role-provider { color: var(--green); }
+  .badge {
+    display: inline-flex; align-items: center; gap: 6px; padding: 2px 9px;
+    border-radius: 999px; font-size: .74rem; font-weight: 800; letter-spacing: .02em;
+    border: 1px solid var(--line); white-space: nowrap;
+  }
+  .badge .d { width: 6px; height: 6px; border-radius: 50%; background: currentColor; }
+  .badge.serving { color: var(--green); border-color: rgba(63,185,80,.4); background: rgba(63,185,80,.08); }
+  /* Registered with the AP but its status URL is not publicly reachable:
+     still leaseable, so still a provider — muted, not "broken". */
+  .badge.registered { color: var(--accent-2); border-color: rgba(124,108,255,.4); background: rgba(124,108,255,.08); }
+  .badge.chain { color: var(--amber); border-color: rgba(240,166,58,.4); background: rgba(240,166,58,.05); }
+  .badge.peer { color: var(--muted); border-color: var(--line); }
+  .badge.offline { color: var(--amber); border-color: rgba(240,166,58,.4); background: rgba(240,166,58,.08); }
+  .badge.cached { color: var(--muted); border-color: var(--line); }
+  .dir-table tr.offline-row td { opacity: .6; }
+  .dir-table tr.offline-row td:first-child { opacity: 1; }
+  .counts-note { margin-top: 10px; }
+  .dir-empty { color: var(--muted-2); }
+  .join-steps { display: grid; gap: 10px; margin: 12px 0 16px; padding: 0; list-style: none; counter-reset: step; }
+  .join-steps li { position: relative; padding-left: 38px; color: var(--muted); counter-increment: step; }
+  .join-steps li::before {
+    content: counter(step); position: absolute; left: 0; top: 1px;
+    width: 24px; height: 24px; border-radius: 50%; display: flex; align-items: center; justify-content: center;
+    background: rgba(124,108,255,.14); border: 1px solid rgba(124,108,255,.4);
+    color: var(--text); font-size: .76rem; font-weight: 800;
+  }
+  .join-steps li b { color: var(--text); }
+  .callout pre { margin: 10px 0 0; }
+  .callout pre code { font-size: .82rem; }
+  .dir-note { margin-top: 12px; }
+  @media (max-width: 700px) {
+    .dir-table { min-width: 0; }
+    .dir-table thead { display: none; }
+    .dir-table, .dir-table tbody, .dir-table tr, .dir-table td { display: block; width: 100%; }
+    .dir-table tr {
+      border-bottom: 1px solid var(--line); padding: 12px 14px;
+    }
+    .dir-table tr:last-child { border-bottom: 0; }
+    .dir-table td { border: 0; padding: 4px 0; }
+    .dir-table td::before {
+      content: attr(data-label); display: block;
+      font-size: .68rem; text-transform: uppercase; letter-spacing: .07em;
+      color: var(--muted-2); font-weight: 700; margin-bottom: 1px;
+    }
+    .dir-table td:empty { display: none; }
+    .stats { grid-template-columns: 1fr 1fr; }
+  }
+</style>
+</head>
+<body>
+<a class="skip-link" href="#main">Skip to content</a>
+
+<header class="site-header">
+  <div class="wrap nav">
+    <a class="brand" href="./" aria-label="GPN home"><span class="dot" aria-hidden="true">G</span><span>GPN<br><small>GPU-NATIVE NETWORK</small></span></a>
+    <button class="nav-toggle" id="nav-toggle" aria-expanded="false" aria-controls="nav-links" aria-label="Toggle navigation">☰</button>
+    <nav class="nav-links" id="nav-links" aria-label="Primary">
+      <a href="./">Home</a>
+      <a href="download">Download</a>
+      <a href="deploy">Deploy</a>
+      <a href="ai">AI</a>
+      <a href="chat">Chat</a>
+      <a href="access-points">Access Points</a>
+      <a href="nodes" aria-current="page">Nodes</a>
+      <a href="referrals">Referrals</a>
+      <a href="buy">Buy GPN</a>
+      <a href="docs">Docs</a>
+      <a href="contact">Contact</a>
+      <a href="./#join">Join us</a>
+    </nav>
+    <div class="nav-actions"><button class="theme-toggle" id="theme-toggle" aria-pressed="false" title="Switch theme">☾</button></div>
+  </div>
+</header>
+
+<main id="main">
+
+  <section class="page-head first">
+    <div class="wrap">
+      <span class="kicker">For developers</span>
+      <h1>OpenAI-compatible inference on a GPU network</h1>
+      <p class="lede">Point an existing OpenAI client at <code>https://gpncoin.ai/api/v1</code> and it works:
+        chat completions, images, and speech, served by consumer GPUs that also mine the chain.</p>
+      <div class="hero-cta">
+        <a class="btn" href="chat">Try the chat</a>
+        <a class="btn ghost" href="ai">API reference</a>
+      </div>
+    </div>
+  </section>
+
+  <section class="section">
+    <div class="wrap">
+      <h2>No key, no signup, no account</h2>
+      <pre><code>curl https://gpncoin.ai/api/v1/chat/completions \
+  -H 'Content-Type: application/json' \
+  -d '{"model":"llama3.2:1b","messages":[{"role":"user","content":"hello"}]}'</code></pre>
+      <p>The public access point answers without an API key on the testnet. Models are small open models
+        (0.5B–7B) running on cards people already own — not a frontier model, and the site says so rather
+        than implying otherwise.</p>
+    </div>
+  </section>
+
+  <section class="section">
+    <div class="wrap">
+      <h2>Why a network instead of one server</h2>
+      <ul>
+        <li><b>Capacity comes from many cards.</b> A job is routed to whichever node advertises the capability and is free.</li>
+        <li><b>Escrow, not invoicing.</b> Payment is settled per job through an off-chain channel that closes on chain.</li>
+        <li><b>Any provider can join.</b> Registering costs no coins: entry is a proof of work, not a deposit.</li>
+        <li><b>The same card mines.</b> Idle time is spent on block rewards instead of being wasted.</li>
+      </ul>
+    </div>
+  </section>
+
+  <section class="section">
+    <div class="wrap">
+      <h2>Run a provider instead</h2>
+      <p>If you have the GPU and want the other side of the market: <a href="earn-with-gpu">earn with your GPU</a>
+        and <a href="docs/run-a-node">run a node</a>. A provider serves jobs and mines between them.</p>
+    </div>
+  </section>
+
+</main>
+
+<footer class="site-footer">
+  <div class="wrap">
+    <div class="foot-grid">
+      <div>
+        <a class="brand" href="./" style="margin-bottom:10px"><span class="dot" aria-hidden="true">G</span> <span>GPN</span></a>
+        <p class="muted" style="max-width:320px">A GPU-native network for mining and AI compute.
+          <em>Get paid for the GPU time you're wasting.</em></p>
+      </div>
+      <div>
+        <h4>Product</h4>
+        <a href="download">Download</a>
+        <a href="deploy">Deploy</a>
+        <a href="ai">Access the AI</a>
+        <a href="access-points">Access Points</a>
+        <a href="nodes">Live nodes</a>
+      </div>
+      <div>
+        <h4>Learn</h4>
+        <a href="docs">Documentation</a>
+        <a href="docs/whitepaper">Whitepaper</a>
+        <a href="docs/one-pager">One-pager</a>
+        <a href="docs/technical-overview">Technical overview</a>
+      </div>
+      <div>
+        <h4>Project</h4>
+        <a href="https://x.com/gpn_ai" rel="me noopener">X / Twitter — @gpn_ai</a>
+        <a href="https://discord.gg/ANCXERZqz" rel="noopener">Discord community</a>
+        <a href="https://github.com/crewlyllc/gpn_coin" rel="noopener">Source on GitHub</a>
+        <a href="docs/run-a-node">Run a node</a>
+        <a href="docs/downloads">Releases</a>
+        <a href="docs/wallet">Wallet</a>
+        <a href="./#join">Join the team</a>
+      </div>
+    </div>
+    <div class="foot-bottom">
+      <p class="small muted">© <span data-year>2026</span> GPN · Public testnet. Not investment advice.</p>
+      <p class="small muted">Testnet only — tokens here have no monetary value.</p>
+    </div>
+  </div>
+</footer>
+
+
+<script>
+/* ============================================================
+   Live node directory.
+   Reads /api/network (the AP's `GET /network`: peers from the
+   chain's `system_peers` + the node itself, deduped providers,
+   and known-but-offline seeds). Vanilla JS, no dependencies,
+   no innerHTML with network-provided values — every string goes
+   through textContent.
+
+   If the live read fails, the page shows the compiled-in seed
+   list and labels it **cached — live data unavailable**. It
+   never presents stale data as live.
+   ============================================================ */
+(function () {
+  "use strict";
+
+  var REFRESH_MS = 30000;   /* the AP caches /network for 30 s */
+  var TICK_MS = 1000;
+
+  /* Baked-in copy of network.json's bootnodes: the last-known static list,
+     used ONLY for the clearly-labelled cached fallback. No private/LAN seed
+     here -- it was reverted 2026-11-10: a 192.168.x.x address is only
+     meaningful on the network that owns it, and shipping one pointed a remote
+     box at a stranger's device. */
+  var CACHED_BOOTNODES = [
+    "/dns4/gpn-testnet.duckdns.org/tcp/30333/ws/p2p/12D3KooWAFtUNxc6RgC9rq5uSHXd5XUncEcPqp77UU98oN6hSVFo",
+    "/ip4/142.129.54.88/tcp/30333/ws/p2p/12D3KooWAFtUNxc6RgC9rq5uSHXd5XUncEcPqp77UU98oN6hSVFo",
+  ];
+
+  /* Optional local mock for previewing without a backend: ?mock=1 — must mirror seeds.json */
+  var MOCK = {
+    generated_at: new Date().toISOString(),
+    peers: 4,
+    peer_ids: [
+      "12D3KooWFqZ2msYzP3263AKGSUfLzUC7Am7FyRDqi2KKfgREmxGz",
+      "12D3KooWRfKQbKnynFsKVyi76FjFDWLQqQPTKZFrMFF6Zt7zoZ2o",
+      "12D3KooWRhz9gbuEZpXAxfGeudnN1JQYw8D5nqPXTbWJQZiSbDiJ",
+      "12D3KooWAFtUNxc6RgC9rq5uSHXd5XUncEcPqp77UU98oN6hSVFo"
+    ],
+    providers: [
+      {
+        address: "5ENqExampleAddress0000000000000000000000000000000000",
+        peer_id: "12D3KooWAFtUNxc6RgC9rq5uSHXd5XUncEcPqp77UU98oN6hSVFo",
+        healthy: true,
+        vram_mb: 8188,
+        models: ["qwen2.5:7b", "llama3.2:1b"],
+        multiaddrs: ["/ip4/142.129.54.88/tcp/30333/ws/p2p/12D3KooWAFtUNxc6RgC9rq5uSHXd5XUncEcPqp77UU98oN6hSVFo"],
+        last_seen_secs: 3,
+        status_url: "http://127.0.0.1:8093"
+      }
+    ],
+    seeds: [
+      { multiaddr: "/dns4/gpn-testnet.duckdns.org/tcp/30333/ws/p2p/12D3KooWAFtUNxc6RgC9rq5uSHXd5XUncEcPqp77UU98oN6hSVFo", peer_id: "12D3KooWAFtUNxc6RgC9rq5uSHXd5XUncEcPqp77UU98oN6hSVFo", live: true, source: "compiled-in" },
+      { multiaddr: "/ip4/142.129.54.88/tcp/30333/ws/p2p/12D3KooWAFtUNxc6RgC9rq5uSHXd5XUncEcPqp77UU98oN6hSVFo", peer_id: "12D3KooWAFtUNxc6RgC9rq5uSHXd5XUncEcPqp77UU98oN6hSVFo", live: true, source: "compiled-in" }
+    ],
+    counts: { peers_live: 4, serving_ai: 4, healthy_now: 1, offline: 0 },
+    stale: false
+  };
+
+  var state = {
+    lastFetch: 0,
+    generatedAt: 0,
+    ok: false,
+    timer: null
+  };
+
+  function $(id) { return document.getElementById(id); }
+
+  function setText(el, value) {
+    if (el) el.textContent = value == null || value === "" ? "—" : String(value);
+  }
+
+  function short(s, head, tail) {
+    s = String(s || "");
+    if (s.length <= head + tail + 1) return s;
+    return s.slice(0, head) + "…" + s.slice(-tail);
+  }
+
+  function ago(ms) {
+    if (!ms) return "—";
+    var s = Math.round((Date.now() - ms) / 1000);
+    if (s < -5) return "just now";
+    if (s < 1) return "just now";
+    if (s < 60) return s + "s ago";
+    var m = Math.floor(s / 60);
+    if (m < 60) return m + "m " + (s % 60) + "s ago";
+    var h = Math.floor(m / 60);
+    if (h < 48) return h + "h " + (m % 60) + "m ago";
+    return Math.floor(h / 24) + "d ago";
+  }
+
+  function peerIdOf(ma) {
+    if (!ma) return null;
+    var s = String(ma);
+    var i = s.lastIndexOf("/p2p/");
+    return i >= 0 ? s.slice(i + 5) : null;
+  }
+
+  function seenAgo(secs) {
+    if (secs == null || !isFinite(secs)) return "—";
+    if (secs < 90) return secs + "s ago";
+    var m = Math.round(secs / 60);
+    if (m < 90) return m + "m ago";
+    var h = Math.round(m / 60);
+    if (h < 48) return h + "h ago";
+    return Math.round(h / 24) + "d ago";
+  }
+
+  /* ---------- copy helper ---------- */
+  function copyText(text, btn) {
+    var done = function () {
+      if (!btn) return;
+      var old = btn.textContent;
+      btn.textContent = "Copied ✓";
+      setTimeout(function () { btn.textContent = old; }, 1400);
+    };
+    var fallback = function () {
+      try {
+        var ta = document.createElement("textarea");
+        ta.value = text;
+        ta.setAttribute("readonly", "");
+        ta.style.position = "fixed";
+        ta.style.left = "-9999px";
+        document.body.appendChild(ta);
+        ta.select();
+        document.execCommand("copy");
+        document.body.removeChild(ta);
+        done();
+      } catch (e) { /* nothing else we can do */ }
+    };
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      navigator.clipboard.writeText(text).then(done, fallback);
+    } else {
+      fallback();
+    }
+  }
+
+  function copyButton(text, label) {
+    var b = document.createElement("button");
+    b.type = "button";
+    b.className = "copy-btn";
+    b.textContent = label || "Copy";
+    b.setAttribute("aria-label", (label || "Copy") + ": " + short(text, 18, 8));
+    b.addEventListener("click", function () { copyText(text, b); });
+    return b;
+  }
+
+  /* ---------- row model ----------
+     Merge seeds + providers on peer id so one machine is one row.
+     Live peers with no known provider record still appear, as
+     "connected" — a live peer is never labelled "peer only". */
+  function buildRows(doc) {
+    var live = new Set(Array.isArray(doc.peer_ids) ? doc.peer_ids : []);
+    var byPeer = new Map();
+    var anonymous = [];
+
+    function ensure(pid) {
+      if (!byPeer.has(pid)) {
+        byPeer.set(pid, {
+          peer_id: pid, address: null, vram_mb: 0, models: [],
+          multiaddrs: [], status_url: null, last_seen_secs: null,
+          registered: false, serving: false, seed: false,
+          chain_registered: null, seen_by_ap: false, peers: null
+        });
+      }
+      return byPeer.get(pid);
+    }
+
+    (Array.isArray(doc.providers) ? doc.providers : []).forEach(function (p) {
+      if (!p || typeof p !== "object") return;
+      // W50: `chain_registered` (chain registry) and `seen_by_ap` (this access
+      // point has a record) are independent. `null` means unknown, never "no".
+      var chainReg = p.chain_registered === true ? true
+        : (p.chain_registered === false ? false : null);
+      if (p.seen_by_ap === false) {
+        // Registered on chain, never seen by an access point: its own row, and
+        // it must not be counted as leaseable until a heartbeat arrives.
+        anonymous.push({
+          peer_id: null, address: p.address || null, vram_mb: 0,
+          models: Array.isArray(p.models) ? p.models : [],
+          multiaddrs: [], status_url: null, last_seen_secs: null,
+          serving: false, registered: false, seeded: false,
+          chain_registered: chainReg, seen_by_ap: false, live: null
+        });
+        return;
+      }
+      if (!p.peer_id) {
+        // Healthy provider that publishes no peer id: still serving, but it
+        // cannot be matched to a peer, so it is its own row.
+        if (p.healthy === true) {
+          anonymous.push({
+            peer_id: null, address: p.address || null, vram_mb: p.vram_mb || 0,
+            models: Array.isArray(p.models) ? p.models : [],
+            multiaddrs: [], status_url: p.status_url || null,
+            last_seen_secs: p.last_seen_secs != null ? p.last_seen_secs : null,
+            serving: true, registered: true, seed: false, live: null,
+            chain_registered: chainReg, seen_by_ap: true
+          });
+        }
+        return;
+      }
+      var r = ensure(p.peer_id);
+      r.registered = true;
+      r.seen_by_ap = true;
+      if (chainReg !== null) r.chain_registered = chainReg;
+      if (p.address) r.address = p.address;
+      if (p.vram_mb) r.vram_mb = p.vram_mb;
+      if (Array.isArray(p.models) && p.models.length) r.models = p.models;
+      if (Array.isArray(p.multiaddrs)) r.multiaddrs = r.multiaddrs.concat(p.multiaddrs);
+      if (p.status_url) r.status_url = p.status_url;
+      if (p.last_seen_secs != null) r.last_seen_secs = p.last_seen_secs;
+      // W78: the peer count THIS box reports about itself (null = it did not
+      // say). Used below instead of guessing peering from our own peer list.
+      if (p.peers != null) r.peers = p.peers;
+      if (p.healthy === true) r.serving = true;
+    });
+
+    (Array.isArray(doc.seeds) ? doc.seeds : []).forEach(function (s) {
+      if (!s || !s.peer_id) return;
+      var r = ensure(s.peer_id);
+      r.seed = true;
+      if (s.multiaddr) r.multiaddrs = r.multiaddrs.concat([s.multiaddr]);
+    });
+
+    // Connected peers we have no registry record for.
+    live.forEach(function (pid) { ensure(pid); });
+
+    var rows = [];
+    byPeer.forEach(function (r) {
+      // 2026-11-08: "offline" used to mean "not a libp2p peer of this bootnode",
+      // which is NOT the same as offline. A provider that the access point can
+      // reach and lease work to (healthy:true, heartbeats arriving) was shown as
+      // offline merely because it had not peered with this one node — box 1 was
+      // serving jobs while the directory called it offline. Rank by what the
+      // network can actually do with the node, and keep peering as its own flag.
+      // W78: "peered" is a fact about the node, not about whether it happens to
+      // be peered with THIS access point. A box that reports its own peer count
+      // is peered when that count is > 0 (box 1 was syncing from box 2 while
+      // this page called it "not peered"); a box that reports nothing (`null`,
+      // an older build) still falls back to peer-of-this-node.
+      /* 2026-11-10: `live` means "peered with the network's node", NOT "this node
+         says it has >=1 peer". Box 1 and box 4 each report peers:1 -- each other --
+         on a fork of their own, so the self-reported count made two diverged nodes
+         vouch for each other and both read as "on chain + serving". A node's own
+         peer count is information, never a health verdict. */
+      r.live = live.has(r.peer_id);
+      if (r.peers != null && r.peers > 0 && !r.live) r.own_peers = r.peers;
+      if (r.serving) r.status = "serving";
+      else if (r.registered) r.status = "registered";
+      else if (r.chain_registered === true) r.status = "chain";
+      else if (r.live) r.status = "connected";
+      else r.status = "offline";
+      rows.push(r);
+    });
+    rows = rows.concat(anonymous);
+
+    // Live rows first, and inside them: reachable provider, AP-seen provider,
+    // chain-registered but AP-unseen, plain peer.
+    var order = { serving: 0, registered: 1, chain: 2, connected: 3, offline: 4 };
+    rows.sort(function (a, b) {
+      var d = (order[a.status] == null ? 3 : order[a.status]) - (order[b.status] == null ? 3 : order[b.status]);
+      if (d) return d;
+      return String(a.peer_id || "").localeCompare(String(b.peer_id || ""));
+    });
+    return rows;
+  }
+
+  /* ---------- render ---------- */
+  function td(label) {
+    var cell = document.createElement("td");
+    cell.setAttribute("data-label", label);
+    return cell;
+  }
+
+  // Badge text. Every GPN node is meant to be miner + provider, so "connected"
+  // (a live peer with no provider registration) is a temporary state, never a
+  // verdict — and "peer only" is deliberately never printed.
+  var BADGE = {
+    serving: "on chain + serving",
+    "serving-unpeered": "on chain + serving (not peered)",
+    "registered": "AP-seen · not reachable now",
+    chain: "on chain · AP hasn't seen it",
+    connected: "connected · no provider registration",
+    offline: "offline"
+  };
+  function statusBadge(status, cached) {
+    var b = document.createElement("span");
+    b.className = "badge " + (cached ? "cached" : status);
+    var dot = document.createElement("span");
+    dot.className = "d";
+    b.appendChild(dot);
+    var label = cached ? "cached" : (BADGE[status] || status);
+    b.appendChild(document.createTextNode(label));
+    if (status === "serving-unpeered") {
+      b.title = "This account is in the chain's provider registry and an access point has a recent " +
+        "heartbeat from it, but the network's own node has no p2p session with it. It may be behind " +
+        "NAT, unreachable, or on a different chain -- serving work does not prove it is on this chain.";
+    }
+    if (status === "registered") {
+      b.title = "The access point holds a heartbeat record for this provider, but its status URL is not " +
+        "publicly reachable from here, so it is not counted as reachable-now.";
+    }
+    if (status === "chain") {
+      b.title = "The account is in the chain's provider registry (ComputeMarketplace::RegisteredProviders), " +
+        "but no heartbeat has reached an access point yet — so it has not been leased any work.";
+    }
+    return b;
+  }
+
+  function renderCounts(counts, generatedAt, stale) {
+    var live = counts && counts.peers_live != null ? counts.peers_live : null;
+    var serving = counts && counts.serving_ai != null ? counts.serving_ai : null;
+    var healthy = counts && counts.healthy_now != null ? counts.healthy_now : null;
+    var offline = counts && counts.offline != null ? counts.offline : null;
+    setText($("c-live"), stale ? "?" : live);
+    setText($("c-serving"), serving);
+    // W50: the chain registry is its own number, and `null` (unknown/unreadable)
+    // is printed as a dash — never as zero.
+    var chainReg = counts && counts.chain_registered_now != null ? counts.chain_registered_now : null;
+    setText($("c-chain"), chainReg == null ? "—" : chainReg);
+    // Older /api/network documents have no healthy_now; show a dash rather
+    // than inventing a number.
+    setText($("c-healthy"), healthy == null ? "—" : healthy);
+    setText($("c-offline"), offline);
+    setText($("c-generated"), generatedAt ? ago(generatedAt) : "just now");
+  }
+
+  function renderNodes(doc) {
+    var body = $("nodes-body");
+    if (!body) return;
+    while (body.firstChild) body.removeChild(body.firstChild);
+
+    var rows = buildRows(doc);
+    if (!rows.length) {
+      var empty = document.createElement("tr");
+      var c = td("");
+      c.colSpan = 6;
+      c.className = "dir-empty";
+      c.textContent = "The network answered, but reports no nodes right now.";
+      empty.appendChild(c);
+      body.appendChild(empty);
+      return;
+    }
+
+    rows.forEach(function (r) {
+      var tr = document.createElement("tr");
+      if (r.status === "offline") tr.className = "offline-row";
+      if (r.status === "serving" && !r.live) r.status = "serving-unpeered";
+
+      /* Peer id */
+      var peerCell = td("Peer ID");
+      if (r.peer_id) {
+        var p = document.createElement("span");
+        p.className = "peer-short";
+        p.textContent = short(r.peer_id, 8, 6);
+        p.title = String(r.peer_id);
+        peerCell.appendChild(p);
+        peerCell.appendChild(copyButton(String(r.peer_id)));
+      } else {
+        var pd = document.createElement("span");
+        pd.className = "dir-empty";
+        pd.textContent = "no peer id published";
+        peerCell.appendChild(pd);
+      }
+
+      /* Status */
+      var stCell = td("Status");
+      stCell.appendChild(statusBadge(r.status));
+
+      /* VRAM */
+      var vCell = td("VRAM");
+      setText(vCell, r.vram_mb ? (r.vram_mb >= 1024
+        ? (r.vram_mb / 1024).toFixed(r.vram_mb % 1024 ? 1 : 0) + " GB"
+        : r.vram_mb + " MB") : "—");
+
+      /* Models */
+      var mCell = td("Models");
+      setText(mCell, r.models && r.models.length ? r.models.length : "—");
+      if (r.models && r.models.length) mCell.title = r.models.join(", ");
+
+      /* Address */
+      var aCell = td("Address");
+      var addr = r.address;
+      if (addr) {
+        var sp = document.createElement("span");
+        sp.className = "ep";
+        sp.textContent = String(addr);
+        sp.title = String(addr);
+        aCell.appendChild(sp);
+        aCell.appendChild(copyButton(String(addr)));
+      } else if (r.multiaddrs && r.multiaddrs.length) {
+        var ma = document.createElement("span");
+        ma.className = "ma";
+        ma.textContent = String(r.multiaddrs[0]);
+        aCell.appendChild(ma);
+        aCell.appendChild(copyButton(String(r.multiaddrs[0])));
+      } else if (r.status_url && /^https?:/.test(r.status_url)) {
+        var a = document.createElement("a");
+        a.className = "ep";
+        a.href = String(r.status_url);
+        a.rel = "noopener";
+        a.textContent = String(r.status_url);
+        aCell.appendChild(a);
+      } else {
+        setText(aCell, "—");
+      }
+
+      /* Last seen. When the node self-reports peers but has no session with the
+         network's node, say so here instead of silently printing a dash -- the
+         distinction is the whole point of the badge. */
+      var lCell = td("Last seen");
+      if (r.live) {
+        setText(lCell, seenAgo(r.last_seen_secs));
+      } else if (r.own_peers) {
+        setText(lCell, "self-reports " + r.own_peers + " peer" + (r.own_peers > 1 ? "s" : "") + ", not this node");
+      } else {
+        setText(lCell, "—");
+      }
+
+      tr.appendChild(peerCell);
+      tr.appendChild(stCell);
+      tr.appendChild(vCell);
+      tr.appendChild(mCell);
+      tr.appendChild(aCell);
+      tr.appendChild(lCell);
+      body.appendChild(tr);
+    });
+  }
+
+  function showOk(doc) {
+    var box = $("dir-error");
+    if (box) box.hidden = true;
+    var chip = $("status-chip");
+    var stale = doc.stale === true;
+    if (chip) chip.className = "chip " + (stale ? "warn" : "up");
+    var n = doc.counts && doc.counts.peers_live != null ? doc.counts.peers_live : doc.peers;
+    setText($("status-text"), stale
+      ? "chain read failed — liveness unknown"
+      : "live · " + (n != null ? n : "?") + " peer" + (n === 1 ? "" : "s") + " online");
+  }
+
+  /* Clearly-labelled static list. Never dressed up as live. */
+  function showCached(reason) {
+    var box = $("dir-error");
+    if (box) box.hidden = false;
+    var chip = $("status-chip");
+    if (chip) chip.className = "chip down";
+    setText($("status-text"), "cached — live data unavailable");
+    setText($("refresh-text"), reason || "Retrying in 30 s");
+
+    setText($("c-live"), "?");
+    setText($("c-serving"), "?");
+    setText($("c-chain"), "?");
+    setText($("c-healthy"), "?");
+    setText($("c-offline"), "?");
+    setText($("c-generated"), "unknown");
+
+    var body = $("nodes-body");
+    if (!body) return;
+    while (body.firstChild) body.removeChild(body.firstChild);
+
+    var seenPeer = new Set();
+    CACHED_BOOTNODES.forEach(function (ma) {
+      var pid = peerIdOf(ma);
+      if (pid && seenPeer.has(pid)) return; // one row per machine
+      if (pid) seenPeer.add(pid);
+      var tr = document.createElement("tr");
+
+      var peerCell = td("Peer ID");
+      if (pid) {
+        var p = document.createElement("span");
+        p.className = "peer-short";
+        p.textContent = short(pid, 8, 6);
+        p.title = String(pid);
+        peerCell.appendChild(p);
+        peerCell.appendChild(copyButton(String(pid)));
+      } else {
+        setText(peerCell, "—");
+      }
+
+      var stCell = td("Status");
+      stCell.appendChild(statusBadge("offline", true));
+
+      var vCell = td("VRAM"); setText(vCell, "—");
+      var mCell = td("Models"); setText(mCell, "—");
+
+      var aCell = td("Address");
+      var maSpan = document.createElement("span");
+      maSpan.className = "ma";
+      maSpan.textContent = String(ma);
+      aCell.appendChild(maSpan);
+      aCell.appendChild(copyButton(String(ma)));
+
+      var lCell = td("Last seen"); setText(lCell, "unknown");
+
+      tr.appendChild(peerCell);
+      tr.appendChild(stCell);
+      tr.appendChild(vCell);
+      tr.appendChild(mCell);
+      tr.appendChild(aCell);
+      tr.appendChild(lCell);
+      body.appendChild(tr);
+    });
+  }
+
+  function tick() {
+    if (state.ok) {
+      setText($("refresh-text"),
+        "last read " + ago(state.lastFetch) + " · auto-refresh every " + (REFRESH_MS / 1000) + "s" +
+        (document.hidden ? " (paused)" : ""));
+    }
+  }
+
+  function load() {
+    if (document.hidden) return;
+    var useMock = false;
+    try { useMock = new URLSearchParams(location.search).get("mock") === "1"; } catch (e) {}
+
+    var req = useMock
+      ? Promise.resolve({ ok: true, json: function () { return Promise.resolve(MOCK); } })
+      : fetch("/api/network", { cache: "no-store", headers: { accept: "application/json" } })
+          .then(function (res) {
+            if (!res.ok) throw new Error("HTTP " + res.status);
+            return res.json();
+          });
+
+    req.then(function (doc) {
+      if (!doc || typeof doc !== "object") throw new Error("empty directory");
+      state.lastFetch = Date.now();
+      state.ok = true;
+      state.generatedAt = doc.generated_at ? Date.parse(doc.generated_at) : 0;
+      if (!isFinite(state.generatedAt)) state.generatedAt = 0;
+      renderCounts(doc.counts, state.generatedAt, doc.stale === true);
+      renderNodes(doc);
+      showOk(doc);
+      tick();
+    }).catch(function (err) {
+      state.lastFetch = Date.now();
+      state.ok = false;
+      showCached("Retrying in 30 s. (" + (err && err.message ? err.message : "network error") + ")");
+    });
+  }
+
+  function init() {
+    load();
+    state.timer = setInterval(tick, TICK_MS);
+    setInterval(load, REFRESH_MS);
+    document.addEventListener("visibilitychange", function () {
+      if (!document.hidden && Date.now() - state.lastFetch > REFRESH_MS) load();
+    });
+  }
+
+  if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", init);
+  else init();
+})();
+</script>
+</body>
+</html>

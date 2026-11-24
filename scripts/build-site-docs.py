@@ -29,9 +29,9 @@ TODAY = datetime.date.today().isoformat()
 PAGES = {
     "run-a-node": (
         "run-a-node.md",
-        "Run a node",
-        "One command runs a GPN node: chain node/miner plus the AI serving stack. "
-        "Covers install, config, ports, dialability (port-forward / UPnP / CGNAT) and troubleshooting.",
+        "Run a GPN node — mine and serve AI on one GPU",
+        "Run a GPN node in one command: GPU proof-of-work mining plus AI inference on the same card, "
+        "one job at a time. Install, config, ports, dialability (port-forward / UPnP / CGNAT), troubleshooting.",
         None,
     ),
     "whitepaper": (
@@ -74,8 +74,9 @@ PAGES = {
     ),
     "downloads": (
         "downloads.md",
-        "Downloads",
-        "Rolling GitHub releases for Windows, Linux and macOS.",
+        "Download the GPN node for Windows or Linux",
+        "Download and verify the GPN node: Windows .zip and Linux .tar.gz, with the manifest's sha256, "
+        "a one-command install and a checksum check before you run it.",
         None,
     ),
     "mainnet-launch-runbook": (
