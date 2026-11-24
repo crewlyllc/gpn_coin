@@ -1,3 +1,28 @@
+## 03:58 PT 0.3.73 — §6 closed (2/2): literals present in the published artifact; hashes tie it to box 1
+
+- **A0**: `head_sha=d471567…` (origin/main HEAD) ⇒ `total_count: 0` — docs-only, correct.
+  In-flight, not waited on: `45375310398` (sha `d5d98b9`) in_progress since 10:29 PT — its Windows
+  job `Build + unit tests (windows, self-hosted)` has been running since 10:56 PT on DESKTOP-USBUADL
+  (`busy=true`); our §7-gate run `45381828261` (sha `69bf900`) still **pending** with **0 jobs**
+  since 11:11 PT, i.e. queued behind that workflow's concurrency, not stuck. No conclusion ⇒ not
+  this run's box.
+- **Box worked — §6 "scan the built binaries for strings the change added":** downloaded the
+  published `gpn-windows.zip` (asset 786524114) ⇒ 253,204,299 B, sha256
+  `85267a4512b82525c6443add6e6857db859ae55b65c4609a7093790bf5fd1660` == the API digest. Raw-byte
+  scan of the extracted binaries: `gpn_node.exe` contains `what to do:` ×2,
+  `no usable OpenCL runtime` ×1, `install or repair the vendor GPU driver` ×1, build stamp
+  `e33e2c8` ×1.
+  - **Finding worth keeping:** the change is in `gpn_node.exe` (underscore, the gpn-agent bin),
+    NOT `gpn-node.exe` (hyphen, the 71 MB node-crate service, which has **0** `onboard`/`GFLOPS`
+    strings at all). Scanning the hyphen binary reads as "strings missing" and would stop a good
+    release on a false alarm. Both binaries ship in the zip, both report 0.3.73.
+- **§6 box 2 — `--version` matches, and the artifact is the one deployed:** over SSH (read-only),
+  `C:\gpn\bin\gpn-node.exe --version` ⇒ `gpn-node.exe 0.3.73`; `C:\gpn\bin\gpn_node.exe --version`
+  ⇒ `gpn_node 0.3.73 (spec 55, e33e2c8)`. `Get-FileHash` on box 1 ⇒ `E738B9A4…E0FB` /
+  `A396E99F…1BEC`, **identical** to `sha256sum` of the same two files inside the downloaded zip.
+- **§6 is DONE 2/2.** Next unticked box: §7 "refuse to cut unless §5's attestation checks passed"
+  — gated on run `45381828261` going green; it is queued, so the next run reads it once.
+
 ## 03:35 PT 0.3.73 — §5 closed (7/7): cosign `Verified OK` on the real downloaded artifact
 
 - **A0**: `head_sha=9fcad88…` (origin/main HEAD) ⇒ `total_count: 0` — docs-only, correct.
