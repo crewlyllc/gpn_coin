@@ -1,3 +1,19 @@
+## 10:37 PT 0.3.74 §5 — linux artifact PUBLISHED (run 45457954423 success); windows build dispatched (45461486516) [no triage]
+
+- **A0 CI**: docs HEAD `6d5666a` ⇒ `total_count 0` (paths-ignore intact). Code SHA `6c23d0f` ⇒ run
+  **45447907558** still `in_progress` (created 17:22Z, last update 17:27Z; windows job building
+  `gpn-agent (release)`). No conclusion ⇒ §4 box 4 left open, annotated with the run id.
+- **§5 linux box — TICKED**: `release-linux-selfhosted.yml` run `45457954423` (tag
+  `build/6d5666acf6e7`) concluded **success** 18:32:41Z; job `linux` success; release `linux-latest`
+  updated 18:32:36Z carrying `gpn-linux.tar.gz` 348,703,626 B
+  sha256 `877212c7116837d5ec9916058ad815dc235fe505d7d5e67abccd9a0614e35aa3`.
+- **§5 windows box — DISPATCHED, not waited on**: `release-windows.yml` run **45461486516** on tag
+  `build/6d5666acf6e7` (same sha as the linux run), status `queued` because box 1's single runner
+  (DESKTOP-USBUADL, `busy=true`) is still on CI run `45447907558`'s windows job. It builds the same
+  tree; if CI's windows job comes back red, **cancel 45461486516 before it publishes** rather than
+  let a red tree reach `windows-latest` — first check next loop.
+- **No [TRIAGE]**: nothing needed a decision.
+
 ## 10:18 PT 0.3.74 §5 — linux release build dispatched on tag build/6d5666acf6e7 [no triage]
 
 - **A0 CI**: `origin/main` HEAD `6d5666a` (docs-only) ⇒ `total_count 0`, expected (paths-ignore intact).
