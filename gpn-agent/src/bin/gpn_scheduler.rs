@@ -1043,6 +1043,17 @@ struct Provider {
     version: Option<String>,
     /// The commit that build came from, when the box said. `None` = unknown.
     git_sha: Option<String>,
+    /// Item 253: the on-chain GPU fingerprint (`gpu_info_hash`) this provider's
+    /// account attested, hex-encoded. `None` = no attestation record, or the
+    /// chain could not be read. A fingerprint is **self-reported at
+    /// registration**, so it is only evidence of what the machine claimed
+    /// unless [`Provider::gpu_verified`] is true.
+    gpu_info_hash: Option<String>,
+    /// Item 253: `ChallengeVerified[who] == AttestationChallenge` on chain —
+    /// the challenge the account mined was node-verified against the current
+    /// challenge. `false` includes "never checked" and "unreadable": the
+    /// honest default is unverified, never a bare fact.
+    gpu_verified: bool,
 }
 
 fn opt(args: &[String], flag: &str) -> Option<String> {
@@ -1285,6 +1296,11 @@ fn provider_from_caps(addr: &str, v: &Value, status_url: String, latency_ms: u64
             .get("git_sha")
             .and_then(|x| x.as_str())
             .and_then(gpn_agent::provider_heartbeat::clean_build_string),
+        // Item 253: A `/status` body is a self-report and carries no
+        // fingerprint we can trust; the chain read in
+        // `apply_gpu_fingerprints` stamps both fields.
+        gpu_info_hash: None,
+        gpu_verified: false,
     }
 }
 
@@ -1542,6 +1558,9 @@ fn apply_push_heartbeats(
                     peers: None,
                     version: p.version.clone(),
                     git_sha: p.git_sha.clone(),
+                    // Item 253: stamped from the chain afterwards.
+                    gpu_info_hash: None,
+                    gpu_verified: false,
                 });
             }
         }
@@ -1729,6 +1748,9 @@ fn unreachable_placeholder(status_url: String) -> Provider {
         // Nor can an endpoint that never answered say which build it runs.
         version: None,
         git_sha: None,
+        // Item 253: nothing answered, so nothing is known about its GPU.
+        gpu_info_hash: None,
+        gpu_verified: false,
     }
 }
 
@@ -1779,6 +1801,13 @@ fn provider_json(p: &Provider) -> serde_json::Value {
     // network. `null` = it did not say.
     "version": p.version,
     "git_sha": p.git_sha,
+    // Item 253: a GPU fingerprint is a self-report until the chain's
+    // challenge verifier confirms it. The field is always present, with
+    // `hash: null` when unknown, so a consumer cannot read silence as proof.
+    "gpu_fingerprint": {
+        "hash": p.gpu_info_hash,
+        "verified": p.gpu_verified
+    },
     "source": p.source
     })
 }
@@ -2013,6 +2042,11 @@ fn refresh(
         //     #6551), so the chain's answer is a routing input. Unknown stays
         //     routable.
         apply_funding(&mut out, &rt, &client);
+
+        // 4e. Item 253: the GPU fingerprint is self-reported, so label it
+        //     with what the chain knows — `verified` only when the challenge
+        //     this account attested was node-verified against the live one.
+        apply_gpu_fingerprints(&mut out, &rt, &client);
 
         *reg.lock().unwrap() = out;
         std::thread::sleep(Duration::from_secs(5));
@@ -3236,6 +3270,20 @@ fn funding_cache() -> &'static Mutex<std::collections::HashMap<String, (Instant,
     CACHE.get_or_init(|| Mutex::new(std::collections::HashMap::new()))
 }
 
+/// Item 253: how long a chain fingerprint answer is reused. The record only
+/// changes on re-attestation, so minutes are plenty and keep the AP from
+/// reading storage once per provider per poll.
+const GPU_FINGERPRINT_TTL_SECS: u64 = 300;
+
+/// `address -> (read at, (fingerprint hex, verified))` for #253.
+fn gpu_fingerprint_cache(
+) -> &'static Mutex<std::collections::HashMap<String, (Instant, (Option<String>, bool))>> {
+    static CACHE: OnceLock<
+        Mutex<std::collections::HashMap<String, (Instant, (Option<String>, bool))>>,
+    > = OnceLock::new();
+    CACHE.get_or_init(|| Mutex::new(std::collections::HashMap::new()))
+}
+
 /// Ask the chain whether `addr` can pay a transaction fee.
 ///
 /// `Some(true)` = the account has **no free balance** and therefore cannot pay
@@ -3311,6 +3359,61 @@ fn apply_funding(
             );
         }
         p.unfunded = Some(cannot_pay);
+    }
+}
+
+/// Item 253: label each provider's GPU fingerprint with what the chain knows.
+///
+/// A fingerprint (`gpu_info_hash`) is self-reported when the machine
+/// registers, so publishing it bare lets the site present a claim as measured
+/// fact. The on-chain truth is `ChallengeVerified[who] == AttestationChallenge`:
+/// only then is the fingerprint `verified`. No attestation record ⇒ no hash and
+/// `verified: false`; an unreadable chain ⇒ leave it unknown (hash `None`,
+/// `verified: false`) rather than inventing either answer.
+fn apply_gpu_fingerprints(
+    out: &mut [Provider],
+    rt: &Arc<tokio::runtime::Runtime>,
+    client: &Arc<ChainClient>,
+) {
+    for p in out.iter_mut() {
+        if p.address.is_empty() {
+            continue;
+        }
+        let cached = {
+            let c = gpu_fingerprint_cache().lock().unwrap();
+            c.get(&p.address)
+                .filter(|(at, _)| at.elapsed().as_secs() <= GPU_FINGERPRINT_TTL_SECS)
+                .map(|(_, v)| v.clone())
+        };
+        let answer = match cached {
+            Some(v) => Some(v),
+            None => match rt.block_on(client.get_gpu_fingerprint(&p.address)) {
+                Ok(Some((hash, verified))) => {
+                    let v = (Some(hex::encode(hash)), verified);
+                    let mut c = gpu_fingerprint_cache().lock().unwrap();
+                    if c.len() > 512 {
+                        c.retain(|_, (at, _)| at.elapsed().as_secs() <= GPU_FINGERPRINT_TTL_SECS);
+                    }
+                    c.insert(p.address.clone(), (Instant::now(), v.clone()));
+                    Some(v)
+                }
+                Ok(None) => Some((None, false)),
+                Err(e) => {
+                    if warn_once(&format!("gpu-fingerprint-unknown|{}", p.address)) {
+                        eprintln!(
+                            "[directory] could not read {}'s GPU attestation ({e}) — the \
+                             fingerprint stays unlabelled (unknown), not unverified",
+                            gpn_agent::provider_heartbeat::abbreviated(&p.address)
+                        );
+                    }
+                    None
+                }
+            },
+        };
+        if let Some((hash, verified)) = answer {
+            p.gpu_info_hash = hash;
+            p.gpu_verified = verified;
+        }
     }
 }
 
@@ -6251,6 +6354,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     .cloned(),
                                 version: p.version.clone(),
                                 git_sha: p.git_sha.clone(),
+                                // Item 253: the chain-stamped fingerprint
+                                // label, carried straight from the registry.
+                                gpu_info_hash: p.gpu_info_hash.clone(),
+                                gpu_verified: p.gpu_verified,
                             })
                             .collect()
                     };
@@ -10195,6 +10302,8 @@ mod tests {
             peers: None,
             version: None,
             git_sha: None,
+            gpu_info_hash: None,
+            gpu_verified: false,
         }
     }
 

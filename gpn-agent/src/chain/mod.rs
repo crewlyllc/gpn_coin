@@ -1310,6 +1310,55 @@ impl ChainClient {
         Ok(Some((gpus, gflops, tier)))
     }
 
+    /// Item 253: the account's on-chain GPU fingerprint and whether the
+    /// challenge it attested has been **node-verified against the current
+    /// challenge** (`ChallengeVerified[who] == AttestationChallenge`).
+    ///
+    /// * `Ok(Some((hash, true)))` — attested and verified against the live challenge.
+    /// * `Ok(Some((hash, false)))` — attested, but never verified or verified
+    ///   against an older challenge: the fingerprint is a **claim**.
+    /// * `Ok(None)` — the read worked and the account has no attestation.
+    /// * `Err(_)` — the chain was not read; the caller must not label either way.
+    pub async fn get_gpu_fingerprint(
+        &self,
+        address: &str,
+    ) -> Result<Option<([u8; 32], bool)>, String> {
+        let addr32 = address
+            .parse::<subxt::utils::AccountId32>()
+            .map_err(|e| format!("{address} is not a valid SS58/AccountId32 address: {e}"))?;
+        let key = (addr32.as_ref() as &[u8; 32]).to_vec();
+        let att = subxt::dynamic::storage(
+            "GPUAttestation",
+            "Attestations",
+            vec![Value::from_bytes(key.clone())],
+        );
+        let v = match self.storage_at_head_result(&att).await? {
+            Some(v) => v,
+            None => return Ok(None),
+        };
+        let hash = get_field(&v, "gpu_info_hash")
+            .map(|h| composite_to_bytes(h, 32))
+            .ok_or_else(|| "attestation record has no decodable gpu_info_hash".to_string())?;
+        // A verified solution only counts while the challenge it was mined
+        // over is still current, so compare against the live value.
+        let verified_for = subxt::dynamic::storage(
+            "GPUAttestation",
+            "ChallengeVerified",
+            vec![Value::from_bytes(key)],
+        );
+        let verified = match self.storage_at_head_result(&verified_for).await? {
+            Some(v) => {
+                let current = self
+                    .get_attestation_challenge()
+                    .await
+                    .map_err(|e| e.to_string())?;
+                composite_to_bytes(&v, 32) == current
+            }
+            None => false,
+        };
+        Ok(Some((hash, verified)))
+    }
+
     /// Read the provider's attestation **with its age**: `(gpu_count,
     /// compute_gflops, submitted_at)` where `submitted_at` is the block the
     /// record was written. Returns None when the provider has never attested

@@ -97,6 +97,15 @@ pub struct DirProvider {
     pub version: Option<String>,
     /// The commit that build came from, when the box said.
     pub git_sha: Option<String>,
+    /// Item 253: the on-chain GPU fingerprint (`gpu_info_hash`, hex) the
+    /// account attested. `None` = no attestation record or unreadable chain.
+    /// A fingerprint is self-reported at registration, so this is only what
+    /// the machine claimed unless [`DirProvider::gpu_verified`] is true.
+    pub gpu_info_hash: Option<String>,
+    /// Item 253: `ChallengeVerified[who] == AttestationChallenge` on chain.
+    /// `false` for "never verified" and "unreadable" alike: the honest
+    /// default is unverified, never an unlabelled fact.
+    pub gpu_verified: bool,
 }
 
 /// One dial-back verdict, as measured by the access point (not by the node).
@@ -563,6 +572,13 @@ pub fn build_full(
             // "unknown" must stay distinguishable from a version string.
             "version": p.version,
             "git_sha": p.git_sha,
+            // Item 253: never present a self-reported fingerprint as measured.
+            // `hash: null` means unknown, not "no GPU"; `verified` is true
+            // only when the chain's challenge verifier confirmed it.
+            "gpu_fingerprint": {
+                "hash": p.gpu_info_hash,
+                "verified": p.gpu_verified
+            },
             // W50: two facts, two fields. `seen_by_ap` is true by construction
             // (this row exists because the AP has a record), and
             // `chain_registered` is what the chain says — or null.
@@ -773,6 +789,8 @@ mod tests {
             dialback: None,
             version: None,
             git_sha: None,
+            gpu_info_hash: None,
+            gpu_verified: false,
         }
     }
 
@@ -1176,6 +1194,8 @@ mod tests {
             dialback: None,
             version: None,
             git_sha: None,
+            gpu_info_hash: None,
+            gpu_verified: false,
         };
         let doc = build_full("t", None, Ok(vec![]), &[dual, v6only], &[], None, 30333);
         let rows = doc["providers"].as_array().unwrap();

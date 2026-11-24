@@ -294,6 +294,40 @@ fn main() {
     }
 }
 
+/// Item 252: the sidecar file carrying measured contribution per account,
+/// written from chain by the snapshot step. Beside the registry so the export
+/// stays deterministic and needs no node to re-run.
+pub const CONTRIBUTIONS_FILE: &str = "airdrop-contributions.json";
+pub const CONTRIBUTIONS_SCHEMA: &str = "gpn-airdrop-contributions-v1";
+
+/// `address -> contributions` as written by the snapshot step.
+///
+/// A missing or malformed file is **not an error**: the export then carries
+/// zero contribution for every participant, which is the truthful statement
+/// that nothing was measured — never a silent fallback to registrations.
+fn load_contributions(registry: &Path) -> serde_json::Map<String, serde_json::Value> {
+    let path = registry.with_file_name(CONTRIBUTIONS_FILE);
+    let Ok(raw) = std::fs::read_to_string(&path) else {
+        return serde_json::Map::new();
+    };
+    let Ok(doc) = serde_json::from_str::<serde_json::Value>(&raw) else {
+        return serde_json::Map::new();
+    };
+    if doc.get("schema").and_then(|s| s.as_str()) != Some(CONTRIBUTIONS_SCHEMA) {
+        return serde_json::Map::new();
+    }
+    match doc.get("accounts").and_then(|a| a.as_object()) {
+        Some(m) => m.clone(),
+        None => serde_json::Map::new(),
+    }
+}
+
+fn contribution_u64(c: Option<&serde_json::Value>, field: &str) -> u64 {
+    c.and_then(|v| v.get(field))
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0)
+}
+
 /// Build the airdrop input document.
 ///
 /// Contract (design `docs/design-referral-codes.md` §7c):
@@ -315,6 +349,9 @@ fn build_export(
 
     let mut credited = 0usize;
     let mut excluded = 0usize;
+    // Item 252: weight comes from measured contribution, never from the fact
+    // that an account holds a provider record.
+    let contributions = load_contributions(registry);
     let mut participants: Vec<serde_json::Value> = Vec::new();
     for (addr, e) in reg {
         let is_credited = e.status != referral::STATUS_INVALID_FOR_ADDRESS;
@@ -323,6 +360,21 @@ fn build_export(
         } else {
             excluded += 1;
         }
+        let c = contributions.get(addr);
+        let blocks_authored = contribution_u64(c, "blocks_authored");
+        let jobs_served = contribution_u64(c, "jobs_served");
+        let jobs_settled_gpn = contribution_u64(c, "jobs_settled_gpn");
+        // `allocation` is a **share weight**, not a token amount (the amounts
+        // are still undecided — design-referral-codes §7b): one unit per block
+        // authored, per job served, and per whole GPN settled. Zero for a
+        // registered-but-idle account, which is the point of item 252.
+        let allocation = if is_credited {
+            blocks_authored as f64
+                + jobs_served as f64
+                + (jobs_settled_gpn as f64) / 1_000_000_000_000.0
+        } else {
+            0.0
+        };
         participants.push(serde_json::json!({
             "address": addr,
             "referred_by": canonical(&e.r#ref),
@@ -332,6 +384,14 @@ fn build_export(
             "credited": is_credited,
             "first_seen": e.first_seen,
             "last_seen": referral::last_seen_of(e),
+            // Item 252: measured on chain. All zero means "nothing proven",
+            // which pays nothing.
+            "contributions": {
+                "blocks_authored": blocks_authored,
+                "jobs_served": jobs_served,
+                "jobs_settled_gpn": jobs_settled_gpn,
+            },
+            "allocation": allocation,
         }));
     }
 
@@ -385,6 +445,8 @@ fn build_export(
         "registry_file": registry.file_name().and_then(|n| n.to_str()).unwrap_or("referral-registry.json"),
         "registry_present": raw_registry.is_some(),
         "registry_sha256": registry_sha256,
+        "contributions_file": CONTRIBUTIONS_FILE,
+        "contributions_present": !contributions.is_empty(),
         "totals": {
             "participants": participants.len(),
             "credited": credited,

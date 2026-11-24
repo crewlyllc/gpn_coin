@@ -1,3 +1,14 @@
+## 17:05 PT 0.3.72 §2 — 252 and 253 implemented; the three red tests are green
+
+- **A0**: `GET /commits/main` ⇒ `06bbc2677bd57c49991e5cffa7346ecae88ca845` (the red-test commit), which equals local HEAD in `~/.openclaw/workspace/projectmanager07`. `GET /actions/runs?head_sha=06bbc267…` ⇒ run **45298958279** `pending`, `conclusion: null` — noted, not waited on; this box is code+tests, which needs no CI result. Nothing red.
+- **Boxes ticked: §1 box 3 (the "cannot be tested" conditional — N/A, all five items tested) and §2 boxes 1-6** with evidence inline in `docs/releases/0.3.72.md`.
+- **252** — `build_export` now reads `airdrop-contributions.json` (schema `gpn-airdrop-contributions-v1`) beside the registry: per-participant `contributions.{blocks_authored,jobs_served,jobs_settled_gpn}` and `allocation` as a **share weight** (1 per block + 1 per job + 1 per whole GPN settled; token amounts remain undecided per design §7b). Missing/malformed sidecar ⇒ zeros, never a fallback to registrations. `credited` stays true, idle allocation 0.0.
+- **253** — `ChainClient::get_gpu_fingerprint` reads `Attestations[who].gpu_info_hash` and sets `verified` only when `ChallengeVerified[who] == live AttestationChallenge`. `apply_gpu_fingerprints` stamps `Provider` in the heartbeat loop (300 s cache, bounded 512) and both payloads carry `gpu_fingerprint: {hash, verified}` — `provider_json` (`/providers`, `gpn_scheduler.rs:1807`) and the `/network` row (`network_directory.rs:578`). Unreadable chain ⇒ `hash: null, verified: false` — unknown is labelled unverified, never a bare fact.
+- **Tests**: red→green, `cargo test --release --bin gpn-referrals` 6 passed; `--bin gpn_scheduler` 108 passed; `--lib` 798 passed (14 ignored); `cargo fmt --check` clean; clippy with `ci.yml`'s exact allow set clean.
+- **Pushed once** (code + checklist + this entry). CI will run on this sha; not waited on per the dispatch-and-end rule.
+- **Next run**: §3 boxes (bump already at 0.3.72 — verify `--check` lockstep, seed-list agreement, CHANGELOG section present), then §4/§5; live runtime proofs (250's `first check in <1h`, 251 re-registration, 252/253 on a real AP) belong to §10.
+- No blocker, no [TRIAGE].
+
 ## 16:39 PT 0.3.72 §1 box 2 — red-first tests written for 252 and 253 (three failing tests pasted)
 - **A0**: real `origin/main` HEAD is `865b893b546e1c152b2346d40568ea7df5f63c4e` (docs(loop) 251 run record). `GET /actions/runs?head_sha=865b893…` ⇒ `total_count: 0` — docs-only, expected. The earlier code commit `8e4d0a8` has run **45290002164**, still `status: pending`, `conclusion: null` — noted, not waited on. Nothing red.
 - **Working tree corrected**: `~/gpn-work` is a stale clone (HEAD `473b786`, 3 commits behind main). Reverted the three test edits there and worked in `~/.openclaw/workspace/projectmanager07` at `865b893` — the current tree. (TOOLS.md warning about a stale working tree applies; checked before claiming anything.)
