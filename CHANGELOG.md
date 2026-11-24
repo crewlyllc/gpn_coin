@@ -8,6 +8,30 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 versions are [Semantic Versioning](https://semver.org/spec/v2.0.0.html), with
 the GPN-specific meaning of each level documented in `docs/updates.md`.
 
+## [0.3.73] - 2026-11-23
+
+Bumped from 0.3.72 (`scripts/bump-version.py patch`).
+
+Two items found while stamping and closing 0.3.72: a docs generator that silently reverts an
+SEO fix, and the missing end-to-end proof that a stranger can install, serve and update.
+
+### Added
+- **`scripts/stranger-lifecycle.ps1` — the stranger lifecycle proof** (row 256): on a clean Windows
+  guest, using only the snippet from `https://gpncoin.ai/download` and no credential or repo
+  access, it asserts in order that the downloaded size and sha256 match `releases.json`, that
+  `gpn-node --version` matches the manifest, that the provider registers unattended within 10
+  minutes with a named reason on failure, that one AI job is served end to end through the access
+  point, that the node self-updates to the next published version with no human, and that it is
+  still registered and serving afterwards. Any step that needs a human, a credential or a retry
+  fails the release.
+
+### Fixed
+- **`scripts/build-site-docs.py` emits the clean URLs the site actually uses** (row 255): the
+  generator wrote `<link rel="canonical" href="…/docs/<slug>.html">`, `og:url` with `.html`, and
+  nav/footer hrefs ending `.html`, so running it reverted the 2026-11-24 SEO 301 fix across 14
+  files. The HEAD/FOOT/NAV templates now emit `/docs/<slug>`, `/download`, `/ai`, `/chat` …, and
+  regenerating the committed tree is a no-op except the intended content change.
+
 ## [0.3.72] - 2026-11-23
 
 Bumped from 0.3.71 (`scripts/bump-version.py patch`).
