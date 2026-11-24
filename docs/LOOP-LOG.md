@@ -40,6 +40,12 @@
   observed at the next entry after 354,683 + 5,760.
 - §10 box 1 ticked with the above inline. Next run: §10 box 2 (mark row 251 `DONE` with version, sha
   and evidence), then §10b (timing) and §0b (archive + INDEX).
+- **Tests before claiming it**: `cargo test -p gpn-runtime --test attestation_identity_spec46` ⇒
+  4 passed (`spec_version_matches_live_chain` now asserts 55); `scripts/check-spec-version.sh` ⇒ OK
+  (source 55, network.json 54). Node healthy after the restart: head 354,714 → 354,715 with 16
+  `Imported`/`Prepared` lines in 4 min, 3 peers, no `PAUSED`/`gpn-isolated`.
+- Commit `cac222b` pushed `ad5e31c..cac222b -> main` — a code change (runtime, examples, script), so
+  a CI run is expected on that sha; not waited on.
 
 ## 21:44 PT 0.3.72 §7b/§8/§9 ticked, §10 partial — item 251's runtime is NOT on chain (spec_version collision found)
 
