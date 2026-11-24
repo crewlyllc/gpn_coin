@@ -61,7 +61,8 @@ so its price tracks the network's actual work.
 |---|---|---|
 | Fee-free entries per block | **2** default (`FreeEntryLimit`, root-mutable) | `FreeEntryCount` (block-number keyed) |
 | Fee-free entries per account, ever | **1** | `FreeEntryAccounts` |
-| Fee-free entries per GPU fingerprint, ever | **1** | `FreeEntryGpus` + `GpuOwner` |
+| Fee-free entries per GPU fingerprint | **1 per 24 h** (`FreeEntryCooldown` = 5 760 blocks; #251, 0.3.72) | `FreeEntryGpuLastEntry` + `GpuOwner` |
+| Re-entry inside the cooldown | refused, named reason `FreeEntryGpuRateLimited` (code 6) | `FreeEntryGpuLastEntry` |
 | Fingerprint required on the free path | always | zero fingerprint ⇒ `GpuIdentityMissing` |
 | Prior attestation must not exist | required | `Attestations::contains_key` |
 | PoW validity | chain difficulty | `EntryPowVerifier::verify_entry_pow` |

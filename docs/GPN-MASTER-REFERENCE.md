@@ -472,6 +472,16 @@ reads 120/min, typed `gpn_rate_limited` errors. **Testnet inference is free.** M
 seconds (34.7 s on 2026-10-22), dominated by the on-chain create-inclusion wait (#49/#52), ~1 s of
 which is inference.
 
+**GPU fingerprint is a claim until the chain confirms it (#253, 0.3.72).** `GET /api/providers` and
+`GET /api/network` rows carry `gpu_fingerprint: {"hash": <hex|null>, "verified": true|false}`. The
+hash is what the machine **self-reported** at registration; `verified` is `true` only when
+`GPUAttestation::ChallengeVerified[who]` equals the live `AttestationChallenge`, i.e. a challenge was
+actually solved against the current one. `verified: false` covers both "never verified" and
+"verified against a stale challenge" — in either case the fingerprint is a **claim, not a measurement**.
+`hash: null` means unknown (unreadable chain/no attestation), not "no GPU". The field is always
+present so no consumer can read silence as proof. Dashboard and explorer render the same rows, so
+they inherit the label.
+
 **Model catalogue — curated + VRAM-gated (`gpn_agent::models`) — LIVE.** Three gates: (1) **VRAM fit**
 from a weight table with 1.15× headroom, applied at advertisement (`/status models[]`), at claim
 (`resolve_model`), and at AP routing (`pick()`); (2) **public allowlist** of 16 assistant-grade
