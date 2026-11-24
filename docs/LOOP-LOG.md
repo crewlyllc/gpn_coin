@@ -1,3 +1,33 @@
+## 13:05 PT 0.3.74 CLOSED — §8/§9/§10/§10b ticked, 4 rows COMPLETE, checklist filed
+
+- **A0 CI**: `origin/main` HEAD was `df3fbe93` (the site commit) ⇒ `GET /actions/runs?head_sha=df3fbe9366948259b0fd8fec2dec558994b4c2bd`
+  ⇒ `total_count: 1`, one run `status: pending` (created 20:22Z). Not a conclusion, so nothing waited on; worked the
+  checklist instead, as the rule says.
+- **§8 (4/4) TICKED from one command**: `scripts/release-cut.sh --verify-published --version 0.3.74` ⇒ **exit 0**,
+  linux 348,703,626 B `877212c7…35aa3`, windows 253,255,756 B `70a265ed…6b469`, both equal the manifest, fetched
+  anonymously with no token and no cookie jar. Live polls at 20:53Z: `/download` `0.3.74`, `/docs/run-a-node`
+  `release 0.3.74`, `/docs/downloads` `release 0.3.74`, `/releases.json` `"version": "0.3.74"`.
+- **§9 (4/4) TICKED — the node updated itself**: `gpn-update.timer` fired 12:20:38 PT and applied 0.3.74 with no
+  human: `confirm: waiting up to 900 s … for 0.3.74` → `confirm: process=up rpc=no 0s` → `process=up rpc=yes 22s
+  version=0.3.74` → `confirmed 0.3.74 is running`. Running fleet process (pid 2765044) banner: `✌️  version 0.3.74`,
+  `spec : 55 (node v0.3.74)`. `~/.gpn/update/versions/` keeps both 0.3.73 and 0.3.74; `current.previous` →
+  `versions/0.3.73`; attempt record `outcome: confirmed, attempts: 1, release_id 877212c7…` (same digest §8 fetched).
+- **§10 (3/3) TICKED**: the bundle's user-visible change (row 257) answered 200 on all three pages
+  (`/docs/updates`, `/docs/node-gui-and-idle`, `/docs/provider-address-and-models`); 32 min on the 0.3.74 process with
+  `grep -c 'Reason:'` ⇒ **0**, no `gpn-isolated`/`gpn-forked`, peer slots steady `5/8 filled`, peers tracking our height.
+  `GPN-LIST.md` rows **257, 259, 260, 261 → COMPLETE 0.3.74** with fix shas (`914f855`, `fa2644c`, `4b05671`,
+  `6c23d0f`), release `c879718`, and each row's evidence line. No row deleted.
+- **§10b TICKED**: `release-timing.py 0.3.74` → json+md committed; 44/56 boxes, 5h01m total, slowest single step
+  **39m42s** (linux release build — a compile wait, not a redo).
+- **§0b FILED**: checklist moved to `docs/releases/archive/0.3.74.md`, `INDEX.md` row `| 0.3.74 | 2026-11-24 | 257, 259,
+  260, 261; 256 (AWAITING-OWNER) |`. Push `f7bf406..0518ae7`.
+- **[TRIAGE] still open — item 256** (§0e step 1 left unticked, carried AWAITING-OWNER): which machine carries
+  stranger-lifecycle steps 3-6. GPN-209 has no GPU partition, so registration/serving/self-update cannot be exercised
+  there. Recommend option **A** (GPU-P from box 1's 5070 Ti). Nothing changed by this run; it remains the only open
+  release-gate box, and it is an owner decision about his machines, not a code defect.
+- **Next run**: no checklist is in progress → bundle all NEW rows into 0.3.75 (§C of the loop). Also note: the
+  `gpn-loop` clone was fast-forwarded to `0518ae7` so the next run does not start on a stale tree.
+
 ## 12:22 PT 0.3.74 §7b — every version surface agrees (4/4 DONE)
 
 - **A0 CI**: `origin/main` HEAD `81c0c57d` (docs-only) ⇒ `GET /actions/runs?head_sha=81c0c57ddb62…` `total_count: 0`,
