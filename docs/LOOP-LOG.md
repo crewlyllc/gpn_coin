@@ -1,3 +1,14 @@
+## 18:15 PT 0.3.72 §3b box 252 ticked — airdrop pays measured contribution (the producer was missing)
+
+- **A0**: `GET /commits/main` ⇒ `f7084de47fec2d6bbbfd1f52fcd80b60e6d2569a` (docs-only tick of box 251). `GET /actions/runs?head_sha=f7084de…` ⇒ `total_count: 0` — expected, `ci.yml` ignores `docs/**`/`**/*.md`. Nothing red, nothing waited on.
+- **Box worked**: §3b item **252** (first unticked box). The export code existed (`b80e865`) but **nothing produced `airdrop-contributions.json`**, so every allocation would have been `0.0` — a silent no-payout, the mirror image of the bug the item is about. Fixed the cause rather than ticking the half.
+- **Added**: `scripts/airdrop-contributions.py` — reads the chain + the AP job ledger: `blocks_authored` from `GPUPoW::BlocksAuthored`; `jobs_served` = jobs the AP brokered **confirmed Completed on chain** (a `Running` job does not count); `jobs_settled_gpn` = provider net payout mirroring `settle_escrow` (`JobBillingV2` → `JobBilling` → quoted price, capped by price, minus 500 bps fee). Accounts keyed by pubkey and emitted in the registry's spelling — the AP's ss58 checksum differs from ours for the same account, which was a real bug in my first cut. Docs: `docs/design-referral-codes.md` §7d.
+- **Evidence, offline**: `scripts/tests/test-airdrop-contributions.py` ⇒ `13 passed, 0 failed` (decode, Completed-only rule, fee arithmetic, registry-spelling keys, CLI output).
+- **Evidence, live**: node :9944 head #353673 + AP :8092 ⇒ `wrote … 7 contributing account(s) … block #353673`; blocks match `gpn-authors.py` exactly (95457 / 54434 / 18348 / 16168 / 14040 / 6232), one provider `jobs=212 settled=347.635617 GPN`.
+- **Evidence, end to end through the shipped export**: `gpn-referrals --export` on that sidecar ⇒ idle registered account `5DAAnrj7…` `contributions {0,0,0}`, `allocation 0.0`, `credited true`; contributor `5ENqSp5Q…` `allocation 54993.63561695739`. `cargo test --release --bin gpn-referrals` ⇒ `6 passed; 0 failed`.
+- **Next run**: §3b item 253 (GPU fingerprint labelled verified/unverified), then 254, then §3.
+- No blocker, no [TRIAGE].
+
 ## 17:47 PT 0.3.72 §3b box 251 ticked — re-registration rate limit, tests re-run green
 
 - **A0**: `GET /commits/main` ⇒ `9659629bd7c13719327ccdc46ed9aa94be0dee1e` (docs-only tick of box 250). `GET /actions/runs?head_sha=9659629…` ⇒ `total_count: 0` — expected, `ci.yml` ignores `**/*.md`/`docs/**`. The only live run is **45298958279** (`CI`, created 00:39Z) on `06bbc26`, `status: in_progress` — noted, not waited on.

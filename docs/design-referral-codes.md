@@ -230,3 +230,55 @@ Rules the document itself encodes:
 
 The file is written stage-then-rename, like the registry itself, so an interrupted export cannot
 leave a half-written manifest that later looks like a complete one.
+
+## 7d. Paying measured contribution, not registrations (row 252, 0.3.72)
+
+A registry row is proof that somebody pasted a code — not that they did anything. Paying the
+registry would make *identity creation* the thing to farm, which a free-account network cannot
+defend. So the export now carries, per participant, what the chain says they contributed:
+
+```
+"contributions": { "blocks_authored": 54434, "jobs_served": 212,
+                   "jobs_settled_gpn": 347635616957390 },
+"allocation": 54993.63561695739          # share weight, NOT a token amount
+```
+
+- `blocks_authored` — `GPUPoW::BlocksAuthored`. Permanent, proof-of-work, not self-reported and not
+  resettable by re-registering.
+- `jobs_served` — completed jobs the access point brokered to that provider, where completion is
+  confirmed on chain (`ComputeMarketplace::Jobs[id].state == Completed`). A job the AP merely queued
+  does not count.
+- `jobs_settled_gpn` — the provider's net payout for those jobs, in planck, computed with the
+  pallet's own rule: `charge` from `JobBillingV2` rates else `JobBilling` price/token × tokens else
+  the quoted `price`, capped by the quoted `price`; minus `MarketplaceFeeBps` (500 = 5%).
+- `allocation` = 1 per block + 1 per job + 1 per whole GPN settled. It is a **weight**; the token
+  amounts themselves are still undecided (this section replaces nothing in §7b).
+
+An idle account keeps `credited: true` (its attribution is real evidence) and gets
+`allocation: 0.0`. A missing or malformed sidecar yields zeros for everyone — never a fallback to
+counting registrations.
+
+### The producer
+
+```
+python3 scripts/airdrop-contributions.py [--rpc URL] [--ap URL] \
+        [--registry FILE] [--out FILE]
+```
+
+writes `airdrop-contributions.json` (`gpn-airdrop-contributions-v1`) beside the registry:
+
+```
+{ "schema": "gpn-airdrop-contributions-v1", "generated_at_block": 353673,
+  "sources": { "rpc": "…", "ap_jobs": "…/jobs", "fee_bps": 500,
+               "planck_per_gpn": 1000000000000 },
+  "accounts": { "5…": { "blocks_authored": …, "jobs_served": …, "jobs_settled_gpn": … } } }
+```
+
+Run it **before** `--export`, on the AP host (the AP's `/jobs` ledger is the only place a *finished*
+job can still be attributed to a provider: `JobProvider`/`JobEscrow` are `take`n on completion).
+Accounts are keyed by pubkey, not by the ss58 string — different tools checksum differently for the
+same account — and the emitted spelling follows the registry, so the export's lookup by address
+string always matches.
+
+Offline test: `python3 scripts/tests/test-airdrop-contributions.py` (fake node + fake AP; asserts the
+decode, the Completed-only rule, the fee arithmetic and the registry-spelling keys).
