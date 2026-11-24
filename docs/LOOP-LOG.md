@@ -1,3 +1,32 @@
+## 11:46 PT 0.3.74 §6 — artifact scan + version proof ticked (§6 2/2 DONE) [no triage]
+
+- **A0 CI**: `origin/main` HEAD `d077b32` (docs-only loop-log/checklist commit) ⇒
+  `GET /actions/runs?head_sha=d077b32…` `total_count: 0`, expected under `ci.yml` paths-ignore.
+  Nothing red, nothing waited on.
+- **Stale tree caught first**: local HEAD was `0cdb78f` while origin/main was `d077b32`
+  (3 commits ahead — §4 CI-conclusion, §5 linux tick, §5 windows publish all landed). Fast-forwarded
+  before reading the checklist; the §5 boxes I would otherwise have re-worked were already earned.
+- **§5 re-read, not re-run**: run `45461486516` windows `success` 19:16:09Z, release `windows-latest`
+  holds `gpn-windows.zip` 253,255,756 B `70a265ed…6b469` + `.bundle` 9,033 B.
+- **§6 box 1 TICKED**: both assets re-downloaded from the asset API into `/tmp/v074`, local sha256
+  identical to the API `digest` (`877212c7…e35aa3` linux, `70a265ed…6b469` windows). Template literals
+  present in both `gpn-node` binaries (`reorg=` 1, `work ours=` 1, `gpn-forked` 2). This bundle has no
+  node Rust change, so the meaningful literals are the changed files': shipped `install.ps1` in
+  **both** bundles carries `Confirm-NodeStarted` 3× (def :2417, calls :3748/:3756 `-Seconds 60`), and
+  `node started (GPN-Node)` survives only as the :2389 comment — no live print. `release-cut.sh` is
+  maintainer-only, not shipped (row 261 proven by its 98/98 suite).
+- **§6 box 2 TICKED**: linux `./lin/gpn-node --version` ⇒ `gpn-node 0.3.74`; windows run over SSH on
+  box 1 — `gpn-node.exe --version` ⇒ `gpn-node.exe 0.3.74`, `gpn-agent --version` ⇒ `gpn-agent 0.3.74`,
+  `(Get-Process gpn-node).Path` ⇒ `C:\gpn\data\update\current\gpn-node.exe`, so the running process
+  *is* the 0.3.74 binary.
+- **Noted for §9**: box 1's running node already reports 0.3.74 from the update path before
+  `release-cut` has mirrored the version into `releases.json` — the updater reads the GitHub
+  `windows-latest` release directly. Good for §9, but `releases.json`/site are still 0.3.73 until §7.
+- **Next run**: §7 box 1 (hand-run `cosign verify-blob` on freshly re-downloaded zip+bundle), then
+  `scripts/release-cut.sh --timeout 300`. §0e stranger-lifecycle boxes remain unticked (no clean
+  Windows guest this release) — recorded, not ticked.
+- **No [TRIAGE]**: nothing needed a decision.
+
 ## 11:16 PT 0.3.74 §5 COMPLETE (7/7) — Windows release build succeeded and the cosign bundle verifies the published zip [no triage]
 
 - **A0 CI (conclusion only)**: `origin/main` HEAD `86e08de` is the previous docs commit;
