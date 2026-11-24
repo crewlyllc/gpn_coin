@@ -1,3 +1,18 @@
+## 10:18 PT 0.3.74 §5 — linux release build dispatched on tag build/6d5666acf6e7 [no triage]
+
+- **A0 CI**: `origin/main` HEAD `6d5666a` (docs-only) ⇒ `total_count 0`, expected (paths-ignore intact).
+  Code SHA `6c23d0f` ⇒ run **45447907558** `in_progress`: `fmt + clippy` success, `secret-scan` success,
+  `linux` job success (17:27→17:59Z), `windows` job actively building — step 6 `Build + test gpn-node`
+  success at 18:05Z, step 7 `Build + test gpn-agent (release)` in progress. Not hung, not waited on.
+- **§4 box 4 left open** (still no *conclusion* for the code SHA) — annotated with the run id and the
+  exact per-job state so next run ticks it on `success` or reads the failing log on `failure`.
+- **§5 linux build DISPATCHED, not waited on**: tag `build/6d5666acf6e7` → sha `6d5666a` pushed,
+  `release-linux-selfhosted.yml` run **45457954423** started 18:17:43Z. Handle written into the box.
+- **Windows release build deliberately NOT dispatched yet**: box 1's runner (DESKTOP-USBUADL) is
+  `busy=true` with the CI windows job; the final Windows build is dispatched once that CI job
+  concludes green, so a red CI tree cannot become a published `windows-latest` asset.
+- **No [TRIAGE]**: nothing needed a decision.
+
 ## 09:38 PT 0.3.74 box 5 — §3 seed-parity box ticked (no seed change; all five sources carry the identical bootnode string) [no triage]
 
 - **A0**: CI run **45447907558** for `6c23d0f` (row 261, real code) is **in_progress** at 17:22→17:27Z;
