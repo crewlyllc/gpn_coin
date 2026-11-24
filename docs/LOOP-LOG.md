@@ -1,3 +1,32 @@
+## 00:5x PT 0.3.73 §0e box 2 fixed for real (row 258) — GPU failure now names the action; both release legs dispatched on e33e2c8
+
+- **A0**: `origin/main = 7793920`; `head_sha=7793920f…` ⇒ `total_count: 0` (docs-only). Local tree was
+  two commits behind and was ff'd before work. Noted, not waited on: CI `45347253922` (sha `61212a0`)
+  still `in_progress` at 1h33m — it is what the new runs queue behind.
+- **Box worked: §0e box 2** ("every step failure names a cause a stranger can act on") — the GPU path
+  the first lifecycle run actually hit. `gpu::gpu_error_advice` classifies the observed classes
+  (no OpenCL runtime / no GPU device / device permission / unknown) into one actionable sentence, the
+  original error text kept verbatim; onboarding prints `[onboard]   what to do: …` and the benchmark
+  error carries it inline.
+- **Test gate**: `gpu::tests::onboarding_benchmark_failure_names_an_action` fails on the pre-fix format
+  with exactly `no action in: GFLOPS benchmark: open GPU matmul: no OpenCL platforms:
+  DLOPEN_RUNTIME_LOAD_FAILED`, and passes after. `cargo test --lib gpu::tests` ⇒ 25 passed;
+  `onboard::` ⇒ 18 passed; `cargo check --bin gpn_node` finishes. fmt clean on the three touched
+  files; clippy `-D warnings` reports **30 errors both with and without this change** (host toolchain
+  1.98.0 vs the crate's expectations) and none of them on the new lines — pre-existing, not caused here.
+- **Also ticked with evidence**: §3 bump/changelog/lockstep/seeds (`bump --check` ⇒ 15 manifests + 14
+  lockfiles agree; `website tests/access-points.test.js` 10/10; full site suite 29/29), §4 push boxes
+  (0 runs for both docs shas; `e33e2c8` ⇒ CI `45360094725`).
+- **Committed + pushed once**: `e33e2c8` (source + CHANGELOG + checklist).
+- **Then DISPATCH AND END**: `release-linux-selfhosted.yml` ⇒ run `45360104644` (`in_progress`) and
+  `release-windows.yml` ⇒ run `45360119351` (`queued`, Windows slot `busy=true`), both `head_sha
+  e33e2c8`. Handles written into §5. Nothing waited on.
+- **Still open in this release**: §0e box 1 / §3b 256 — **AWAITING-OWNER**, marked in both places;
+  the [TRIAGE] question (which machine carries lifecycle steps 3-6) is in `docs/NEEDS-TRIAGE.md`
+  item 256 and was announced at 00:1x.
+- Next run: check `45360104644` / `45360119351` conclusions; if both green, §5 attestation boxes →
+  `release-cut`. A red leg means reading its log and fixing the cause, per the failure rule.
+
 ## 00:1x PT [TRIAGE] STRANGER LIFECYCLE — script written, steps 1-2 pass on a clean guest, step 3 names a useless reason
 
 - **A0**: `HEAD = origin/main = 8d1c515`; `GET /actions/runs?head_sha=8d1c515…` ⇒ `total_count: 0`
