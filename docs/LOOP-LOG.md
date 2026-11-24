@@ -1,3 +1,41 @@
+## 14:55 PT row 194 worked on box 3: fork choice accepted a reorg it could not perform — stale work claims fixed (87d77b3b) [no triage]
+
+- **A0 CI**: `origin/main` HEAD `e11390c7b4ee65ece47be222cd3cef283796a137` ⇒ `GET
+  /actions/runs?head_sha=e11390c7…` `total_count: 0` — docs-only commit, expected under `ci.yml`
+  paths-ignore. Nothing red, nothing waited on.
+- **State**: `GPN-LIST.md` parses to **1 IN-PROGRESS** (194, unblocked 13:58 today with box 3 as the
+  venue), 1 NEW (256), 6 BLOCKED. No open checklist (`0.3.74.md` is archived and filed), so this run
+  worked the row itself.
+- **What the rig showed**: on box 3 with the 0.3.74 binary, a frozen pair (ours `fork\D` #287 work
+  573,890; theirs `fork\BL2`, work 1,730,389,292) produced
+  `fork-choice: work ours=573890 theirs=1730389292 peer=12D3KooWGzYV4…; reorg=accepted depth=95` →
+  `requesting heavier branch` → and then **nothing**: no `block-serving: asking`, no import, best
+  stayed #287, no `gpn-forked`. The peer's own log two ms earlier explains it: it announced
+  `best=#192` with `work=1730389292` — the work of the #229 branch it had just left, attached to a
+  tip that was on OUR chain. `our_work` was measured on a 30 s timer and then published next to
+  whatever the current best block was.
+- **Fix (code, pushed once, CI not waited on)**: `87d77b3b` — `fork_choice::work_for_tip` only
+  claims/compares a work figure while the tip still matches (height **and** hash; otherwise gpncs/1,
+  i.e. work unavailable and nothing changes), and the index is refreshed when the best block changes
+  (1 s poll, the walk is a 0-3 ms retarget-boundary scan) instead of a fixed 30 s. `cargo test
+  --release -p gpn-node --bin gpn-node -- fork_choice` ⇒ **14 passed, 0 failed**, including the new
+  `work_is_only_claimed_for_the_tip_it_was_measured_on`; `cargo build --release --bin gpn-node` green.
+- **NOT yet proven on hardware**: the corrected claim (a syncing node no longer announcing another
+  branch's work). The local smoke pair could not seal — two dev nodes on loopback do not peer on this
+  host (0 peers ⇒ sealing paused), so the observable half of the fix needs the box-3 pair on a build
+  that contains it. Stated plainly rather than ticked.
+- **Rig lessons for the next run** (also in the row): a copied data dir keeps
+  `chains/gpn_dev/network/secret_ed25519`, so the copy shares A's libp2p identity and silently never
+  peers ("Local peer ID used in reserved node, ignoring"); `revert <N>` exists and worked (#694→#644,
+  silent through the CLIXML wrapper); and the 2026-11-20 dirs have moved (A #694 light, B #697, B3
+  #691, BL #402, BL2 #229 **heavy**, C1 #743 **heavy**, D #287, C2/R1 = A's chain), so the pairs must
+  be rebuilt rather than resumed.
+- **Row 194 stays IN-PROGRESS** — no live shallow-accept and no live `refused:deep-fork` yet.
+- **Next run**: benchmark pair from `fork\D` (#287, 573,890) vs `fork\BL2` (#229, 1,730,389,292)
+  already gives depth 58 and a 3,000× work gap — run it on a build containing `87d77b3b`, capture the
+  accepted+reorg lines and the block hashes at shared heights, then the deep pair (ours #694 vs BL2
+  ⇒ depth 465 ⇒ `refused:deep-fork` + `gpn-forked` + no adoption), then restore box 3.
+
 ## 13:47 PT nothing to bundle (0 NEW, 0 IN-PROGRESS) — 0.3.74 re-verified live, cadence PASS; [TRIAGE] 256 unchanged
 
 - **A0 CI**: `origin/main` HEAD `d506914ee6442ab6df1e7b750f5eb8605a03ef4b` ⇒
