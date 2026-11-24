@@ -1,3 +1,26 @@
+## 09:05 PT 0.3.74 box 3/4 — row 260 DONE: cargo-audit clean on both workspaces [no triage]
+
+- **A0 CI**: `origin/main` HEAD was `ebaaec9` (docs-only loop-log commit) ⇒ `total_count 0`, expected.
+  This run pushed the code change `4b05671`; its CI run is queued and is **not** waited on.
+- **§3b 260 — cargo audit: 38 node / 29 agent advisories.** Two classes, handled differently:
+  - **Fixable → bumped**, never ignored: url 2.5.9, libz-sys 1.1.33, quinn-proto 0.11.19,
+    quinn-udp 0.5.16, wasmtime 36.0.23 (+cranelift 0.123.23). Cleared 14 node and 9 agent advisories.
+  - **Pinned parents → one justified ignore each, with reason + review date 2027-01-26**, in
+    `gpn-node/.cargo/audit.toml`, `gpn-agent/.cargo/audit.toml` and mirrored in `deny.toml`:
+    hickory-proto/resolver 0.24.4 (libp2p-dns 0.42 ← libp2p 0.54.1 ← sc-network, polkadot-sdk rev
+    da5c9660), hickory 0.25.2 (litep2p 0.14.3), libp2p-quic 0.11.1 (fix needs libp2p 0.56),
+    wasmtime 8.0.1 (sp-wasm-interface 20 ← sp-core 28), ring 0.16.20 (libp2p-tls 0.5),
+    webpki-roots 0.25.4 (libp2p-websocket 0.44). The 4 high DNSSEC flaws are unreachable here:
+    the seed resolver does plain TXT lookups with DNSSEC validation off, and no zone-file/SVCB
+    parser is ever constructed.
+- **Evidence**: node `cargo audit` rc 0 (`error:` gone, 36 allowed warnings), agent rc 0 (19 allowed
+  warnings), `cargo deny check advisories` ⇒ `advisories ok` in both trees. `cargo test --release
+  -p gpn-node` ⇒ **303 passed, 0 failed, 2 ignored**; agent suites ⇒ 4+7+5+4+3 passed, 0 failed.
+  Two-node testnet on the rebuilt binary (`gpn-node 0.3.74`): mutual `system_peers` right after dial
+  and 4 min later, both syncing the live testnet (block 60063 / 56144), 0 ban lines; the production
+  node on 9944 was not touched (`isSyncing:false`, peers 4).
+- Next box in this checklist: **261** (release-cut `--dry-run` prints the wrong lock-tool line).
+
 ## 08:5x PT 0.3.74 box 2/4 — row 259 DONE: the installer waits for a real start witness [no triage]
 
 - **A0 CI**: `origin/main` HEAD `ec4aaae` at start (docs-only) ⇒ `total_count 0`, as designed. This
