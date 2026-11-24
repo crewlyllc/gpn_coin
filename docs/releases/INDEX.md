@@ -5,6 +5,7 @@ the checklist's last box is ticked and the version is published.
 
 | version | published | items | checklist |
 |---|---|---|---|
+| 0.3.73 | 2026-11-24 | 255, 258; 256 (AWAITING-OWNER — steps 3-6 need a GPU guest, [TRIAGE] item 256) | archive/0.3.73.md |
 | 0.3.72 | 2026-11-24 | 250, 251, 252, 253, 254 | archive/0.3.72.md |
 | 0.3.71 | 2026-11-23 | 16 (per-release sweep; closed), 248, 249 | archive/0.3.71.md |
 | 0.3.60 | 2026-11-19 | 205 (blocked: runtime), 206, 207 | archive/0.3.60.md |

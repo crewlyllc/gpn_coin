@@ -23,6 +23,108 @@
   over SSH / the test VM), then §10 behaviour + §10b timing + §0b filing. No CI waits, no blockers.
 - **No [TRIAGE]**: nothing this run needed a decision.
 
+## 07:55 PT 0.3.73 CLOSED — §7/§7b/§8/§9/§10/§10b ticked, checklist filed, rows 255 & 258 COMPLETE [no triage]
+
+Every claim below is from a command in this run (07:30–07:55 PT).
+
+- **A0 CI**: no run exists for `origin/main` HEAD `7d43c1c` — a docs-only SHA, `ci.yml` paths-ignore
+  as designed (`GET /actions/runs?head_sha=7d43c1c…` ⇒ `total_count 0`). Nothing to wait on.
+- **§7**: `network.json` `latest_version` = `0.3.73` == published `0.3.73`; `/releases.json` polled
+  twice 10 s apart, both `0.3.73` (`linux 79623ab8… 347,037,262` / `windows 212db4c6… 253,204,352`).
+- **§7b**: both GitHub releases carry those exact assets in `jeremyzguo/gpn_coin` **and** the
+  `crewlyllc/gpn_coin` mirror the manifest points at; site == GitHub == artifact `--version 0.3.73`
+  == the local running process (`system_version`). No new AI capability in this batch, so no
+  discoverability page was owed — checked, not assumed.
+- **§8**: `release-cut.sh --verify-published --version 0.3.73` ⇒ exit 0, `PASS`, both assets
+  downloaded anonymously with matching sha256/size. `/docs/downloads`, `/download`, `/docs/run-a-node`
+  all stamp `0.3.73` (block 356,721, checked 06:51 PT).
+- **§9**: this host updated itself — `gpn-update.timer` fired 07:31:21, `confirmed 0.3.73 is running`
+  at 07:32:44, `current → versions/0.3.73`, `current.previous → versions/0.3.72` (rollback retained),
+  node never went down (`process=up rpc=no` at t=0 s, up with rpc by 4 s).
+- **§10**: `/docs/wallet` 200 and `/docs/wallet.html` 301→clean URL (row 255's whole point);
+  0 matches for `Reason:|panic|gpn-isolated|gpn-forked` in the fleet log over 5 min, peers 4,
+  chain sealing (356,721 → 356,897).
+- **§10b**: timing written (`docs/releases/timing/0.3.73.{json,md}`), total 7h56m. Slowest step
+  2h42m at the release cut — it waits on the single-slot Windows runner, not on re-done work.
+- **Filed**: checklist moved to `archive/0.3.73.md`, `INDEX.md` row 0.3.73 added, `GPN-LIST.md`
+  rows 255 and 258 ⇒ `COMPLETE 0.3.73 (2026-11-24)` with evidence.
+- **Still open, deliberately**: row 256 / §3b 256 / §0e box 1 — `AWAITING-OWNER`, question already
+  filed as `NEEDS-TRIAGE.md` item 256 (which GPU-capable Windows guest runs lifecycle steps 3-6).
+  Steps 1-2 passed on GPN-209; the guest has no GPU. No new triage is being raised this run.
+- **Carried**: the 07:01 PT audit entry below was written last run and not pushed; it goes in this
+  same commit.
+
+## 07:01 PT AUDIT — fixed 1 (disk, 3.3 G) / everything else clean [no triage]
+
+Every number below is from a command run in this session, 07:01–07:20 PT.
+
+- **Units**: `systemctl --user list-units 'gpn*' --all` = 23 units (17 services + 6 timers):
+  10 services running, 6 timers waiting, 7 services inactive/dead (all oneshot or disabled), 0 failed (`systemctl --user --failed` ⇒ "0 loaded units listed"). Every
+  `list-unit-files` entry in state `enabled` is `active` — no enabled-but-dead unit.
+  Deliberately dead and correct: `gpn-node.service` (state **disabled**; the node runs under
+  `gpn-fleet`), `gpn-update.service` (oneshot, timer-driven), the four static oneshots.
+- **Ports**: `ss -ltnp` — 9944 (`gpn-node` pid 2246158), 8092 (`gpn_scheduler`), 8093
+  (`gpn_provider_st`), 8099 loopback (`gpn_fleet`), 11434 (`ollama`), 8082 (`gpn_explorer`).
+  Answers: `system_chain` ⇒ `GPN Public Testnet`, `system_version` ⇒ `0.3.72`,
+  `system_health` ⇒ `{"peers":4,"isSyncing":false,"shouldHavePeers":true}`,
+  `/v1/models` ⇒ 5 ollama-backed models, `:8093/health` ⇒ `{"status":"ok"}`, `:8099` ⇒ 200.
+- **Chain advances**: `chain_getHeader` 356,766 → 356,777 within 3 min, `#356787` at 07:12;
+  253 `Imported #` lines in the last hour, 44 in the last 10 min; GPU-sealed blocks
+  (`⛏ GPU sealed block: nonce=63107480`), `specVersion 55`.
+  `finalized #0` is unchanged from previous days and documented (LOOP-LOG 2412: settlement is
+  depth-288, `finalized_head null`) — observation, not a fault.
+- **Logs read, not skimmed**: `journalctl --user -u gpn-fleet -n 300` ⇒ 6,927 lines in 3 h,
+  **1** match for `panic|Reason:|Incompatible pruning`: `04:23:44 … peer 12D3KooWHSev…:
+  Reason: Genesis mismatch. Banned, disconnecting.` (one foreign peer, normal). No panics,
+  no restart loop, no `taskkill`, no `Incompatible pruning modes`.
+- **Updater**: `~/.gpn/update/update-attempts.json` last four = 0.3.69/0.3.70/0.3.71/0.3.72
+  all `outcome: confirmed, attempts: 1, reason: ""`. `journalctl --user -u gpn-update`:
+  `confirmed 0.3.72 is running` at 21:25 PT, then clean hourly no-op checks up to 06:15.
+  `gpn-update.timer` next elapse **07:31 PT** — that is when 0.3.73 lands locally.
+- **Release loop** (`feff1358…`): last 3 runs `finished/ok` (204 s, 115 s, 178 s), no timeouts.
+  `/tmp/cut073.log` ends `released 0.3.73 — https://gpncoin.ai/releases.json` and
+  `release-lock: released (0.3.73)`; pid 2483972 gone. **No release is in flight now.**
+- **Version consistency**: site `https://gpncoin.ai/releases.json` ⇒ `0.3.73`,
+  `published_at 2026-11-24T14:36:56Z`; box 1 over SSH ⇒ process
+  `C:\gpn\data\update\current\gpn-node.exe`, `system_version` ⇒ **0.3.73** (so at least one
+  machine matches the site). Local node still `0.3.72` — expected, the hourly updater has not
+  run yet (07:31). Not a fault; noted because it is a real skew for the next ~10 min.
+- **Release record**: `docs/releases/archive/` has 0.3.66…0.3.72; `INDEX.md` has a row for
+  every one of them (0.3.71, 0.3.72 included) plus their items; `GPN-LIST.md` rows 250–254 are
+  `COMPLETE 0.3.72 (2026-11-24)`. **0.3.73 has no INDEX row on purpose** — the file's own rule
+  is "the row is written when the checklist's last box is ticked", and `0.3.73.md` is still open.
+  No missing record.
+- **Resources**: `df -h /` 439 G, used 333 G → **85 G free (19.4 %)**, below the 20 % line →
+  cleanup ran. `free -h`: 31 Gi total, **23 Gi available** (fault floor 4 GiB — fine).
+  Load 4.02/3.88/3.48. GPU `RTX 4060 1472 MiB / 8188 MiB, 100 % util`.
+  **Observation**: swap is 2.0 Gi of 2.0 Gi used, 11 Mi free — full, but with 23 Gi available
+  this is not pressure. Worth watching, nothing done.
+- **Disk cleanup (executed)**: free 85 G → **88 G (20.0 %)**, reclaimed 3.3 G:
+  - `~/.openclaw/workspace/projectmanager07/gpn-agent/target/debug/incremental` **3.1 G**
+  - `/tmp/p8c2653b` **124 M** (mtime 2026-11-19), `/tmp/gpnwork` **31 M** (11-19),
+    `/tmp/gpn-wasmtest` **3.6 M** (11-19)
+  Preconditions checked: `pgrep -x cargo` = 0, `pgrep -x rustc` = 0, `lsof +D …/incremental`
+  empty. Stopped there because free ≥ 20 %.
+- **Top five disk consumers** (measured this run, `du -shx`): `~/.ci-cache` **75 G**
+  (85,616 files, **0** older than 7 d → the prune unit buys nothing, and per owner decision it
+  stays), `~/.cache/huggingface` **53 G** (models — never delete), `~/.openclaw` **41 G**
+  (workspace 39 G of which `projectmanager07` 24 G / `shared` 15 G), `/tmp` **19 G**
+  (all recent: `/tmp/b70assets` 2.1 G 11-23, `/tmp/v68` 1.6 G 11-22, `/tmp/rel71` 978 M 11-23),
+  `~/.gpn` **24 G** (chain data, never delete). Also `/timeshift` **33 G** (5 root-owned
+  snapshots, largest 20 G from 2026-11-19 — **not mine to delete**, needs an owner decision),
+  `~/.lint-cache` 7.2 G, `~/gpn-work-222` + `~/gpn-work-224` 7.0 G each, `~/.cargo` 8.5 G,
+  `~/ollama/models` 8.1 G (stays). Reclaimable without a decision if it is ever needed:
+  `gpn-agent/target/debug` 8.8 G, `gpn-node/target/release` 7.1 G (release artefact — keep).
+- **Unexplained but stable**: `df` used rose 314 G → 333 G between 07:02 and 07:10. The only
+  files created in that window are CI debug binaries in
+  `~/.ci-cache/gpn-agent-target/debug/` (timestamps 07:02–07:04, ~330–360 MB each), so that is
+  the likely tenant, but `.ci-cache` read 75 G in **both** samples, so the attribution is not
+  proven. It has not moved since (three `df` samples 5 s apart, 333 G each).
+- **Not committed**: this entry is written but **not pushed** — the 0.3.73 checklist is open and
+  §0 forbids non-release commits while it is. Next release-loop run should carry it.
+- **Nothing needed a restart.** No [TRIAGE] — the only decision-shaped item is the 33 G of
+  root-owned timeshift snapshots, and disk is at 20 %, so it can wait.
+
 ## 06:52 PT 0.3.73 — §7b site stamps fixed and live: /download + /docs/run-a-node + /docs/downloads now say 0.3.73 / spec 55 / block 356,721; release-cut box ticked from commit `a6f5a3d`
 
 - **A0**: no CI to wait on — `a6f5a3d` was the release-cut commit (one file, `website/releases.json`)
