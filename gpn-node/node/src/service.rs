@@ -83,8 +83,12 @@ pub const WORK_CACHE_FILE: &str = "chain-work.json";
 /// State shared by the work tracker, the chain-state task and the miner loops.
 #[derive(Default)]
 struct ForkShared {
-    /// Cumulative work of our canonical chain, once the index is ready.
-    our_work: Option<u128>,
+    /// The tip our cumulative work was measured on: `(height, best hash, work)`.
+    /// The number may only be announced or compared while the tip still matches
+    /// (see `fork_choice::work_for_tip`): the index is rebuilt every 30 s while a
+    /// syncing node's best block moves several times a second, and attaching an
+    /// old measurement to a new tip states more work than the chain carries.
+    our_work_measured: Option<(u64, String, u128)>,
     /// Peer -> reason, for every announced heavier chain we have not applied
     /// (pending reorg, or refused as deeper than the bound). Non-empty means
     /// sealing is paused.
@@ -1248,6 +1252,16 @@ pub async fn new_full<
     // and extended in the background; until the first pass completes we
     // announce only `gpncs/1` (work unavailable), so fork choice simply keeps
     // current behaviour. See `fork_choice` for the policy and its bounds.
+    //
+    // The index is refreshed **whenever the best block changes**, not on a fixed
+    // 30 s timer (2026-11-24, row 194). Measured on box 3: a node syncing up our
+    // chain announced `best=#192 work=1730389292` — the work of the branch it had
+    // just left — and the peer answered `reorg=accepted depth=95` and then could
+    // request nothing, because the announced tip was a block it already held. A
+    // 30 s timer cannot describe a chain that moves every 15 s; the walk itself
+    // costs 0-3 ms (it is a retarget-boundary scan, not a header replay), so
+    // paying it once per best-block change is cheap, and `work_for_tip` still
+    // refuses to attach a stale number to a new tip.
     let fork_shared = Arc::new(Mutex::new(ForkShared::default()));
     {
         let client = client.clone();
@@ -1256,17 +1270,25 @@ pub async fn new_full<
         task_manager
             .spawn_handle()
             .spawn("gpn-chain-work", None, async move {
+                let mut measured: Option<(u64, String)> = None;
                 loop {
-                    let c = client.clone();
-                    let b = base.clone();
-                    let computed = tokio::task::spawn_blocking(move || compute_chain_work(&c, &b))
-                        .await
-                        .ok()
-                        .flatten();
-                    if let Some((work, _cache)) = computed {
-                        shared.lock().unwrap().our_work = Some(work);
+                    let info = client.chain_info();
+                    let tip = (u64::from(info.best_number), format!("{:?}", info.best_hash));
+                    if measured.as_ref() != Some(&tip) {
+                        let c = client.clone();
+                        let b = base.clone();
+                        let computed =
+                            tokio::task::spawn_blocking(move || compute_chain_work(&c, &b))
+                                .await
+                                .ok()
+                                .flatten();
+                        if let Some((work, cache)) = computed {
+                            shared.lock().unwrap().our_work_measured =
+                                Some((cache.height, cache.hash, work));
+                            measured = Some(tip);
+                        }
                     }
-                    tokio::time::sleep(Duration::from_secs(30)).await;
+                    tokio::time::sleep(Duration::from_secs(1)).await;
                 }
             });
     }
@@ -2599,8 +2621,20 @@ pub async fn new_full<
                                         }
                                         // v2 carries cumulative work for fork choice;
                                         // sent in addition to v1 so 0.3.49 peers keep
-                                        // parsing our claim.
-                                        let work = fork_shared.lock().unwrap().our_work;
+                                        // parsing our claim. The number is only sent
+                                        // when it was measured on THIS tip — a stale
+                                        // one describes a chain we are no longer on
+                                        // (2026-11-24, row 194).
+                                        let work = crate::fork_choice::work_for_tip(
+                                            fork_shared
+                                                .lock()
+                                                .unwrap()
+                                                .our_work_measured
+                                                .as_ref()
+                                                .map(|(h, hash, w)| (*h, hash.as_str(), *w)),
+                                            local.height,
+                                            &local.best_hash,
+                                        );
                                         if let Some(bytes) =
                                             cs::encode_with_work(&local.clone().with_work(work))
                                         {
@@ -2694,7 +2728,19 @@ pub async fn new_full<
                                             genesis: local.genesis.clone(),
                                             height: local.height,
                                             hash: local.best_hash.clone(),
-                                            work: fork_shared.lock().unwrap().our_work,
+                                            // Same rule as the announce: a work figure
+                                            // that was measured on another tip is not
+                                            // evidence about this one.
+                                            work: fc::work_for_tip(
+                                                fork_shared
+                                                    .lock()
+                                                    .unwrap()
+                                                    .our_work_measured
+                                                    .as_ref()
+                                                    .map(|(h, hash, w)| (*h, hash.as_str(), *w)),
+                                                local.height,
+                                                &local.best_hash,
+                                            ),
                                         };
                                         let theirs = fc::Tip {
                                             genesis: remote.genesis.clone(),
@@ -2857,7 +2903,16 @@ pub async fn new_full<
                             let Some(bytes) = cs::encode(&local) else {
                                 continue;
                             };
-                            let work = fork_shared.lock().unwrap().our_work;
+                            let work = crate::fork_choice::work_for_tip(
+                                fork_shared
+                                    .lock()
+                                    .unwrap()
+                                    .our_work_measured
+                                    .as_ref()
+                                    .map(|(h, hash, w)| (*h, hash.as_str(), *w)),
+                                local.height,
+                                &local.best_hash,
+                            );
                             let mut sent = 0usize;
                             for peer in &open {
                                 if !cs::announce_due(

@@ -286,6 +286,33 @@ pub fn evaluate(ours: &Tip, theirs: &Tip, ctx: Context) -> Decision {
     Decision::Reorg { depth }
 }
 
+/// The work we are allowed to announce (and to compare with) for a given tip.
+///
+/// The cumulative-work index is recomputed every 30 s, while a node that is
+/// syncing has a *different* best block several times a second. Announcing the
+/// cached number next to the current height is therefore a claim about a chain
+/// that carries that work — and it was measured on 2026-11-24 (box 3, 0.3.74,
+/// row 194) to produce exactly that lie: a node syncing up our chain announced
+/// `best=#192 work=1730389292` — the work of its own abandoned #229 branch —
+/// and the peer answered `fork-choice: work ours=573890 theirs=1730389292 …
+/// reorg=accepted depth=95` and then could do nothing with it, because the tip
+/// it had been pointed at was a block it already held.
+///
+/// So the work travels only with the tip it was computed for: a claim whose
+/// height or hash no longer matches the cached measurement announces no work at
+/// all (the `gpncs/2` field is omitted, i.e. the peer sees `gpncs/1` and fork
+/// choice keeps current behaviour — the owner rule for unavailable work).
+pub fn work_for_tip(
+    measured: Option<(u64, &str, u128)>,
+    height: u64,
+    best_hash: &str,
+) -> Option<u128> {
+    match measured {
+        Some((h, hash, work)) if h == height && hash == best_hash => Some(work),
+        _ => None,
+    }
+}
+
 /// The one INFO line per state change, shape fixed by the owner:
 /// `work ours=X theirs=Y peer=P; reorg=<accepted/refused:reason>`.
 pub fn line(ours: &Tip, theirs: &Tip, peer: &str, decision: Decision) -> String {
@@ -517,6 +544,21 @@ mod tests {
     fn cumulative_saturates_instead_of_wrapping() {
         let zero = U256::zero();
         assert_eq!(cumulative([zero, zero]), u128::MAX);
+    }
+
+    #[test]
+    fn work_is_only_claimed_for_the_tip_it_was_measured_on() {
+        let h = "0x1111111111111111111111111111111111111111111111111111111111111111";
+        let other = "0x2222222222222222222222222222222222222222222222222222222222222222";
+        // Exact match: the measurement is about this tip, so it may be claimed.
+        assert_eq!(work_for_tip(Some((287, h, 573_890)), 287, h), Some(573_890));
+        // A syncing node moved on: the number belongs to a block we no longer
+        // call our best, so claiming it would describe a different chain
+        // (the 2026-11-24 `best=#192 work=1730389292` lie).
+        assert_eq!(work_for_tip(Some((287, h, 573_890)), 288, h), None);
+        assert_eq!(work_for_tip(Some((287, h, 573_890)), 287, other), None);
+        // Nothing measured yet: nothing claimed.
+        assert_eq!(work_for_tip(None, 287, h), None);
     }
 
     #[test]
