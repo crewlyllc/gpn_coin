@@ -12505,6 +12505,25 @@ mod tests {
         assert_eq!(json!({"referral": q.referral})["referral"], Value::Null);
     }
 
+    /// Item 253: a GPU fingerprint is self-reported, so the directory must
+    /// label it `verified` or `unverified` — never publish it as a bare fact.
+    /// A provider the chain has not confirmed is `unverified`, and the field is
+    /// present (not omitted) so a consumer cannot mistake silence for proof.
+    #[test]
+    fn providers_view_labels_the_gpu_fingerprint() {
+        let p = prov("5Gpu", "http://g", 5, "m");
+        let v = provider_json(&p);
+        assert_eq!(
+            v["gpu_fingerprint"]["verified"],
+            json!(false),
+            "unproven must be labelled, not omitted: {v}"
+        );
+        assert!(
+            v["gpu_fingerprint"].get("hash").is_some(),
+            "the field must exist even when the hash is unknown: {v}"
+        );
+    }
+
     /// A legacy heartbeat (no `ref` key at all) is a provider with no referral —
     /// exactly as before this feature existed.
     #[test]

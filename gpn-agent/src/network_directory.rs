@@ -960,6 +960,25 @@ mod tests {
         assert_eq!(doc["counts"]["chain_only_now"], 1);
     }
 
+    /// Item 253: `/network` is a public GPU-capability surface too, so its row
+    /// must label the fingerprint `verified`/`unverified` rather than let the
+    /// page present a self-reported name as measured.
+    #[test]
+    fn a_row_labels_the_gpu_fingerprint() {
+        let p = provider(PEER_B, true, "http://198.51.100.7:8093");
+        let doc = build_full("t", None, Ok(vec![]), &[p], &[], None, 30333);
+        let row = &doc["providers"][0];
+        assert_eq!(
+            row["gpu_fingerprint"]["verified"],
+            json!(false),
+            "unproven must be labelled, not omitted: {row}"
+        );
+        assert!(
+            row["gpu_fingerprint"].get("hash").is_some(),
+            "the field must exist even when the hash is unknown: {row}"
+        );
+    }
+
     /// #201: an unmanaged box is judged the way a stranger's machine is — by
     /// what the network can see. The row must publish the build the box
     /// reported about itself, and must keep "did not say" distinguishable from

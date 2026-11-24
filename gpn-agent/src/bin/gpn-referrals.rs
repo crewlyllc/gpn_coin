@@ -598,6 +598,82 @@ mod tests {
         assert_eq!(text, again, "the export must be reproducible");
     }
 
+    /// Item 252: the payout input must carry measured contribution read from
+    /// chain — blocks authored, jobs served, GPN settled — and an account that
+    /// registered but never contributed is paid nothing even though its
+    /// attribution is kept. Contribution arrives as
+    /// `gpn-airdrop-contributions-v1` (`airdrop-contributions.json` beside the
+    /// registry, written from chain by the snapshot step), so the export stays
+    /// deterministic and needs no node to re-run.
+    #[test]
+    fn export_pays_verified_contribution_not_registrations() {
+        const ALICE: &str = "5GrwvaEF5zXb26Fz9rcQpDWS57CtERHpNehXCPcNoHGKutQY";
+        let dir = td("contrib");
+        let p = dir.join("referral-registry.json");
+        let alice = referral::derive_code(ALICE).unwrap();
+        // Two accounts registered through the same referral: one served the
+        // network, one registered and did nothing.
+        referral::record_once_checked(&p, "5Served", &alice, Some(ALICE), None, 100).unwrap();
+        referral::record_once_checked(&p, "5Idle", &alice, Some(ALICE), None, 200).unwrap();
+        std::fs::write(
+            dir.join("airdrop-contributions.json"),
+            serde_json::to_string(&serde_json::json!({
+                "schema": "gpn-airdrop-contributions-v1",
+                "accounts": {
+                    "5Served": {
+                        "blocks_authored": 12u64,
+                        "jobs_served": 340u64,
+                        "jobs_settled_gpn": 5_000_000_000_000u64
+                    },
+                    "5Idle": {
+                        "blocks_authored": 0u64,
+                        "jobs_served": 0u64,
+                        "jobs_settled_gpn": 0u64
+                    }
+                }
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+
+        let raw = std::fs::read_to_string(&p).unwrap();
+        let doc = build_export(&p, &referral::load_registry(&p), Some(&raw));
+        let part = |addr: &str| {
+            doc["participants"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|e| e["address"] == addr)
+                .unwrap()
+                .clone()
+        };
+
+        let served = part("5Served");
+        assert_eq!(served["contributions"]["blocks_authored"], 12, "{served}");
+        assert_eq!(served["contributions"]["jobs_served"], 340, "{served}");
+        assert_eq!(
+            served["contributions"]["jobs_settled_gpn"], 5_000_000_000_000u64,
+            "{served}"
+        );
+        assert!(
+            served["allocation"].as_f64().unwrap() > 0.0,
+            "a contributor is paid: {served}"
+        );
+
+        let idle = part("5Idle");
+        assert_eq!(idle["contributions"]["jobs_served"], 0, "{idle}");
+        assert_eq!(idle["contributions"]["blocks_authored"], 0, "{idle}");
+        assert_eq!(
+            idle["allocation"],
+            serde_json::json!(0.0),
+            "a registered-but-idle account receives nothing: {idle}"
+        );
+        assert_eq!(
+            idle["credited"], true,
+            "attribution is kept; only the payout is zero: {idle}"
+        );
+    }
+
     #[test]
     fn export_of_a_missing_registry_is_empty_not_an_error() {
         let dir = td("empty");
