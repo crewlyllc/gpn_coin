@@ -1,3 +1,27 @@
+## 15:41 PT row 194: deep-fork branch pre-built on box 3 while the release builds queue (no revert, no healing) [no triage]
+
+- **A0 CI**: `origin/main` HEAD `6eb5fbb332a6…` ⇒ `GET /actions/runs?head_sha=6eb5fbb3…` `total_count: 0`
+  — docs/checklist commit, expected under `ci.yml` paths-ignore. Nothing red, nothing waited on.
+- **The two builds dispatched at 15:22 PT**: Windows run `45509380702` still `queued`; Linux run
+  `45509384325` `in_progress` (started ~15:38). Both runners were `busy=True` — the earlier CI run
+  `45505708367` held the slots, so `queued` was contention, not a fault. Observed once each, waited on
+  neither. Run ids stay in the §3b notes.
+- **Productive work while queued — the §3b box's rig, not the box**: stage C on 2026-11-24 failed
+  twice because a `revert`ed copy is not an isolated fork (the reverted blocks stay in the branch
+  node's DB and it heals onto our chain). Rebuilt it properly: `scripts/r194-build-b2.ps1`, uploaded
+  to box 3 and launched detached, produced `C:\gpn\r194\B2` — a **fresh raw244 chain from the same
+  genesis** `0x2f31793c…`, GPU-mined to `#53 work=1,404,448` in 34 s, with CPU-only witness
+  `C:\gpn\r194\BW` on the same chain (sealing needs ≥1 peer — `service.rs` peer-watch pauses it at 0).
+  Against our side `C:\gpn\r194\E1` `#692 work=1,030,915` that is **heavier and 639 blocks shorter**,
+  i.e. depth 639 > `MAX_REORG_DEPTH` 288 (`fork_choice.rs:280`: depth = ours.height − theirs.height,
+  no common ancestor required). Both frozen; record in `C:\gpn\r194\B2-BUILD.md`.
+  Script parse-checked under the box's real Windows PowerShell 5.1 before it ran.
+- **Next run**: poll `45509380702`/`45509384325` once; on `success` take the Windows artifact to box 3,
+  run the shallow pair (`r194\S` #83 work 173,475,390 vs `r194\A`), then the deep pair
+  (`E1` copy vs `B2`+`BW`) with the 0.3.75 binary, and read `reorg=refused:deep-fork`,
+  `gpn-forked`, sealing paused, zero `import: fork block`.
+- No box ticked (the live half still needs the binary); nothing needs Jeremy.
+
 ## 15:2x PT 0.3.75 checklist opened for work: §1–§4 ticked with CI evidence; both release builds dispatched for row 194's live half [no triage]
 
 - **A0 CI**: `origin/main` HEAD `c9e10f45b2eaef968192c88713dd9d2493bcd957` ⇒ run `45505708367`
