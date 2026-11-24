@@ -1,3 +1,22 @@
+## 19:54 PT 0.3.72 §5 windows build still executing (no box tickable this run)
+
+- **A0**: HEAD == `GET /commits/main` ⇒ `a285df2ed956f67d52951d6e912e75abc9d6a357` (docs-only §5/§6 tick).
+  `GET /actions/runs?head_sha=a285df2…` (full 40-char sha) ⇒ `total_count: 0` — expected,
+  `ci.yml` paths-ignores `docs/**`. No red run owed an explanation.
+- **Handle read, not waited on** (§5 windows box): run **45318140117** ⇒ `in_progress`; job `windows`
+  (138189884819) started 03:36:56Z, **9/24 steps complete**, step 10 `build node` in flight at 03:54Z.
+  Build started 03:14:51Z (39 min), so it is inside the normal 40–75 min envelope — not stale, not
+  re-dispatched (threshold is >90 min). 22 of those minutes were queue time behind CI's windows job
+  on box-1's single-slot runner (`busy=True` earlier), contention not fault.
+- **Stale tree caught first**: local HEAD was `98a06eb` while origin/main was `a285df2`; `git pull
+  --ff-only` before reading the checklist, otherwise §4/§5 would have been re-worked from scratch.
+- **Boxes ticked**: none — the first unticked box (§5 windows artifact) depends on the running job.
+- **Checklist**: 28/55 (§1/§2/§3b/§3/§4/§6 DONE; §5 4/8).
+- **Next run**: read 45318140117 once — `success` ⇒ tick the windows box, cosign-verify the published
+  zip against `releases.json`'s digest, scan the zip, then §7 cut/publish; `failure` ⇒ read the failing
+  step's log, quote the line, fix the cause, re-dispatch once.
+- No blocker, no [TRIAGE].
+
 ## 19:45 PT 0.3.72 §5 linux build ticked (success), §5 ordering verified, §6 artifact scan done on the published tarball
 
 - **A0**: `GET /commits/main` ⇒ `f579fc794e9647237d8c211ff27d5e0ca92bda33` (docs-only §4 tick);
