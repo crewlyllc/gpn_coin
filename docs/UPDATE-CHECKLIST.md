@@ -149,6 +149,19 @@ Rules that follow from this:
   be re-announced louder, not silently dropped.
 - A decision raised and not delivered is worse than no rule at all: it looks handled and is not.
 
+## 0e. A stranger must be able to join and stay joined (owner rule, 2026-11-23)
+
+**A release is not publishable if the machines already running the previous release cannot reach it
+unattended.** That rule exists because we lost an operator: he downloaded, installed, mined for two
+days and never registered, and no signal told him why (2026-11-21/23).
+
+- [ ] `scripts/stranger-lifecycle.ps1` passed on a clean Windows guest: install from the site snippet
+      with no token, `--version` matches the manifest, register unattended, serve one job, self-update
+      to the next version, still registered and serving afterwards.
+- [ ] Every step failure names a cause a stranger can act on — no `BadProof`-style message that maps
+      six conditions to one sentence.
+- [ ] If the lifecycle cannot be run this release, say so in the checklist and why; do not tick it.
+
 ## 1. Test first (before any code is written)
 
 - [ ] Name the behaviour in one sentence, and the machine-observable thing that proves it.
