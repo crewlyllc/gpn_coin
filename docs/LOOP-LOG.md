@@ -24,6 +24,12 @@
   `45397562142` once; both green ⇒ re-run `release-cut.sh --timeout 300`.
 - No box ticked (the cut box carries the handle, unticked). No [TRIAGE] item this run.
 
+- **New row filed from this run's own output: 261** -- `release-cut.sh --dry-run` prints
+  `WARNING: … release-lock.sh is missing or not executable — the repo is NOT locked` because the
+  guard is `if [ -x "$TOOL" ] && [ "$DRY" = 0 ]` and the `else` covers both "missing" and "dry run".
+  The file is `100755` in git and on disk, so the line is false; a dry run is when a human reads it.
+  Not committed as a fix (§0), filed as a row.
+
 ## 04:35 PT 0.3.73 — no box worked: §7 cut is gated on the CI conclusion; audit job's 38 RustSec hits filed as row 260
 
 - **A0**: origin/main HEAD `23a33078e794f7ac00f4fbef8604ed630ee4dd27` ⇒ `total_count: 0` — docs-only
