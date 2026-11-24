@@ -1,3 +1,43 @@
+## 03:15 PT 0.3.73 — §5 evidence over SSH; red CI root-caused (already fixed); mirror pair repaired
+
+- **A0**: `head_sha=69bf900…` ⇒ `total_count: 0` (docs-only, correct). Querying the **build** SHA
+  `e33e2c8778df5d6b84085f2804acda4dfb1bb632` with its full 40 chars returned **3** runs:
+  linux **success**, windows **success**, **`CI` = failure** (`45360094725`, job `fmt + clippy`,
+  step `rustfmt (check, agent)`).
+- **That failure is this run's A0 box.** Exact line: `Diff in
+  /home/jeremyg/actions-runner/_work/gpn_coin/gpn_coin/gpn-agent/examples/entry_rate_limit_live.rs:63`
+  (+ :80, :88, :155, :314, `entry_reject_probe.rs:13, :20, :28`) ⇒
+  `##[error]Process completed with exit code 1`. Classification: **our code**, already fixed by
+  `5366482` ("rustfmt + four clippy lints in the entry-probe examples"). Narrowest check:
+  `rustfmt --check --edition 2021` on both files at HEAD ⇒ exit 0.
+- **Gap found:** no CI run had ever *concluded* on a sha containing that fix — `6ad6dd9` ⇒
+  `45362878700` **cancelled**, `69bf900` ⇒ no run (docs-only). So §7's "CI must be green" gate
+  had nothing to point at. **Dispatched** `ci.yml` on `main` ⇒ run **`45381828261`** (sha
+  `69bf900`, 11:11:08Z, pending behind `45375310398`). Handle written into the checklist; not
+  waited on.
+- **Boxes worked (§5, 3 of them):**
+  1. **per-item Windows evidence over SSH** — `scripts/box1.sh` read-only probe (runner was
+     `busy=true`, so no mutating step): host `DESKTOP-USBUADL`, process
+     `C:\gpn\data\update\current\gpn-node.exe`, `gpn-node.exe --version` ⇒ **0.3.73**, all GPN
+     firewall rules `True Inbound Allow`, Defender exclusions empty (both lists).
+  2. **attestation step before publish** — repo `private True`, owner `User` ⇒ cosign path; run
+     `45360119351` steps 19→20(skipped)→21 sign→22 gate→23 publish, gate has no `if:`.
+  3. **attestation exists for the published digest** — jeremyzguo zip `85267a45…1660` + bundle
+     `4394d983…`, and the bundle's Rekor `hashedrekord` body hashes `85267a45…1660`.
+- **Real defect found and fixed:** the **crewlyllc** mirror (what `releases.json` downloads) served
+  the 09:50 zip `85267a45…` beside a **05:00:59Z** bundle `cad6273b…` — a signature for the previous
+  build. Deleted asset `785768547`, re-uploaded jeremyzguo's bundle ⇒ pair now
+  `85267a45…` + `4394d983…` (API digest confirmed). Cause still open: something re-uploaded both
+  zips to crewlyllc at 09:50:13/09:50:34Z *without* bundles and *without* moving `releases.json`
+  (`release-cut.sh` does all three). **Until that actor is identified the mirror can drift again.**
+- **Live risk noted, not yet fixed:** `releases.json` still serves **0.3.72** with windows sha
+  `f38e7ea8…` / 253,194,900 B, which no longer exists on the mirror (it now holds the 0.3.73 build).
+  A stranger running the site's install snippet right now fails the sha256 check. The fix is to
+  finish the cut (§7 → manifest move), which is the next run's first box.
+- **Next box**: §5 "Verify the downloaded artifact with the verifier that matches the mechanism"
+  (cosign `verify-blob` against the mirrored zip), then §6 scans, then §7 cut/publish.
+- No [TRIAGE] items added. Item 256 remains AWAITING-OWNER.
+
 ## 02:55 PT 0.3.73 — §2 closed (6/6): no new defaults, and the built SHA carries both fixes
 
 - **A0**: tree was 4 commits behind; `git merge --ff-only origin/main` ⇒ `b3d1ebd`.
