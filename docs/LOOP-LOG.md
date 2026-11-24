@@ -1,3 +1,25 @@
+## 02:30 PT 0.3.73 — §2 "a call site exists": the docs clean-URL guard was a test nothing ran, now wired into CI
+
+- **A0**: tree was 11 commits behind; `git merge --ff-only origin/main` ⇒ `131ccd2`.
+  `GET /actions/runs?head_sha=131ccd2…` ⇒ `total_count: 0` (docs-only, correct).
+  Windows release build `45360119351` (sha `e33e2c8`) ⇒ **completed success** 09:31Z.
+- **Box worked: §2 "A call site exists for anything new"** (first unticked work box after the
+  AWAITING-OWNER triage item).
+- **Row 258's advice function has runtime callers** (not just tests): `gpu_error_with_advice` →
+  `gpn-agent/src/onboard.rs:998` (the path the stranger ran into), `gpu_error_advice` →
+  `gpn-agent/src/bin/gpn_node.rs:4456` (exit report). No flag gates either.
+- **Found a real gap on row 255**: `scripts/build-site-docs.py` had **no caller** in any workflow,
+  and `ci.yml` names each website test file explicitly — `docs-clean-urls.test.js` was missing from
+  the list. A guard nothing executes is how the .html regression shipped in the first place.
+- **Fix** (`c1a2592`): new `build-and-test` step "Docs generator clean URLs" runs
+  `node --test website/tests/docs-clean-urls.test.js`; local run `tests 2 / pass 2 / fail 0`,
+  ci.yml parses, job list unchanged. Checklist tick + evidence in `d5d98b9`.
+- **Pushed once**: `131ccd2..d5d98b9`. CI run `45375310398` created — **not waited on**
+  (ci.yml is a code change, so it does build; next run checks it). Artifacts in flight are from
+  `e33e2c8` and contain none of these workflow/docs bytes.
+- No [TRIAGE] items added. Item 256 still AWAITING-OWNER (triage question about which machine
+  carries lifecycle steps 3-6).
+
 ## 02:25 PT 0.3.73 — §2 "Full affected suites" ticked (lib 800 + website 29 green)
 
 - **A0**: `git pull --ff-only` ⇒ HEAD `9bfa3c7` = `origin/main`. `GET /actions/runs?head_sha=9bfa3c7…` ⇒ `total_count: 0` — docs-only SHA, `paths-ignore` intact, nothing to wait on.
