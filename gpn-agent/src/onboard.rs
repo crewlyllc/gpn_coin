@@ -193,6 +193,7 @@ pub enum FailureReason {
     PowMiningCancelled,
     FreeEntryAccountUsed,
     FreeEntryGpuUsed,
+    FreeEntryGpuRateLimited,
     FreeEntryLimitReached,
     GpuAlreadyOwned,
     SubmitRejected,
@@ -207,6 +208,7 @@ impl FailureReason {
             Self::PowMiningCancelled => "entry-pow-cancelled",
             Self::FreeEntryAccountUsed => "entry-free-account-used",
             Self::FreeEntryGpuUsed => "entry-free-gpu-used",
+            Self::FreeEntryGpuRateLimited => "entry-free-gpu-rate-limited",
             Self::FreeEntryLimitReached => "entry-free-per-block-cap",
             Self::GpuAlreadyOwned => "entry-gpu-already-owned",
             Self::SubmitRejected => "entry-submit-rejected",
@@ -653,6 +655,8 @@ pub mod entry_reject_code {
     pub const ACCOUNT_ALREADY_USED: u8 = 3;
     pub const GPU_ALREADY_USED: u8 = 4;
     pub const LIMIT_REACHED: u8 = 5;
+    /// Item 251: this fingerprint entered fee-free less than 24 h ago.
+    pub const GPU_RATE_LIMITED: u8 = 6;
 }
 
 /// Pull the number out of the pool's rendering of `InvalidTransaction::Custom`.
@@ -710,6 +714,12 @@ pub fn classify_submit_error(err: &str) -> (FailureReason, String) {
                  (the limit is not consumed by this attempt)"
                     .to_string(),
             )),
+            entry_reject_code::GPU_RATE_LIMITED => Some((
+                FailureReason::FreeEntryGpuRateLimited,
+                "this GPU fingerprint entered fee-free less than 24 h ago — a GPU may \
+                 (re)register once per day; retry after the cooldown"
+                    .to_string(),
+            )),
             _ => None,
         };
         if let Some((reason, text)) = reason {
@@ -722,6 +732,15 @@ pub fn classify_submit_error(err: &str) -> (FailureReason, String) {
             format!(
                 "this GPU's hardware fingerprint already consumed a free entry — the unsigned \
                  re-registration path covers it, or use a different physical GPU ({err})"
+            ),
+        );
+    }
+    if l.contains("freeentrygpuratelimited") || l.contains("less than 24 h ago") {
+        return (
+            FailureReason::FreeEntryGpuRateLimited,
+            format!(
+                "this GPU fingerprint entered fee-free less than 24 h ago — a GPU may \
+                 (re)register once per day; retry after the cooldown ({err})"
             ),
         );
     }
@@ -1552,6 +1571,7 @@ mod tests {
             ),
             (4, FailureReason::FreeEntryGpuUsed, "GPU fingerprint"),
             (5, FailureReason::FreeEntryLimitReached, "per-block cap"),
+            (6, FailureReason::FreeEntryGpuRateLimited, "once per day"),
         ];
         for (code, want, phrase) in cases {
             // Exactly the string the node's RPC layer produces for Custom(n).

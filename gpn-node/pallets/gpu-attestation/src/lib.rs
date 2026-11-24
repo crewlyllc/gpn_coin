@@ -210,6 +210,8 @@ pub enum EntryReject {
     AccountAlreadyUsed = 3,
     /// This GPU fingerprint already used its one free entry.
     GpuAlreadyUsed = 4,
+    /// This GPU fingerprint entered fee-free too recently (one per day).
+    GpuRateLimited = 6,
     /// The per-block cap on fee-free entries is exhausted.
     LimitReached = 5,
     /// Anything else; reported rather than silently dressed up as one of the
@@ -231,6 +233,7 @@ impl EntryReject {
             3 => Some(Self::AccountAlreadyUsed),
             4 => Some(Self::GpuAlreadyUsed),
             5 => Some(Self::LimitReached),
+            6 => Some(Self::GpuRateLimited),
             255 => Some(Self::Unknown),
             _ => None,
         }
@@ -250,6 +253,10 @@ impl EntryReject {
             }
             Self::GpuAlreadyUsed => {
                 "entry rejected: this GPU fingerprint already used its one free entry"
+            }
+            Self::GpuRateLimited => {
+                "entry rejected: this GPU fingerprint entered fee-free less than 24 h ago \
+                 — this GPU may (re)enter once per day"
             }
             Self::LimitReached => {
                 "entry rejected: the per-block cap on fee-free entries is exhausted — retry \
@@ -330,6 +337,13 @@ pub mod pallet {
         /// at runtime through `FreeEntryLimit` / `set_free_entry_limit`.
         #[pallet::constant]
         type MaxFreeEntriesPerBlock: Get<u32>;
+        /// Minimum blocks between two fee-free entries with the same GPU
+        /// fingerprint (item 251). Registration must be repeatable — a machine
+        /// that lost its provider record must be able to come back without a
+        /// faucet drip or a second proof of work — so the permanent
+        /// `FreeEntryGpus` mark is history, not a gate. 24 h at 15 s blocks.
+        #[pallet::constant]
+        type FreeEntryCooldown: Get<BlockNumberFor<Self>>;
     }
 
     /// Storage layout version. v1 = `GpuOwner` (spec 43, GPU identity).
@@ -414,11 +428,20 @@ pub mod pallet {
     pub type FreeEntryAccounts<T: Config> =
         StorageMap<_, Blake2_128Concat, T::AccountId, (), OptionQuery>;
 
-    /// GPU fingerprints that have ever been used for a fee-free entry (one,
-    /// permanently, independently of `GpuOwner` so releasing the GPU on
-    /// `withdraw_stake` cannot re-open the free path).
+    /// GPU fingerprints that have ever been used for a fee-free entry.
+    ///
+    /// **History only since item 251** — it no longer gates the path, because
+    /// a machine that onboarded once and lost its provider record could never
+    /// re-enter. The gate is `FreeEntryGpuLastEntry` (one entry per fingerprint
+    /// per `FreeEntryCooldown` blocks).
     #[pallet::storage]
     pub type FreeEntryGpus<T: Config> = StorageMap<_, Blake2_128Concat, [u8; 32], (), OptionQuery>;
+
+    /// Block of the last **successful** fee-free entry for a fingerprint
+    /// (item 251). `None` = never seen, so the full proof of work is required.
+    #[pallet::storage]
+    pub type FreeEntryGpuLastEntry<T: Config> =
+        StorageMap<_, Blake2_128Concat, [u8; 32], BlockNumberFor<T>, OptionQuery>;
 
     /// Runtime-mutable cap on successful free entries per block. Falls back to
     /// `T::MaxFreeEntriesPerBlock` (default 2).
@@ -538,6 +561,9 @@ pub mod pallet {
         FreeEntryAccountUsed,
         /// This GPU fingerprint already consumed a fee-free entry.
         FreeEntryGpuUsed,
+        /// This GPU fingerprint entered fee-free less than `FreeEntryCooldown`
+        /// blocks ago (item 251: one free (re)entry per fingerprint per day).
+        FreeEntryGpuRateLimited,
         /// The per-block cap on fee-free entries is exhausted.
         FreeEntryLimitReached,
     }
@@ -1008,6 +1034,7 @@ pub mod pallet {
                 Error::GpuIdentityMissing => EntryReject::GpuIdentityMissing,
                 Error::FreeEntryAccountUsed => EntryReject::AccountAlreadyUsed,
                 Error::FreeEntryGpuUsed => EntryReject::GpuAlreadyUsed,
+                Error::FreeEntryGpuRateLimited => EntryReject::GpuRateLimited,
                 Error::FreeEntryLimitReached => EntryReject::LimitReached,
                 _ => EntryReject::Unknown,
             }
@@ -1018,21 +1045,9 @@ pub mod pallet {
             pow: &EntryPow,
             gpu_info_hash: &[u8; 32],
         ) -> Result<(), Error<T>> {
-            // Verification is delegated to `pallet-gpu-pow`: same solution
-            // hash binding, same live difficulty target. Never a new hash.
-            ensure!(
-                T::EntryPow::verify_entry_pow(
-                    pow.nonce,
-                    &pow.mix_hash,
-                    &pow.solution_hash,
-                    pow.algorithm_version,
-                ),
-                Error::<T>::InvalidEntryProof
-            );
-
             // The free path always requires a real hardware fingerprint: it is
             // the physical-uniqueness anchor that makes "one free entry per
-            // GPU" meaningful.
+            // GPU" meaningful, and the key of the per-fingerprint rate limit.
             ensure!(*gpu_info_hash != [0u8; 32], Error::<T>::GpuIdentityMissing);
 
             // Entry, not free re-attestation. An account that already holds a
@@ -1045,16 +1060,39 @@ pub mod pallet {
                 !<FreeEntryAccounts<T>>::contains_key(who),
                 Error::<T>::FreeEntryAccountUsed
             );
-            ensure!(
-                !<FreeEntryGpus<T>>::contains_key(gpu_info_hash),
-                Error::<T>::FreeEntryGpuUsed
-            );
-            // `GpuOwner` is released on `withdraw_stake`; `FreeEntryGpus` is
-            // permanent, so check both to make the per-GPU limit one-shot even
-            // across an unbind/rebind cycle.
+            // A fingerprint still owned by a *different* live account is not
+            // available to this caller; the owner must release it first (or
+            // the caller is trying to steal a GPU another provider is using).
             if let Some(owner) = <GpuOwner<T>>::get(gpu_info_hash) {
-                let _ = owner;
-                return Err(Error::<T>::FreeEntryGpuUsed.into());
+                ensure!(owner == *who, Error::<T>::FreeEntryGpuUsed);
+            }
+
+            // Item 251: a previously-seen fingerprint may (re)enter at most
+            // once per `FreeEntryCooldown` blocks, and pays no proof of work
+            // the second time — it already proved the hardware once. A
+            // fingerprint never seen before must still mine.
+            match <FreeEntryGpuLastEntry<T>>::get(gpu_info_hash) {
+                Some(prev) => {
+                    let now = frame_system::Pallet::<T>::block_number();
+                    ensure!(
+                        now.saturating_sub(prev) >= T::FreeEntryCooldown::get(),
+                        Error::<T>::FreeEntryGpuRateLimited
+                    );
+                }
+                None => {
+                    // Verification is delegated to `pallet-gpu-pow`: same
+                    // solution hash binding, same live difficulty target.
+                    // Never a new hash.
+                    ensure!(
+                        T::EntryPow::verify_entry_pow(
+                            pow.nonce,
+                            &pow.mix_hash,
+                            &pow.solution_hash,
+                            pow.algorithm_version,
+                        ),
+                        Error::<T>::InvalidEntryProof
+                    );
+                }
             }
 
             let limit = FreeEntryLimit::<T>::get();
@@ -1081,6 +1119,7 @@ pub mod pallet {
             <FreeEntryCount<T>>::put((now, next));
             <FreeEntryAccounts<T>>::insert(who, ());
             <FreeEntryGpus<T>>::insert(gpu_info_hash, ());
+            <FreeEntryGpuLastEntry<T>>::insert(gpu_info_hash, now);
             Self::deposit_event(Event::<T>::FreeEntryGranted {
                 who: who.clone(),
                 gpu_info_hash: *gpu_info_hash,
@@ -1347,6 +1386,10 @@ mod tests {
         pub const TestMaxAge: u64 = 50;
         pub const TestMaxMissed: u32 = 3;
         pub const TestMaxFreeEntries: u32 = 2;
+        /// Item 251: one fee-free (re)entry per fingerprint per day. 5_760
+        /// blocks = 24 h at 15 s, kept as a literal so the test states the
+        /// real cadence rather than copying whatever the runtime uses.
+        pub const TestFreeEntryCooldown: u64 = 5_760;
         /// Low floor in tests so the many tier/count cases below stay valid; the
         /// dedicated floor test uses a value under it.
         pub const TestMinEligibilityGflops: u64 = 50;
@@ -1456,6 +1499,7 @@ mod tests {
         type ChallengeVerifier = TestChallengeVerifier;
         type EntryPow = TestEntryPow;
         type MaxFreeEntriesPerBlock = TestMaxFreeEntries;
+        type FreeEntryCooldown = TestFreeEntryCooldown;
     }
 
     const ALICE: u64 = 1;
@@ -2780,6 +2824,116 @@ mod tests {
             )
             .unwrap_err();
             assert_eq!(err, Error::<Test>::GpuAlreadyOwned.into());
+        });
+    }
+
+    // ── Item 251: a fingerprint may (re)enter at most once per day ──────
+    //
+    // `FreeEntryGpus` stays as permanent *history*, but it must no longer
+    // gate the path: a machine whose provider record was lost (wiped and
+    // reinstalled, unbonded, keys gone) has to be able to register again with
+    // the same physical GPU. The gate becomes a 24 h rate limit instead.
+
+    #[test]
+    fn test_previously_used_fingerprint_re_registers_after_cooldown() {
+        new_test_ext().execute_with(|| {
+            free_attest(FRESH, FRESH_GPU).unwrap();
+            // The original provider record is gone (operator unbonded, or the
+            // machine was reinstalled and its keys lost).
+            AttestPallet::withdraw_stake(RuntimeOrigin::signed(FRESH)).unwrap();
+            assert_eq!(GpuOwner::<Test>::get(FRESH_GPU), None);
+
+            // One day of blocks later the same physical GPU comes back under a
+            // brand-new account, carrying no proof of work at all.
+            let last = FreeEntryGpuLastEntry::<Test>::get(FRESH_GPU).unwrap();
+            System::set_block_number(last + TestFreeEntryCooldown::get() + 1);
+            AttestPallet::attest_entry(
+                RuntimeOrigin::signed(8),
+                Some(entry_pow(0)),
+                [1u8; 32],
+                FRESH_GPU,
+                1,
+                10_000,
+            )
+            .unwrap();
+
+            assert!(Attestations::<Test>::contains_key(8));
+            assert_eq!(GpuOwner::<Test>::get(FRESH_GPU), Some(8));
+            // History is still kept, and now records when it was last used.
+            assert!(FreeEntryGpus::<Test>::contains_key(FRESH_GPU));
+        });
+    }
+
+    #[test]
+    fn test_same_fingerprint_within_cooldown_refused_named() {
+        new_test_ext().execute_with(|| {
+            free_attest(FRESH, FRESH_GPU).unwrap();
+            // Record gone, so only the rate limit can refuse this.
+            AttestPallet::withdraw_stake(RuntimeOrigin::signed(FRESH)).unwrap();
+
+            // One block later (well inside 24 h): refused, with a reason that
+            // names the rate limit instead of the old permanent mark.
+            System::set_block_number(1);
+            let err = AttestPallet::attest_entry(
+                RuntimeOrigin::signed(8),
+                Some(entry_pow(0)),
+                [1u8; 32],
+                FRESH_GPU,
+                1,
+                10_000,
+            )
+            .unwrap_err();
+            assert_eq!(err, Error::<Test>::FreeEntryGpuRateLimited.into());
+
+            // The boundary is exact: one block before the cooldown elapses it
+            // is still refused (measured from when the last entry was recorded,
+            // not from block zero)...
+            let last = FreeEntryGpuLastEntry::<Test>::get(FRESH_GPU).unwrap();
+            System::set_block_number(last + TestFreeEntryCooldown::get() - 1);
+            let err = AttestPallet::attest_entry(
+                RuntimeOrigin::signed(8),
+                Some(entry_pow(0)),
+                [1u8; 32],
+                FRESH_GPU,
+                1,
+                10_000,
+            )
+            .unwrap_err();
+            assert_eq!(err, Error::<Test>::FreeEntryGpuRateLimited.into());
+
+            // ...and exactly `FreeEntryCooldown` blocks later it is allowed.
+            System::set_block_number(last + TestFreeEntryCooldown::get());
+            AttestPallet::attest_entry(
+                RuntimeOrigin::signed(8),
+                Some(entry_pow(0)),
+                [1u8; 32],
+                FRESH_GPU,
+                1,
+                10_000,
+            )
+            .unwrap();
+            assert!(Attestations::<Test>::contains_key(8));
+        });
+    }
+
+    #[test]
+    fn test_never_seen_fingerprint_still_pays_proof_of_work() {
+        new_test_ext().execute_with(|| {
+            // The rate limit must not open a proof-free path for a fingerprint
+            // nobody has used: a bad solution is still refused.
+            let mut bad = entry_pow(0);
+            bad.solution_hash = [0xAB; 32];
+            let err = AttestPallet::attest_entry(
+                RuntimeOrigin::signed(FRESH),
+                Some(bad),
+                [1u8; 32],
+                [0xFEu8; 32],
+                1,
+                10_000,
+            )
+            .unwrap_err();
+            assert_eq!(err, Error::<Test>::InvalidEntryProof.into());
+            assert_eq!(FreeEntryGpuLastEntry::<Test>::get([0xFEu8; 32]), None);
         });
     }
 

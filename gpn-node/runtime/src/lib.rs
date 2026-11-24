@@ -567,6 +567,11 @@ parameter_types! {
     /// Cap on *successful* fee-free PoW entries per block (spec 47). Root can
     /// change it at runtime via `GPUAttestation.set_free_entry_limit`.
     pub const MaxFreeEntriesPerBlock: u32 = 2;
+    /// Item 251 (owner direction 2026-11-23): a GPU fingerprint may (re)enter
+    /// fee-free at most once per day. 5_760 blocks = 24 h at 15 s. The
+    /// permanent `FreeEntryGpus` mark is history, not a gate — a machine that
+    /// lost its provider record must be able to come back.
+    pub const FreeEntryCooldown: BlockNumber = 5_760;
     pub const RequireGpuIdentity: bool = RUNTIME_REQUIRE_GPU_IDENTITY;
     pub const AttestationInterval: BlockNumber = 3600; // ~15 hours at 15s blocks
     pub const MaxAttestationAge: BlockNumber = 14400; // ~60 hours
@@ -619,6 +624,7 @@ impl pallet_gpu_attestation::Config for Runtime {
     // check and live difficulty target verbatim.
     type EntryPow = GPUPoW;
     type MaxFreeEntriesPerBlock = MaxFreeEntriesPerBlock;
+    type FreeEntryCooldown = FreeEntryCooldown;
 }
 
 parameter_types! {
