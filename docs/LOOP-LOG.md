@@ -1,3 +1,25 @@
+## 14:57 PT release 0.3.75 opened — row 194's fork-choice fix (`87d77b3b`) is on main but not in any published binary [no triage]
+
+- **A0 CI**: `origin/main` HEAD `032e8c5d79fc5b6a86e8311311d357b1374dc2ca` ⇒ `GET
+  /actions/runs?head_sha=032e8c5d…` `total_count: 0` — docs/list commit, expected under `ci.yml`
+  paths-ignore. Nothing red, nothing waited on.
+- **State**: 1 IN-PROGRESS (194), 1 NEW (256, owner-gated on which machine carries the stranger
+  gate's steps 3-6), 6 BLOCKED. `0.3.74` is published, ticked and filed; `GPN-LIST.md` rows
+  257/259/260/261 are COMPLETE 0.3.74 and the local node answers `system_version` ⇒ `0.3.74`
+  (spec 55). No release was in flight.
+- **Why a bump**: `git merge-base --is-ancestor 87d77b3b c280c72b` ⇒ **not an ancestor** — the
+  fork-choice fix from this afternoon's box-3 run is not in the 0.3.74 artifact, so row 194's live
+  half cannot be run on any published binary. Opened 0.3.75 to carry it: `bump-version.py patch`
+  (`updated 15 manifest(s) -> 0.3.75`, network.json, 14 lockfile entries), CHANGELOG `## [0.3.75]`
+  written (no `_TODO_` left), `bump-version.py --check` ⇒ `lockstep: 15 manifest(s) and 14 lockfile
+  entr(ies) agree`, `gpn version: 0.3.75`.
+- **Checklist generated**: `scripts/make-release-checklist.py 0.3.75` ⇒ `docs/releases/0.3.75.md`
+  (1 in-progress, 5 blocked; §3b box 1 is row 194).
+- **Next run**: work `docs/releases/0.3.75.md` box 1 — box-3 shallow pair (ours `fork\D` #287 work
+  573,890 vs `fork\BL2` #229 work 1,730,389,292) on a 0.3.75 build, capture accepted+reorg verbatim,
+  then the deep pair for `refused:deep-fork` + `gpn-forked`, then restore box 3.
+- **Row 194 stays IN-PROGRESS.** No box ticked this run; this run only opened the release.
+
 ## 14:55 PT row 194 worked on box 3: fork choice accepted a reorg it could not perform — stale work claims fixed (87d77b3b) [no triage]
 
 - **A0 CI**: `origin/main` HEAD `e11390c7b4ee65ece47be222cd3cef283796a137` ⇒ `GET

@@ -8,6 +8,25 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 versions are [Semantic Versioning](https://semver.org/spec/v2.0.0.html), with
 the GPN-specific meaning of each level documented in `docs/updates.md`.
 
+## [0.3.75] - 2026-11-24
+
+Bumped from 0.3.74 (`scripts/bump-version.py patch`). One fork-choice defect, found while working the
+box-3 fork test (row 194): a node could accept a reorg toward a tip it already held, so the reorg was
+accepted and then never performed.
+
+### Fixed
+- **A work figure is only valid for the tip it was measured on** (row 194, commit `87d77b3b`):
+  `fork_choice` measured `our_work` on a 30 s timer and then published it beside whatever best block
+  the node happened to be on. A peer that was syncing therefore announced e.g. `best=#192` together
+  with the work of the `#229` branch it had just left, and the verdict could come out
+  `reorg=accepted depth=49` for a branch that was not actually heavier — after which the sync engine
+  had nothing to request (measured on box 3, 2026-11-24: `fork-choice: work ours=1030736
+theirs=2869598 … reorg=accepted depth=49` → `requesting heavier branch` → zero imports, best
+  unchanged). `work_for_tip` now claims and compares a figure only while the tip still matches on both
+  height and hash, and the work index is refreshed when the best block changes instead of every 30 s.
+  Tests: `cargo test --release -p gpn-node --bin gpn-node -- fork_choice` ⇒ 14 passed, 0 failed,
+  including `work_is_only_claimed_for_the_tip_it_was_measured_on`.
+
 ## [0.3.74] - 2026-11-24
 
 Bumped from 0.3.73 (`scripts/bump-version.py patch`). Four defects found while closing 0.3.73 and
