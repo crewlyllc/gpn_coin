@@ -1,3 +1,29 @@
+## 05:52 PT 0.3.73 — Windows rebuild finally executing (was queued behind CI); nothing to tick, run ended
+
+- **A0**: `origin/main` HEAD `3eceeec` (docs-only) ⇒ `total_count: 0`, expected under `ci.yml`
+  paths-ignore. Local tree had to be fast-forwarded from `131ccd2` — the working copy was 12 commits
+  behind main, and my first edit landed on the stale `0.3.73.md` whose first unticked box (§5 SSH
+  evidence) had already been ticked at 03:1x on main. Discarded that edit, `merge --ff-only`, re-read.
+  (Same class as the 2026-11-21 stale-tree lesson: fetch and compare BEFORE editing.)
+- **CI run holding the single Windows slot finished**: `45381828261` `CI` on `69bf9008` ⇒
+  `completed:success` at 13:44:07Z (started 12:20Z, 84 min). It no longer blocks anything.
+- **Windows release leg `45397562142` (`d5d98b96`) has begun executing** — `in_progress` at 13:44:08Z,
+  step 8 `build agent` in progress, steps 9-23 pending. Dispatched 12:51Z, so it sat `queued` 53 min;
+  the runner is now genuinely building. Cold Windows build is 40-75 min ⇒ ETA ~14:30-15:00Z.
+  Linux leg `45397558122` (`d5d98b96`) `completed:success` 13:02Z; asset `gpn-linux.tar.gz`
+  347,037,262 B `sha256:79623ab8…9ea725`. The CI gate that `release-cut.sh`'s `require_green_ci`
+  reads is green on the bundle-stamp sha `45375310398` `CI` `d5d98b96` ⇒ success.
+- **No box ticked.** §7 box 2 (`release-cut.sh --timeout 300`) still refuses by design: its step 2
+  would mirror the **e33e2c8** windows asset (`85267a45…`) beside a `d5d98b96` linux asset — two
+  different build shas in one release. It must wait for `45397562142` to publish. §0e box 1 / §3b 256
+  remain `AWAITING-OWNER` (item 256 in `docs/NEEDS-TRIAGE.md`, raised 00:3x, still no answer).
+  §8/§9/§7b/§10 all require a published manifest, so they are downstream of the cut.
+- Next run: poll `45397562142` once. If `completed:success` and `windows-latest`'s zip digest differs
+  from `85267a45…` ⇒ run `scripts/release-cut.sh --timeout 300` detached, write the handle in the box,
+  end the run immediately. If it is past 90 min and still `in_progress` (i.e. after ~14:21Z started-at
+  misses), read the job's failing step before doing anything else.
+- No [TRIAGE] item this run.
+
 ## 05:28 PT 0.3.73 — Windows release leg still queued behind a 68-min CI build; nothing else workable, run ended
 
 - **A0**: `origin/main` HEAD `72014b19637de21ff4a7a629fbe3b03767b6c15d` ⇒
