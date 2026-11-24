@@ -1,3 +1,24 @@
+## 20:56 PT 0.3.72 §5 closed (8/8) — attestation verified on the to-be-published digest; §7 cut dispatched
+
+- **A0**: `HEAD == origin/main == 9bf7828` (`docs(0.3.72): tick §5 provenance-ordering…`). 
+  `GET /actions/runs?head_sha=9bf78286069c2848b341674c6d00d6ff207d6df6` ⇒ `total_count: 0` —
+  docs-only SHA, `paths-ignore` working, no red run to explain.
+- **§5 box ticked — attestation exists for the digest about to be published**: the digest that
+  `release-cut.sh` mirrors is the `windows-latest` asset's, read from the API:
+  `gpn-windows.zip` 253,194,900 B `sha256:f38e7ea8…34f2` (updated 04:02:44Z), with
+  `gpn-windows.zip.bundle` 8,725 B beside it. `attestations/sha256:f38e7ea…` ⇒ **404** (expected
+  on a user-owned private repo). `releases.json` still serves 0.3.71 until the cut; §7 re-checks
+  the published digest.
+- **§5 box ticked — verify the downloaded artifact**: re-downloaded both assets through the API
+  (`Accept: application/octet-stream`); `sha256sum` = `f38e7ea8…34f2` (matches), then
+  `cosign verify-blob --bundle gpn-windows.zip.bundle --certificate-identity-regexp
+  '^https://github\.com/jeremyzguo/gpn_coin/\.github/workflows/release-windows\.yml@.*$'
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com` ⇒ **`Verified OK`**.
+  §5 now **8/8**.
+- **§7 box 1 ticked**: the by-hand attestation check above ran against exactly the bytes step 2
+  of the cut downloads ⇒ gate passed.
+- **§7 cut dispatched, run ended per rule** — see §7 box 2 for the handle.
+
 ## 20:15 PT 0.3.72 §5 windows build landed — attested zip published, scanned; §5 now 5/7
 
 - **A0**: origin/main HEAD = `6c39d8e` (docs-only loop log). `GET /actions/runs?head_sha=6c39d8e…`
