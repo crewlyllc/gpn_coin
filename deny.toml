@@ -94,6 +94,33 @@ ignore = [
     { id = "RUSTSEC-2026-0186", reason = "memmap2 0.5.10 unchecked pointer offset, via substrate's memory-mapped DB; only reachable with an already-corrupt map" },
     { id = "RUSTSEC-2026-0097", reason = "rand 0.7.3 custom-logger unsoundness, via substrate; we install no custom rand logger" },
     { id = "RUSTSEC-2024-0442", reason = "wasmtime-jit-debug 8.0.1 JitDumpFile, via sp-wasm-interface 20; gpn-agent writes no JIT dumps" },
+
+    # --- 2026-11-24 audit pass (row 260): what a patch bump could not fix ----
+    # Fixable advisories were bumped instead of ignored: url 2.5.9, libz-sys
+    # 1.1.33, quinn-proto 0.11.19, quinn-udp 0.5.16, wasmtime 36.0.23 (node).
+    # The rest are pinned by polkadot-sdk rev da5c9660 (libp2p 0.54.1 /
+    # libp2p-dns 0.42 / libp2p-quic 0.11.1 / litep2p 0.14.3) or by sp-core 28.
+    # Review 2027-01-26, or on any polkadot-sdk / litep2p / libp2p bump.
+    { id = "RUSTSEC-2026-0487", reason = "hickory-proto 0.24/0.25 SVCB/HTTPS alpn panic; 0.26.2 pinned out by libp2p-dns 0.42 + litep2p 0.14.3" },
+    { id = "RUSTSEC-2026-0489", reason = "hickory-proto 0.24/0.25 SVCB/HTTPS param panic; same pin (review 2027-01-26)" },
+    { id = "RUSTSEC-2026-0490", reason = "hickory-proto 0.24/0.25 zone-file lexer panic; we construct no zone-file parser (review 2027-01-26)" },
+    { id = "RUSTSEC-2026-0491", reason = "hickory-proto 0.24/0.25 header record-count amplification; 0.26.2 pinned out (review 2027-01-26)" },
+    { id = "RUSTSEC-2026-0504", reason = "hickory-proto 0.25 inverted NSEC3 comparison; DNSSEC validation is never enabled (review 2027-01-26)" },
+    { id = "RUSTSEC-2026-0505", reason = "hickory-proto 0.24/0.25 NSEC3 owner names unchecked; DNSSEC validation is never enabled (review 2027-01-26)" },
+    { id = "RUSTSEC-2026-0511", reason = "hickory-proto 0.24/0.25 NXDOMAIN accepted for an empty non-terminal; DNSSEC-only path (review 2027-01-26)" },
+    { id = "RUSTSEC-2026-0512", reason = "hickory-proto 0.24/0.25 unrelated signed RRset accepted; DNSSEC-only path (review 2027-01-26)" },
+    { id = "RUSTSEC-2026-0514", reason = "hickory-resolver 0.24/0.25 returned records that failed DNSSEC; validation never enabled (review 2027-01-26)" },
+    { id = "RUSTSEC-2026-0525", reason = "libp2p-quic 0.11.1 remote panic on cert expiry mid-handshake; fix needs libp2p 0.56, sc-network pins 0.54.1 (review 2027-01-26)" },
+    { id = "RUSTSEC-2026-0530", reason = "hickory-proto 0.24/0.25 parent-side NSEC at a zone cut; DNSSEC-only path (review 2027-01-26)" },
+    { id = "RUSTSEC-2026-0531", reason = "hickory-proto 0.24/0.25 child-side NSEC/NSEC3 as delegation proof; DNSSEC-only path (review 2027-01-26)" },
+    { id = "RUSTSEC-2026-0532", reason = "hickory-proto 0.25 parent-side NSEC3 at a zone cut; DNSSEC-only path (review 2027-01-26)" },
+    { id = "RUSTSEC-2026-0549", reason = "hickory-proto 0.25 NSEC3 NODATA at zone apex accepted; DNSSEC-only path (review 2027-01-26)" },
+    { id = "RUSTSEC-2026-0550", reason = "hickory-proto 0.24/0.25 unsigned NSEC/NSEC3 in a nonexistence proof; DNSSEC-only path (review 2027-01-26)" },
+    { id = "RUSTSEC-2026-0551", reason = "hickory-proto 0.24/0.25 non-IN-class records marked secure; DNSSEC-only path (review 2027-01-26)" },
+    { id = "RUSTSEC-2026-0424", reason = "wasmtime 8.0.1 via sp-wasm-interface 20 (sp-core 28); gpn-agent executes no wasm (review 2027-01-26)" },
+    { id = "RUSTSEC-2026-0566", reason = "wasmtime 8.0.1 wasmtime-wasi host memory growth; crate present only via sp-core 28 (review 2027-01-26)" },
+    { id = "RUSTSEC-2026-0569", reason = "wasmtime 8.0.1 Caller::get_module_export panic; crate present only via sp-core 28 (review 2027-01-26)" },
+    { id = "RUSTSEC-2026-0571", reason = "wasmtime 8.0.1 wasmtime-wasi-http empty-write heap growth; crate present only via sp-core 28 (review 2027-01-26)" },
 ]
 
 [licenses]

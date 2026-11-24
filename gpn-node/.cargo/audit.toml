@@ -80,4 +80,35 @@ ignore = [
     #   pin), so 0.3.20 cannot be selected without bumping the polkadot-sdk
     #   rev. We never log untrusted peer input through the fmt layer with ANSI
     #   enabled.
+
+    # --- hickory 0.24 / 0.25 (pinned) --------------------------------------
+    # libp2p-dns 0.42.0 (libp2p 0.54.1, pinned by sc-network in polkadot-sdk rev
+    # da5c9660) requires hickory-resolver 0.24; litep2p 0.14.3 requires 0.25.
+    # 0.26.2 is the first release carrying the DNSSEC fixes and neither parent
+    # accepts it, so it cannot be selected without a polkadot-sdk rev bump.
+    # Our own seed lookup (discovery::resolve_dns_seed) resolves plain TXT
+    # records and never enables DNSSEC validation; the zone-file and SVCB/HTTPS
+    # parser panics need record types and a parser we never construct.
+    # Review 2027-01-26, or on any polkadot-sdk / litep2p / libp2p bump.
+    "RUSTSEC-2026-0487", # SVCB/HTTPS alpn parse panic (hickory 0.24/0.25)
+    "RUSTSEC-2026-0489", # SVCB/HTTPS single-quote param panic
+    "RUSTSEC-2026-0490", # zone-file lexer panic on 4096-char token
+    "RUSTSEC-2026-0491", # memory amplification from header record counts
+    "RUSTSEC-2026-0504", # inverted NSEC3 comparison (DNSSEC only)
+    "RUSTSEC-2026-0505", # NSEC3 owner names not checked against the zone
+    "RUSTSEC-2026-0511", # NXDOMAIN accepted for an empty non-terminal
+    "RUSTSEC-2026-0512", # unrelated signed RRset accepted as the answer
+    "RUSTSEC-2026-0514", # resolver returned records that failed DNSSEC
+    "RUSTSEC-2026-0530", # parent-side NSEC at a zone cut accepted
+    "RUSTSEC-2026-0531", # child-side NSEC/NSEC3 accepted as delegation proof
+    "RUSTSEC-2026-0532", # parent-side NSEC3 at a zone cut accepted
+    "RUSTSEC-2026-0549", # NSEC3 NODATA at zone apex accepted
+    "RUSTSEC-2026-0550", # unsigned NSEC/NSEC3 used in a nonexistence proof
+    "RUSTSEC-2026-0551", # records of a non-IN class marked secure
+
+    # --- libp2p-quic 0.11.1 (same libp2p 0.54 pin) --------------------------
+    "RUSTSEC-2026-0525", # remote panic when a peer certificate expires during
+    #   the QUIC handshake. Fix is libp2p-quic >=0.13.1, i.e. libp2p >=0.56,
+    #   while sc-network pins libp2p 0.54.1 at the polkadot-sdk rev. The panic
+    #   is confined to the handshake and the node restarts under its unit.
 ]

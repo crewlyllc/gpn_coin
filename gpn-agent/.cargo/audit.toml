@@ -97,4 +97,48 @@ ignore = [
     #   sp-tracing (polkadot-sdk 28) pins the 0.2 series; the fix (0.3.20) is a
     #   different major. We do not log peer-supplied strings through its fmt
     #   layer with ANSI enabled.
+
+    # --- hickory 0.24 (pinned by libp2p 0.54) -------------------------------
+    # libp2p-dns 0.42.0 (libp2p 0.54.1, deliberately pinned here to the node's
+    # sc-network stack so the fleet image links ONE libp2p) requires
+    # hickory-resolver 0.24; 0.26.2 (the DNSSEC fixes) needs libp2p >=0.56 and
+    # would put a second libp2p in the image. gpn-agent resolves plain TXT/A
+    # records and enables no DNSSEC validation, and constructs no zone-file or
+    # SVCB/HTTPS parser. Review 2027-01-26, or on the next libp2p bump.
+    "RUSTSEC-2026-0119", # hickory-proto 0.24: hickory NSEC3 loop
+    "RUSTSEC-2026-0487", # SVCB/HTTPS alpn parse panic
+    "RUSTSEC-2026-0489", # SVCB/HTTPS single-quote param panic
+    "RUSTSEC-2026-0490", # zone-file lexer panic on 4096-char token
+    "RUSTSEC-2026-0491", # memory amplification from header record counts
+    "RUSTSEC-2026-0505", # NSEC3 owner names not checked against the zone
+    "RUSTSEC-2026-0511", # NXDOMAIN accepted for an empty non-terminal
+    "RUSTSEC-2026-0512", # unrelated signed RRset accepted as the answer
+    "RUSTSEC-2026-0514", # resolver returned records that failed DNSSEC
+    "RUSTSEC-2026-0530", # parent-side NSEC at a zone cut accepted
+    "RUSTSEC-2026-0531", # child-side NSEC/NSEC3 accepted as delegation proof
+    "RUSTSEC-2026-0550", # unsigned NSEC/NSEC3 used in a nonexistence proof
+    "RUSTSEC-2026-0551", # records of a non-IN class marked secure
+
+    # --- libp2p-quic 0.11.1 (same libp2p 0.54 pin) --------------------------
+    "RUSTSEC-2026-0525", # remote panic when a peer certificate expires during
+    #   the QUIC handshake; fix needs libp2p >=0.56 (see the hickory note).
+
+    # --- wasmtime 8.0.1 embedded by sp-wasm-interface 20 (sp-core 28) -------
+    # gpn-agent executes no wasm at all; the crate is present only because
+    # sp-core carries it.
+    "RUSTSEC-2026-0424", # unchecked memory in borrowed resource transfer
+    "RUSTSEC-2026-0566", # wasmtime-wasi unbounded host memory via empty writes
+    "RUSTSEC-2026-0569", # Caller::get_module_export panic
+    "RUSTSEC-2026-0571", # wasmtime-wasi-http unbounded heap on empty writes
+
+    # --- libp2p-tls 0.5 / rcgen 0.11 pin ring 0.16 -------------------------
+    "RUSTSEC-2025-0009", # ring 0.16.20 AES panic with overflow checks enabled.
+    #   Fix needs ring >=0.17.12, i.e. libp2p-tls >=0.6 (libp2p >=0.56). Our own
+    #   TLS stack uses ring 0.17.14; release builds have overflow checks off, so
+    #   the panic path is not compiled in. Review 2027-01-26.
+
+    # --- libp2p-websocket 0.44 -> webpki-roots 0.25 -------------------------
+    "RUSTSEC-2026-0381", # webpki-roots 0.25.4 trusts emSign intermediates.
+    #   Pinned by libp2p-websocket 0.44 (libp2p 0.54); our own HTTPS seed fetch
+    #   uses webpki-roots 1.0.x. Review 2027-01-26.
 ]
