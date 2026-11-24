@@ -19,6 +19,25 @@
   verification above, same bytes `release-cut.sh` step 2 downloads), then dispatch
   `scripts/release-cut.sh --timeout 300`, write the handle, end the run.
 
+## 20:40 PT 0.3.72 §5 provenance-ordering box ticked on this run's own workflow read
+
+- **A0**: `GET /commits/main` ⇒ `145ce7a0f1e81be45a5149f78484a210306d4b1e` == local HEAD after
+  `git pull --ff-only`. No CI run needed: last commits are docs-only (`paths-ignore: docs/**`).
+- **Handle read, not waited on**: windows run **45318140117** ⇒ **`completed success` 04:02:52Z**
+  (24/25 steps, 1 skipped). The 19:54 run's "still executing" is resolved.
+- **Box ticked**: §5 "attestation step runs BEFORE publish, failure blocks it" — verified this run by
+  reading `.github/workflows/release-windows.yml` step list myself: package `:643` → visibility check
+  `:678` → attest `:692` / cosign sign `:698` → **provenance gate `:720` with no `if:`** (throws on
+  missing/short bundle or failed `cosign verify-blob`) → publish `:748`. Repo private ⇒ cosign branch.
+  This box duplicates the condensed box already ticked above it; ticked on its own evidence rather
+  than deleted (never delete a box).
+- **Checklist**: 30/55 ticked; §5 now 6/8. Remaining §5: attestation-exists-for-published-digest,
+  and verify-downloaded-artifact (both need the published `releases.json` digest + a fresh download,
+  which the windows box already did once — next run redoes it against `releases.json`).
+- **Next run**: tick §5 attestation-exists (private path: bundle on `windows-latest` verifies the
+  published zip; `attestations/sha256:` 404 is expected), then §5 verify-downloaded-artifact, then §7 cut.
+- No blocker, no [TRIAGE].
+
 ## 19:54 PT 0.3.72 §5 windows build still executing (no box tickable this run)
 
 - **A0**: HEAD == `GET /commits/main` ⇒ `a285df2ed956f67d52951d6e912e75abc9d6a357` (docs-only §5/§6 tick).
