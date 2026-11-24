@@ -1,3 +1,23 @@
+## 11:16 PT 0.3.74 §5 COMPLETE (7/7) — Windows release build succeeded and the cosign bundle verifies the published zip [no triage]
+
+- **A0 CI (conclusion only)**: `origin/main` HEAD `86e08de` is the previous docs commit;
+  code SHA `6c23d0f` ⇒ run `45447907558` `completed / success` (17:22:48Z→18:48:14Z). Nothing red.
+- **§5 windows box — TICKED**: `release-windows.yml` run **45461486516** (tag `build/6d5666acf6e7`)
+  `completed / success` 18:37:12Z→19:16:09Z; job `windows` green through 23 steps. Release
+  `windows-latest` (411990874) updated 19:16:02Z carrying `gpn-windows.zip` 253,255,756 B
+  sha256 `70a265ed…b469` + `gpn-windows.zip.bundle` 9,033 B. Local `sha256sum` of the downloaded
+  zip equals the API digest.
+- **§5 same-SHA box — TICKED**: linux run 45457954423 and windows run 45461486516 both report
+  `head_sha=6d5666acf6e705367238cc9cced5d38136807d3e`, both `success`.
+- **§5 attestation ordering + digest + verification — TICKED**: repo is `private` (user-owned), so the
+  cosign path applies — step 20 (public attest) **skipped**, 21 keyless sign success, 22 provenance
+  gate (`release-windows.yml:720`, no `if:`) success **before** step 23 publish. Verified by hand:
+  `cosign verify-blob --bundle gpn-windows.zip.bundle --certificate-identity-regexp '^https://github\.com/jeremyzguo/gpn_coin/\.github/workflows/release-windows\.yml@.*$' --certificate-oidc-issuer https://token.actions.githubusercontent.com gpn-windows.zip`
+  ⇒ **`Verified OK`**.
+- **Next**: §6 — string scan of the built binaries (`reorg=`, `work ours=`, `gpn-forked`) and
+  `gpn-node --version` = 0.3.74 on the artifact, then §7 `release-cut.sh`.
+- **No [TRIAGE]**: nothing needed a decision.
+
 ## 10:56 PT 0.3.74 §4 CI-conclusion + §5 SSH-evidence boxes ticked [no triage]
 
 - **A0 CI (conclusion only, no waiting)**: docs HEAD `350cfae` (full sha `350cfae6f422e14a…`) ⇒
