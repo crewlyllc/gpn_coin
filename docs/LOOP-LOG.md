@@ -1,3 +1,25 @@
+## 15:2x PT 0.3.75 checklist opened for work: §1–§4 ticked with CI evidence; both release builds dispatched for row 194's live half [no triage]
+
+- **A0 CI**: `origin/main` HEAD `c9e10f45b2eaef968192c88713dd9d2493bcd957` ⇒ run `45505708367`
+  (`CI`): `fmt + clippy` **completed success**, `secret-scan` success, linux/windows build+test
+  `in_progress` at tick time. Observed once, not waited on.
+- **Worked `docs/releases/0.3.75.md` in order** (17/53):
+  - **§1 (3/3)**, **§2 (6/6)**, **§3 (4/4)**, **§4 (4/4)** ticked with evidence —
+    `cargo fmt --check` exit 0; CI `fmt + clippy` success on this exact sha; `work_for_tip`
+    definition `fork_choice.rs:305` + call sites `service.rs:2628/2734/2906`;
+    `git merge-base --is-ancestor 87d77b3b HEAD` ⇒ true; `bump-version.py --check` ⇒
+    `lockstep: 15 manifest(s) and 14 lockfile entr(ies) agree`.
+    Note to self for future ticks: a local `cargo clippy -- -D warnings` **without** ci.yml's
+    documented `CLIPPY_ALLOWS` list fails on FRAME macro lints in `pallet-gpn-liveness` /
+    `gpn-governance` / `shielded-pool` — that is not the CI gate; cite the CI job.
+- **§3b (row 194) — build dispatched, box left open**: Windows run `45509380702` and Linux run
+  `45509384325`, both `queued`, both sha `c9e10f45`, at 15:22 PT. Both runners showed
+  `busy=True` (CI), so `queued` is contention, not a fault.
+- **Next run**: poll those two ids once. On success take `gpn-windows.zip` to box 3 (`C:\gpn\r194`),
+  run the shallow pair first, then the deep pair per the row's rig lessons (fresh-base branch, not a
+  `revert`ed copy; delete copied `secret_ed25519` before peering; `fork\BL2` is lighter than ours).
+  Then §5/§6/§7 cut and publish.
+- No box marked blocked; nothing needs Jeremy.
 ## 14:57 PT release 0.3.75 opened — row 194's fork-choice fix (`87d77b3b`) is on main but not in any published binary [no triage]
 
 - **A0 CI**: `origin/main` HEAD `032e8c5d79fc5b6a86e8311311d357b1374dc2ca` ⇒ `GET
