@@ -1,3 +1,31 @@
+## 19:45 PT 0.3.72 §5 linux build ticked (success), §5 ordering verified, §6 artifact scan done on the published tarball
+
+- **A0**: `GET /commits/main` ⇒ `f579fc794e9647237d8c211ff27d5e0ca92bda33` (docs-only §4 tick);
+  `GET /actions/runs?head_sha=f579fc7…` (full sha) ⇒ `total_count: 0` — expected, `ci.yml` ignores `docs/**`.
+  No red run owed an explanation.
+- **Handles read, not waited on**: linux run **45318137343** ⇒ `completed success` 03:28:10Z (7/7 steps
+  green, publish to rolling `linux-latest`); windows run **45318140117** ⇒ still `queued` at 03:41Z
+  (27 min) with box-1 runner `busy=True` — single-slot contention, not a fault, and under the 90-minute
+  re-dispatch threshold.
+- **Boxes ticked this run**: §5 per-item-Windows (`n/a` — items 250–254 are all rust/linux surfaces,
+  each proven by cargo test + live observation; the only Windows surface is the artifact build);
+  §5 linux build (run id, conclusion, asset size + sha256 re-read from the release);
+  §5 attestation-before-publish ordering (read from `release-windows.yml`: package :643 → attest gate
+  :678 → attest/sign :692/:698 → provenance gate :720 with no `if:` → publish :748; repo `private` ⇒
+  cosign path); §6 both boxes (§6 header marked DONE).
+- **Evidence for §6**: downloaded the **published** `gpn-linux.tar.gz` from `linux-latest`
+  (346,947,553 B, sha256 `6307847…3855f` — matches the asset digest), extracted, scanned:
+  `entry-free-gpu-rate-limited` in `gpn_node`/`gpn_register`, `rejected heartbeat` + `gpu_fingerprint`
+  in `gpn_scheduler`, `auto-update ON` + `first check in` in `gpn_node`; `./gpn-node --version` ⇒
+  `gpn-node 0.3.72`, `./gpn_node --version` ⇒ `gpn_node 0.3.72 (spec 54, 98a06eb)`.
+  Pallet storage names are not a valid probe — runtime wasm is compressed inside `gpn-node`.
+- **Checklist**: total **28/55**. §1/§2/§3b/§3/§4/§6 DONE; §5 4/8 (windows build + its three
+  attestation boxes remain); §7 onward untouched.
+- **Next run**: read run 45318140117 — if success, tick the windows box, run the cosign verification
+  against the published zip digest and §7 cut/publish; if still queued past ~20:45 PT (90 min), cancel
+  and re-dispatch once.
+- No blocker, no [TRIAGE].
+
 ## 19:15 PT 0.3.72 §4 "Push (once)" ticked, and both release builds dispatched on 98a06eb
 
 - **A0**: `GET /commits/main` ⇒ `98a06eb879775ca4e8d6c3e4bdd1fa727f5c622e` (docs-only §3 tick + loop log);
