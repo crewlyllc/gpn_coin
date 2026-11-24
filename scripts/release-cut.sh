@@ -760,18 +760,24 @@ esac
 # Take the repo lock now: from here until the signed manifest is live, nothing
 # else may be committed (#204). Every extra push in this window cancels a queued
 # CI run for this release. `scripts/hooks/pre-commit` refuses those commits.
-if [ -x "$RELEASE_LOCK_TOOL" ] && [ "$DRY" = 0 ]; then
-  $SCRIPT_DIR/release-lock.sh take "$VER" || {
-    rc=$?
-    echo "ABORT: could not take the release lock for $VER (exit $rc)." >&2
-    echo "       Another release is in flight; publish it, or release the lock" >&2
-    echo "       deliberately: scripts/release-lock.sh release <version>" >&2
-    exit 2
-  }
-  say "repo locked for $VER (\$HOME/.gpn/release-in-flight) — no commits may land"
-else
+# Three different states used to share one misleading line here (row 261):
+# a dry run, a missing tool, and a lock held by another release all printed
+# "missing or not executable". Name the state that actually holds.
+if [ ! -x "$RELEASE_LOCK_TOOL" ]; then
   echo "WARNING: $RELEASE_LOCK_TOOL is missing or not executable — the repo is NOT" >&2
   echo "         locked, so any commit during this release cancels its CI run." >&2
+elif [ "$DRY" = 1 ]; then
+  say "repo lock not taken: --dry-run writes nothing (no upload, no commit, no push)"
+else
+  if $SCRIPT_DIR/release-lock.sh take "$VER"; then
+    say "repo locked for $VER (\$HOME/.gpn/release-in-flight) — no commits may land"
+  else
+    rc=$?
+    echo "REFUSED: another release holds the repo lock (release-lock.sh exit $rc)." >&2
+    echo "         $RELEASE_LOCK_TOOL status — publish that release, or release the" >&2
+    echo "         lock deliberately: scripts/release-lock.sh release <version>" >&2
+    exit 2
+  fi
 fi
 
 # The bundles must come from the same commit, and that commit must have passed CI.

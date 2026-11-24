@@ -99,7 +99,8 @@ setup() { # published_version built_version [--no-published]
   mkdir -p "$T/state" "$R/website" "$R/scripts"
   mkdir -p "$R/.github/workflows"
   cp "$REPO_ROOT/.github/workflows/ci.yml" "$R/.github/workflows/ci.yml"
-  cp "$REPO_ROOT/scripts/release-cut.sh" "$REPO_ROOT/scripts/gen-release-manifest.py" \
+  cp "$REPO_ROOT/scripts/release-cut.sh" "$REPO_ROOT/scripts/release-lock.sh" \
+     "$REPO_ROOT/scripts/gen-release-manifest.py" \
      "$REPO_ROOT/scripts/commit-paths.sh" "$REPO_ROOT/scripts/verify-release-artifact.py" \
      "$R/scripts/"
   chmod +x "$R/scripts/"*
@@ -178,6 +179,12 @@ PY
          GPN_RELEASE_KEY="$T/key.txt" GPN_VERIFY_KEY="$(cat "$T/pub.txt")" \
          GPN_GPN_PAT_FILE="$T/src.pat" GPN_CREWLYLLC_PAT_FILE="$T/dst.pat" \
          GPN_POLL_INTERVAL=1 GPN_WORK_DIR="$T/work"
+  # Isolate $HOME: release-cut and release-lock.sh both keep their lock files
+  # under it, and a real ~/.gpn/release-in-flight would poison every scenario.
+  mkdir -p "$T/home/.gpn"
+  export TEST_HOME="$T/home"
+  # keep the CI gate off the real credential store while $HOME is isolated
+  export GPN_GH_TOKEN_FILE="$T/src.pat"
   git -C "$R" config --global --get user.email >/dev/null 2>&1 || true
 }
 
@@ -190,7 +197,7 @@ teardown() {
 }
 
 cut() { # args -> runs the script in the temp repo; output in $OUT, status $RC
-  OUT="$(cd "$R" && ./scripts/release-cut.sh "$@" 2>&1)"
+  OUT="$(cd "$R" && HOME="$TEST_HOME" ./scripts/release-cut.sh "$@" 2>&1)"
   RC=$?
   [ -n "${VERBOSE:-}" ] && printf '%s\n' "$OUT" | sed 's/^/   | /'
   return 0
@@ -244,6 +251,32 @@ t2_detection_and_dry_run() {
   check '[ "$(git -C "$R" status --porcelain)" = "" ]' "working tree clean"
   # the manifest it would publish is signed and self-verified
   check 'grep -q "OK: 0.3.5" <<< "$OUT"' "signed manifest verifies against the expected key"
+  teardown
+}
+
+t2b_lock_messages() {
+  CURRENT="t2b lock messages"
+  setup 0.3.4 0.3.5
+  # (1) dry run with the tool present: must NOT claim the tool is missing
+  cut --dry-run
+  check '[ "$RC" = 0 ]' "dry run exits 0"
+  check '! grep -q "missing or not executable" <<< "$OUT"' "dry run does not claim the lock tool is missing"
+  check 'grep -q "repo lock not taken: --dry-run" <<< "$OUT"' "dry run says the lock is skipped by design"
+
+  # (2) tool genuinely missing: the warning is true and names the path
+  rm -f "$R/scripts/release-lock.sh"
+  cut --dry-run
+  check 'grep -q "missing or not executable" <<< "$OUT"' "missing tool still warns (that line is true)"
+  cp "$REPO_ROOT/scripts/release-lock.sh" "$R/scripts/" && chmod +x "$R/scripts/release-lock.sh"
+
+  # (3) lock held by another release: refuse, and name the lock not the tool
+  printf '0.3.4\nholder: someone@else pid 1\nsince: 2026-01-01T00:00:00Z\n' \
+    > "$TEST_HOME/.gpn/release-in-flight"
+  cut
+  check '[ "$RC" = 2 ]' "exits 2 when another release holds the lock"
+  check 'grep -q "another release holds the repo lock" <<< "$OUT"' "names the held lock"
+  check '! grep -q "missing or not executable" <<< "$OUT"' "does not mis-report the tool as missing"
+  rm -f "$TEST_HOME/.gpn/release-in-flight"
   teardown
 }
 
@@ -463,7 +496,7 @@ t14_filename_exact() {
   check 'grep -q "gpn-windows.zip.old-1795385826" <<< "$OUT"' \
         "it prints the assets the release actually carries"
   check '[ "$(commits)" -eq 1 ]' "nothing was published (no manifest commit)"
-  check '! grep -q "released " <<< "$OUT"' "the run sure did not claim a release"
+  check '! grep -qE "^released [0-9]" <<< "$OUT"' "the run sure did not claim a release"
   teardown
 
   # And the standalone §8 command must fail the same way on a live manifest whose
@@ -494,7 +527,7 @@ t14_filename_exact() {
   teardown
 }
 
-ALL=(t1_nothing_to_do t2_detection_and_dry_run t3_digest_mismatch t4_mirror_failure
+ALL=(t1_nothing_to_do t2_detection_and_dry_run t2b_lock_messages t3_digest_mismatch t4_mirror_failure
      t5_dirty_manifest t6_full_publish t7_version_assertion t8_skip_mirror
      t9_ci_gate t10_wrong_tree_aborts t11_docs_only_gap t12_gap_with_code
      t13_upload_before_rename t14_filename_exact)

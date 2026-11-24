@@ -1,3 +1,22 @@
+## 09:45 PT 0.3.74 box 4/4 — row 261 DONE: release-cut names the real lock state [no triage]
+
+- **A0 CI**: `origin/main` HEAD `a84f317` (docs-only loop-log commit) ⇒ `GET /actions/runs?head_sha=a84f317…`
+  `total_count: 0`, expected under `ci.yml` paths-ignore. Nothing red.
+- **§3b 261 — `--dry-run` said the lock tool was "missing or not executable"** while it was only skipping the
+  lock. One `[ -x tool ] && [ DRY = 0 ]` condition fed three states into one else-branch. Now split:
+  `! -x` ⇒ the warning (kept, it is true); `DRY=1` ⇒ `repo lock not taken: --dry-run writes nothing
+  (no upload, no commit, no push)`; else take the lock and, on refusal, print `REFUSED: another release
+  holds the repo lock (release-lock.sh exit 3)` + `release-lock.sh status`.
+- **Test**: new `t2b_lock_messages` (7 checks) covering all three states. Fixture now copies
+  `release-lock.sh`, isolates `$HOME` via `TEST_HOME` (the real `~/.gpn/release-in-flight` had started
+  poisoning t6+), and sets `GPN_GH_TOKEN_FILE` for the CI gate. t14's "did not claim a release" check
+  tightened to `^released [0-9]` because the (now real) lock cleanup line legitimately says
+  `release-cut: released the commit lock …`.
+- **Evidence**: old script ⇒ `4 passed, 3 failed` (including "dry run does not claim the lock tool is
+  missing"); new ⇒ `7 passed, 0 failed`; whole file ⇒ **`98 checks passed, 0 failed`** (91 at HEAD).
+- **Code change pushed in this run** — its CI run is noted, not waited on. Next box: §4 seed-list parity,
+  then §5 build.
+
 ## 09:05 PT 0.3.74 box 3/4 — row 260 DONE: cargo-audit clean on both workspaces [no triage]
 
 - **A0 CI**: `origin/main` HEAD was `ebaaec9` (docs-only loop-log commit) ⇒ `total_count 0`, expected.
