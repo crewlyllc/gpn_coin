@@ -1,3 +1,18 @@
+## 01:30 PT 0.3.73 — §2 box 1 ticked (both narrow tests re-run on HEAD)
+
+- **A0**: HEAD `b57b67d` is docs-only ⇒ `total_count: 0`, no CI conclusion to act on (expected).
+  The code SHA `e33e2c8` runs: linux `45360104644` **success**, windows `45360119351` **in_progress**
+  (~37 min into a 40–75 min cold build), CI `45360094725` still **queued** behind the single-slot
+  runner — contention, not a fault. Nothing to wait on inside the run.
+- **Box worked: §2 "The test passes."** Re-ran both narrow tests on tree `b57b67d`:
+  `cargo test --lib -- gpu::tests::onboarding_benchmark_failure_names_an_action
+  gpu::tests::gpu_errors_name_an_action` ⇒ `2 passed; 0 failed; 812 filtered out`; and
+  `website node --test tests/docs-clean-urls.test.js` ⇒ `tests 2 / pass 2 / fail 0`. Ticked with
+  that evidence + notes. Docs commit `1e98524` pushed (docs-only, starts no build).
+- **Next**: §2 boxes 2–6 (fmt/clippy `-D warnings`, full affected suites, call site, no-off-by-default,
+  change-in-tree). §0e box 1 and §3b row 256 remain AWAITING-OWNER ([TRIAGE] item 256: which machine
+  carries lifecycle steps 3–6 — unchanged, still owed an answer).
+
 ## 01:1x PT 0.3.73 — red CI root-caused and fixed (rustfmt + 4 clippy lints); a deleted evidence tick restored
 
 - **A0 found a conclusion, not a queue**: `head_sha=e33e2c8778df5d6b84085f2804acda4dfb1bb632` ⇒ 3 runs
