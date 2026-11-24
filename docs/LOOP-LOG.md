@@ -1,3 +1,23 @@
+## 02:55 PT 0.3.73 — §2 closed (6/6): no new defaults, and the built SHA carries both fixes
+
+- **A0**: tree was 4 commits behind; `git merge --ff-only origin/main` ⇒ `b3d1ebd`.
+  `head_sha=b3d1ebd…` ⇒ `total_count: 0` (docs-only, correct). The code commit `c1a2592` also
+  shows 0 runs of its own because GitHub keys a run to the push's head (`45375310398`, sha
+  `d5d98b9`, still **pending/queued** — a single-slot runner queue, not a failure). Release legs
+  from `e33e2c8`: linux **success**, windows **success**.
+- **Boxes worked: §2 "nothing off by default behind a flag nobody sets" + "the change is in the
+  tree you are about to release"** — the last two in §2, so the section is now DONE 6/6.
+- **Default-on check**: the batch adds no env var and no feature flag. The only flag mentioned is
+  the pre-existing `--diagnose` (`gpn_node.rs:4628`), quoted in the new advice text. The CI step
+  added in `c1a2592` has no `if:` and no input, so it runs every build.
+- **Built-tree check**: `git diff --stat e33e2c8..HEAD -- gpn-agent/src gpn-node pallets website`
+  ⇒ **empty**. The two later commits are `gpn-agent/examples/*.rs` fmt/clippy and `ci.yml`, neither
+  of which can enter a binary — so `gpn-linux.tar.gz` / `gpn-windows.zip` from `e33e2c8` contain
+  rows 255 and 258. No rebuild needed.
+- **Next box**: §5 "Per-item Windows evidence was collected over SSH" (the GPN-209 lifecycle run
+  is that evidence), then §5 attestation mechanism (repo visibility decision).
+- No [TRIAGE] items added. Item 256 remains AWAITING-OWNER.
+
 ## 02:30 PT 0.3.73 — §2 "a call site exists": the docs clean-URL guard was a test nothing ran, now wired into CI
 
 - **A0**: tree was 11 commits behind; `git merge --ff-only origin/main` ⇒ `131ccd2`.
