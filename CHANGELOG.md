@@ -8,6 +8,42 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 versions are [Semantic Versioning](https://semver.org/spec/v2.0.0.html), with
 the GPN-specific meaning of each level documented in `docs/updates.md`.
 
+## [0.3.74] - 2026-11-24
+
+Bumped from 0.3.73 (`scripts/bump-version.py patch`). Four defects found while closing 0.3.73 and
+running the stranger lifecycle test: docs pages the generator never published, an installer that
+reported a start that did not happen, a dependency tree with 38 known advisories, and a release
+lock warning that lied during a dry run.
+
+### Changed
+- **Dependency bump on `gpn-node`/`gpn-agent` for the `cargo audit` findings** (row 260): the
+  `Dependency audit` job reported `38 vulnerabilities found!` across 1040 crates, including four
+  high-severity DNSSEC/DNS-validation flaws in `hickory-proto` 0.25.2 and 0.24.4, `zstd-safe`,
+  `wasmtime`, `quinn-proto`, `lru`, `libz-sys`, `tokio`, `chacha20`, `url`, `chrono`, `rustix`,
+  `ring`, `libsecp256k1` and `quinn-udp`. The bump is its own patch release: both suites and a
+  two-node testnet run go with it, and every remaining advisory is either fixed or an explicitly
+  justified, dated `[advisories] ignore` in `deny.toml`.
+
+### Fixed
+- **Three docs links now point at pages that exist** (row 257): `run-a-node` and
+  `technical-overview` linked `updates`, and `node-gui-and-idle` and
+  `provider-address-and-models` linked their own pages, but only the slugs in
+  `scripts/build-site-docs.py`'s `PAGES` are generated — so `https://gpncoin.ai/docs/updates`,
+  `/docs/node-gui-and-idle` and `/docs/provider-address-and-models` answered 404 while the source
+  files sat in `docs/`. The pages are generated now, and a check fails when any internal docs href
+  resolves to a page the generator does not emit.
+- **`install.ps1` no longer says "node started" when the task did not start** (row 259): on a
+  headless install the scheduled task's `Interactive` principal can never run, so
+  `schtasks /Run` returns 0, `GPN-Node` stays `Ready` with `LastTaskResult 267011` (0x41303, "task
+  has not yet run"), no `gpn-node` process and no `node.log` exist — and the installer still printed
+  `node started (GPN-Node)` and exited 0. The start step now waits a bounded time for a live
+  `gpn-node` process or the RPC on 9944, and on absence says so, names the principal/logon type as
+  the reason and exits non-zero.
+- **`release-cut.sh --dry-run` no longer claims the lock tool is missing** (row 261): the lock block
+  is `if [ -x "$RELEASE_LOCK_TOOL" ] && [ "$DRY" = 0 ]`, so every dry run fell into the `else` and
+  printed `WARNING: … is missing or not executable — the repo is NOT locked` about a file that is
+  `100755` in git. The three cases — tool missing, dry run, lock taken — now print three true lines.
+
 ## [0.3.73] - 2026-11-23
 
 Bumped from 0.3.72 (`scripts/bump-version.py patch`).
