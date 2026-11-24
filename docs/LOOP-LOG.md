@@ -2794,3 +2794,21 @@ Deleted only `/tmp` scratch whose newest file was ≥ 2 days old and which no pr
   `09:15:37Z` and step 17 passed.
 - **Next run**: §7 box 1 (`release-cut` attestation refusal check), then the cut itself.
 
+
+## 06:31 PT — both rebuild legs green; attestation gate re-run on the new bytes; cut dispatched
+
+- **A0**: `origin/main` HEAD `d895a0b` (docs-only commits on top of `d5d98b96`); `GET /actions/runs?head_sha=d895a0b…` ⇒
+  `total_count: 0`, expected under `ci.yml` paths-ignore. Nothing red.
+- **Both §7 handles resolved:** Linux `45397558122` `completed:success` 13:02Z · Windows `45397562142`
+  `completed:success` 14:11:52Z. `windows-latest` now holds `gpn-windows.zip` 253,204,352 B
+  `sha256:212db4c6…caac6f` + `gpn-windows.zip.bundle` 8,949 B `c9a427fa…b9264` (new bytes, 14:11:44Z).
+- **§7 box 1 gate re-run, not inherited:** the box's evidence cited the *previous* zip (`85267a45…`), and the
+  asset changed, so the gate was re-earned. Fresh API download of asset ids 787457895 / 787460444 into
+  `/tmp/gate73`; both sha256 equal the API `digest`; `cosign verify-blob --bundle gpn-windows.zip.bundle
+  --certificate-identity-regexp '^https://github\.com/jeremyzguo/gpn_coin/\.github/workflows/release-windows\.yml@.*$'
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com gpn-windows.zip` ⇒ **`Verified OK`** exit 0.
+- **§7 box 2 dispatched, NOT waited on:** `scripts/release-cut.sh --timeout 300` detached at 06:31 PT,
+  pid 2483972, log `/tmp/cut073.log`. At 06:31 it had passed 0/6 preconditions (published 0.3.72,
+  built assets differ) and 1/6 detect (linux `79623ab8…`, windows `212db4c6…`) and was downloading at 2/6.
+- Next run: read `/tmp/cut073.log`; if published, tick box 2 and continue to `network.json`
+  `latest_version` + the twice-ten-seconds `releases.json` poll and §7b surfaces.
