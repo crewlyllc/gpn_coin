@@ -1,3 +1,31 @@
+## 08:10 PT 0.3.74 BUNDLED — rows 257/259/260/261 opened; checklist generated; CI dispatched (not waited on) [no triage]
+
+Every claim below is from a command run in this session (07:50–08:10 PT).
+
+- **A0 CI**: `origin/main` HEAD was `89e23aa` == local HEAD, docs-only ⇒ `GET /actions/runs?head_sha=89e23aa…`
+  ⇒ `total_count 0` (paths-ignore, as designed). Nothing red, nothing to wait on.
+- **Release state check (rule B)**: `releases.json` ⇒ `0.3.73 / 2026-11-24T14:36:56Z`; local node
+  `system_version` ⇒ `"0.3.73"`. Rows 255 and 258 are already `COMPLETE 0.3.73` and the checklist is
+  archived in `INDEX.md` — nothing left to close.
+- **Row 256 status corrected**: `IN-PROGRESS` → `AWAITING-OWNER`. 0.3.73 is published and its checklist
+  is 51/51 archived; the only remaining steps (3-6) need a GPU-attached Windows guest, which this loop
+  cannot create (GPN-209 has `Microsoft Hyper-V Video` only). Decision stays in `NEEDS-TRIAGE.md` item
+  256 with three options and recommendation A (GPU-P partition). No new triage raised.
+- **Rule C bundle — 0.3.74**: rows 257 (three docs pages the generator never publishes), 259
+  (`install.ps1` says "node started" when the task never ran — `LastTaskResult 267011`), 260
+  (`cargo audit` 38 advisories / 4 high, `hickory-proto` DNSSEC), 261 (`release-cut --dry-run` claims
+  the lock tool is missing) marked IN-PROGRESS. `bump-version.py patch` ⇒ `updated 15 manifest(s) -> 0.3.74`,
+  `network.json latest_version -> 0.3.74`, 14 lockfile entries; `--check` ⇒ `lockstep: 15 manifest(s) and
+  14 lockfile entr(ies) agree`, `gpn version: 0.3.74`, rc 0. CHANGELOG `## [0.3.74]` written (no `_TODO_`).
+- **Checklist**: `scripts/make-release-checklist.py 0.3.74` ⇒ 4 IN-PROGRESS + 6 blocked inserted at §3b.
+  §3's bump / CHANGELOG / `--check` boxes ticked with the output above; seed-parity box left open (it
+  needs the published `seeds.json`, which only exists after a release is cut).
+- **Pushed once**: `c280c72` on `main` (`89e23aa..c280c72`), authenticated as `jeremyzguo`.
+- **CI dispatched, not waited on**: run `45430515583` (`CI`) `pending` for `c280c72` — a version bump is a
+  code change, so this is expected. Next run reads its conclusion (A0) before working §3b box 1.
+- **Next run**: §3b box 1 = row 257 (docs pages) or 261 (smallest, has a test); 260 is the big one and
+  owns this release's dependency bump (both suites + a two-node testnet run).
+
 ## 07:16 PT 0.3.73 — §7 + §7b + §8 verification boxes ticked on live evidence: site, GitHub/mirror and the released binary all say 0.3.73
 
 - **A0**: no CI for `bc8460b` — `total_count: 0` on the runs API. `bc8460b` is docs-only (`docs/…`),
