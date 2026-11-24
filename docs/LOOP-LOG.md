@@ -1,3 +1,21 @@
+## 23:0x PT BUNDLED 0.3.73 — rows 255 (clean-URL docs generator) + 256 (stranger lifecycle proof)
+
+- **A0**: `HEAD = origin/main = b83c123`; CI for that sha `total_count: 0` (docs-only, paths-ignore
+  correct). No in-flight run to act on.
+- **C applied**: no `IN-PROGRESS` rows remained. Only two `NEW` rows: 255 and 256. Both marked
+  `IN-PROGRESS` with a `BUNDLED 0.3.73` note in GPN-LIST.md.
+- **Bump**: `scripts/bump-version.py patch` ⇒ 0.3.73 over 15 manifests + 14 lockfile entries;
+  `--check` ⇒ `lockstep: 15 manifest(s) and 14 lockfile entr(ies) agree / gpn version: 0.3.73`;
+  `network.json latest_version` = 0.3.73.
+- **CHANGELOG**: 0.3.73 section written from the two rows (Added: stranger-lifecycle proof;
+  Fixed: clean URLs from `build-site-docs.py`).
+- **Checklist**: `scripts/make-release-checklist.py 0.3.73` ⇒ `docs/releases/0.3.73.md`
+  (2 in-progress, 6 blocked inherited rows), §3b boxes 255 and 256.
+- **Commit/push (one)**: `8ab1dca` → `origin/main`. This one carries manifest changes, so it IS a
+  code change and does start CI — not waited on, per A0.
+- Next run: work §3b box 255 (generator clean URLs + no-op regeneration proof), then 256.
+- No [TRIAGE] items.
+
 ## 22:45 PT 0.3.72 FILED — checklist archived, INDEX row, rows 250–254 COMPLETE, timing recorded
 
 - **A0**: `origin/main = b51faad`, `HEAD = b51faad` (ff'd the docs commit). CI on the code sha
