@@ -1,4 +1,4 @@
-## 00:1x PT STRANGER LIFECYCLE — script written, steps 1-2 pass on a clean guest, step 3 names a useless reason
+## 00:1x PT [TRIAGE] STRANGER LIFECYCLE — script written, steps 1-2 pass on a clean guest, step 3 names a useless reason
 
 - **A0**: `HEAD = origin/main = 8d1c515`; `GET /actions/runs?head_sha=8d1c515…` ⇒ `total_count: 0`
   (docs-only). The code commit from the last run (`61212a0`, row 255) does have a run —
