@@ -1,3 +1,27 @@
+## 08:5x PT 0.3.74 box 2/4 — row 259 DONE: the installer waits for a real start witness [no triage]
+
+- **A0 CI**: `origin/main` HEAD `ec4aaae` at start (docs-only) ⇒ `total_count 0`, as designed. This
+  run pushed a **code** change, `fa2644c`; its run **45438744889** is `pending` — noted, not waited on.
+- **§3b 259 — install.ps1 claimed "node started" when the task had not started.** Cause (from the
+  GPN-209 log chain): `schtasks /Run` exits 0 on hand-off; a task whose principal is `Interactive`
+  with no desktop session stays `Ready` with `LastTaskResult 267011` (0x41303 "task has not yet
+  run") and no `gpn-node` process, and the installer printed "node started (GPN-Node)" on rc alone.
+- Fix in `install.ps1`: `Confirm-NodeStarted` (bounded 60 s) waits for a real witness — a live
+  `gpn_node`/`gpn-node` process **or** the 9944 RPC — before any success line; on no witness it makes
+  one direct `Start-NodeDetached` attempt, then prints task state, `Principal.LogonType`,
+  `LastTaskResult` (267011 spelled out), names the Interactive/headless cause and `exit 1`. Also
+  found that `Get-NodeProcess` lives inside the `start-gpn.ps1` here-string (AST check), so the
+  installer scope got its own `Get-LiveNodeProcess`.
+- Test: new `scripts/tests/test-install-start-verification.ps1`, 20 checks. Fails on the previous
+  installer (`the start verification is absent`, rc 1); passes now under **real Windows PowerShell
+  5.1 on box 1** (`GPN_INSTALLER=C:\Users\jeremy guo\install-259.ps1`, `all 20 checks passed`, rc 0)
+  and under pwsh 7.4.6 locally. Shipped functions against the live box 1, no injected probes:
+  `process: gpn_node pid 53112`, `task: state=Running principal=Interactive user=Jeremy Guo
+  last=267009`, `confirm: started=True witness=process`. (box 1's own task is Interactive too — a
+  headless install there would have hit this.)
+- Commit `fa2644c` (code + test + tick), pushed `ec4aaae..fa2644c` once.
+- Next run: box 3/4 — row 260 (`cargo audit`, 38 advisories) is the release's heavy one; 261 after it.
+
 ## 08:15 PT 0.3.74 box 1/4 — row 257 DONE: three docs pages published, live 200 [no triage]
 
 - **A0 CI**: `origin/main` HEAD `6c3040e` (docs-only) ⇒ `total_count 0`, as designed. After this run's
