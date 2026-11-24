@@ -1,3 +1,35 @@
+## 18:45 PT 0.3.72 §3b box 254 ticked — refused heartbeats now remember the build that pushed
+
+- **A0**: `GET /commits/main` ⇒ `abe09eeda6991b7ccd832761de647ef6f669709f` (docs-only tick of box 253);
+  `GET /actions/runs?head_sha=abe09ee…` ⇒ `total_count: 0` — expected, `ci.yml` ignores `docs/**`/`**/*.md`.
+- **One red run explained, not parked**: run **45298958279** on `06bbc26` concluded `failure` in
+  "Build + unit tests (windows, self-hosted)" step 7 and "Build + unit tests (linux)" step 7 — both
+  the same line: `network_directory::tests::a_row_labels_the_gpu_fingerprint ... FAILED` /
+  `panicked at src/network_directory.rs:971 … assertion left == right failed: unproven must be
+  labelled, not omitted: {…}  left: Null right: Bool(false)`. That is the **red-first test** written
+  in `06bbc26` on purpose; the fix landed in `b80e865` (run 45301441083, which was *cancelled*, not
+  failed, when superseded). So the failure is a tick mark in the release's history, not a live red.
+- **A live run, noted not waited on**: run **45309072916** on `fd948d8` `in_progress` since 01:59Z
+  (46 min at the time of writing) — noted; the box worked here is not a build/publish step, so per the
+  dispatch-and-end rule it was not awaited.
+- **Box worked**: §3b item **254** (first unticked box) — a refused heartbeat keeps account, peer id,
+  reported version and source IP before the body is discarded, and serves them at `GET /api/rejected`.
+- **Evidence produced this run** (not carried over from the 16:25 note):
+  - code: `RejectStore` `provider_heartbeat.rs:688-762`; wired at **both** refusal paths
+    `gpn_scheduler.rs:6265` (account not on chain) and `:6312` (ingest error); handler at `:6470`.
+  - unit: four `--exact` `provider_heartbeat::tests::*` ⇒ `1 passed; 0 failed` each
+    (remembered build, one line per minute, bounded/keeps newest, pre-#201 build ⇒ `version: null`).
+  - live: rebuilt `target/release/gpn_scheduler` (18:35 PT) and ran a scratch AP on
+    `127.0.0.1:18097` (`HOME=/tmp/gpn-rt254b`, chain `ws://127.0.0.1:9944`); three refused POSTs
+    (`403 bad signature or unregistered account`) ⇒ **one** journal line
+    `account=5CT5jw…n3Kd peer_id=12D3KooWTestPeer254 version=0.3.69 git_sha=deadbee
+    source_ip=127.0.0.1 reason=not a registered provider`, and `GET /api/rejected` ⇒
+    `{"count":1,"rejected":[{"account":"5CT5jw…","count":3,"version":"0.3.69","git_sha":"deadbee",…}]}`
+    — three pushes, one row, count 3. AP stopped, `/tmp/gpn-rt254b` removed, port free.
+- **Checklist**: §3b now **5/5 (DONE)**, total **14/54**. §1/§2/§3b DONE.
+- **Next run**: §3 box 1 — `scripts/bump-version.py patch` (already at 0.3.72, so this is a
+  `--check`-first review of the bump), then CHANGELOG section, lockstep, seed-list parity.
+- No blocker, no [TRIAGE].
 ## 18:24 PT 0.3.72 §3b box 253 ticked — GPU fingerprint labelled verified/unverified, docs say "claim"
 
 - **A0**: HEAD `fd948d8…` (full 40-char sha equal to `GET /commits/main`). `GET /actions/runs?head_sha=fd948d8…` ⇒ `CI pending`, run `45309072916` — noted, not waited on (rule: CI is observed).
