@@ -1,3 +1,40 @@
+## 01:1x PT 0.3.73 — red CI root-caused and fixed (rustfmt + 4 clippy lints); a deleted evidence tick restored
+
+- **A0 found a conclusion, not a queue**: `head_sha=e33e2c8778df5d6b84085f2804acda4dfb1bb632` ⇒ 3 runs
+  (`45360104644` linux **success**, `45360119351` windows in_progress, `45360094725` CI **queued**).
+  The last code SHA with a conclusion, `61212a0`/run `45347253922`, was **failure** — so that was the box.
+- **Failing job**: `fmt + clippy` → step 10 `rustfmt (check, agent)`, exit 1. Exact lines:
+  `Diff in .../gpn-agent/examples/entry_rate_limit_live.rs:63` (also :80, :88, :155, :314) and
+  `Diff in .../gpn-agent/examples/entry_reject_probe.rs:13` (:20, :28) → `##[error]Process completed with exit code 1`.
+  Classified **our code** (formatting; both files arrived unformatted in `cac222b`, row 251).
+- **The fmt failure was masking a second red**: with CI's exact `-D warnings` list,
+  `cargo clippy --all-targets` rejects the same file with four lints not in `CLIPPY_ALLOWS` —
+  `needless_borrows_for_generic_args` at :146/:273/:287 and `redundant_closure` at :290. Fixed
+  (two `Copy` arrays passed by value, `map(hex::encode)`), so the next CI run is not red for a reason
+  the fmt step hid.
+- **Narrowest proof, run locally**: `gpn-agent cargo fmt --all -- --check` ⇒ 0;
+  `gpn-agent cargo clippy --all-targets -- $CLIPPY_ALLOWS -D warnings` ⇒ 0 (was 101 with 4 errors);
+  `gpn-node cargo fmt --all -- --check` ⇒ 0. Push once: `5366482`.
+- **Evidence-loss repair**: `345a774` had silently reverted row **255**'s `[x]` and blanked both note
+  lines (a full-file edit from a stale copy — same class as the 0.3.68 generator accident). Restored
+  verbatim from `8d1c515`; nothing re-earned, tree unchanged. `6ad6dd9`.
+- **Ticked with fresh evidence**: §1 (all 3 — behaviour named; the test's pre-fix failure pasted:
+  `no action in: GFLOPS benchmark: open GPU matmul: no OpenCL platforms: DLOPEN_RUNTIME_LOAD_FAILED`,
+  then `2 passed; 0 failed`), §4 (both CI-observation boxes), §5 linux leg
+  (`gpn-linux.tar.gz` 347,036,431 B, sha256 `c773b2d5b47b902d6b6ee3b9edd185be37da3b98663298b69d7e2adbe6138143`,
+  pallets compiled `v0.3.73`, published 09:07Z).
+- **Flag for the next run**: main is now `6ad6dd9`, two commits past the release SHA `e33e2c8`. Both are
+  examples/docs only and neither can enter a shipped binary, so the artifacts already published are
+  still the 0.3.73 source — but §5's "same SHA on both runs" box should say so explicitly before §6/§7.
+- **Handles for the next run**: the fmt/clippy fix is covered by CI run **`45362878700`**
+  (`head_sha=6ad6dd9`, pending at 09:11Z) — it is keyed to the *push tip*, not to `5366482`, which is
+  why `head_sha=5366482` returns 0 runs and why a run exists on a docs-tip sha. Windows leg
+  `45360119351` was `in_progress` at 34 min (cold Windows build is 40-75 min: still inside budget).
+- **Still open**: §0e box 1 / §3b 256 **AWAITING-OWNER** (triage item 256, which machine carries GPU
+  steps 3-6 — raised 00:3x, still unanswered). Windows leg `45360119351` in progress at 15 min; CI for
+  `e33e2c8` never started (single-slot contention, `DESKTOP-USBUADL busy=true`) — the new `5366482` run is
+  the one to read next.
+
 ## 00:5x PT 0.3.73 §0e box 2 fixed for real (row 258) — GPU failure now names the action; both release legs dispatched on e33e2c8
 
 - **A0**: `origin/main = 7793920`; `head_sha=7793920f…` ⇒ `total_count: 0` (docs-only). Local tree was
