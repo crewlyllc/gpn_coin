@@ -4449,6 +4449,13 @@ fn spawn_onboard(cfg: Config, explicit: bool) {
                     // node still syncs, mines and serves. It is just not a
                     // registered provider, and the reason is recorded loudly.
                     asciieprintln!("[onboard] ! onboarding did not complete: {e}");
+                    // The line above names the mechanism; this line names the action (row 258).
+                    if e.contains("GFLOPS benchmark") || e.contains("GPU") {
+                        asciieprintln!(
+                            "[onboard]   what to do: {}",
+                            gpn_agent::gpu::gpu_error_advice(&e)
+                        );
+                    }
                     let report = exit_report::new_report(
                         ExitKind::ONBOARD,
                         &e,

@@ -183,6 +183,44 @@ impl GPUMonitor {
 ///   only ever accepted an upward move. Both are now treated as unverified by
 ///   the AP and replaced by an idle measurement (`GPN_ATTEST_FORCE=1` for a
 ///   wrong-but-plausible record).
+///
+/// What the operator should **do** about a GPU probe failure (row 258).
+///
+/// The raw errors name a mechanism, not an action: `DLOPEN_RUNTIME_LOAD_FAILED`,
+/// `no OpenCL platforms` and `no OpenCL GPU device found` are three different
+/// situations that a stranger (broken driver / VM with no GPU passthrough /
+/// unsupported card) cannot tell apart, and none of them says what to try next.
+/// Measured 2026-11-24 on a clean Hyper-V guest: the whole onboarding outcome
+/// was `GFLOPS benchmark: open GPU matmul: no OpenCL platforms:
+/// DLOPEN_RUNTIME_LOAD_FAILED` — truthful, useless.
+///
+/// This maps each class we have actually observed to one sentence an operator
+/// can act on, and falls back to the diagnostic command for anything unknown.
+pub fn gpu_error_advice(err: &str) -> &'static str {
+    let e = err.to_ascii_lowercase();
+    if e.contains("dlopen_runtime_load_failed") || e.contains("no opencl platforms") {
+        "this machine has no usable OpenCL runtime: install or repair the vendor GPU driver \
+         (NVIDIA/AMD/Intel) and reboot, or, if this is a virtual machine, give it GPU \
+         passthrough — a guest without a real GPU cannot register as a provider"
+    } else if e.contains("no opencl gpu device found") || e.contains("no gpu device") {
+        "OpenCL is installed but reports no GPU device: check that the card is enabled in the \
+         BIOS/driver and is not reserved by another process (a headless server with an iGPU-only \
+         device may still pass — run `gpn_node --diagnose` to see what was enumerated)"
+    } else if e.contains("permission") || e.contains("access denied") {
+        "the GPU is present but this account cannot open it: add the user to the `video`/`render` \
+         group on Linux, or run once as an administrator on Windows so the driver ACLs are applied"
+    } else {
+        "run `gpn_node --diagnose` — it prints the GPU enumeration, the fingerprint and the chain \
+         state this failure came from; if the card is present and the driver healthy, report the \
+         diagnose output with this line"
+    }
+}
+
+/// The error text plus the operator action, in one string.
+pub fn gpu_error_with_advice(err: &str) -> String {
+    format!("{err}\n  what to do: {}", gpu_error_advice(err))
+}
+
 pub fn measure_gflops(device_index: usize) -> Result<u64, String> {
     // Ask the co-located miner to stand down for the measurement (best-effort:
     // a contended reading is still a reading, and must not fail the call).
@@ -1793,5 +1831,39 @@ PC,2147483648,AMD Radeon(TM) Graphics\n";
         assert_eq!(b[31], 0x5c);
         assert!(parse_hex_32("0x00").is_none());
         assert!(parse_hex_32("zz").is_none());
+    }
+
+    /// Row 258: a GPU probe failure must name an action, not just a mechanism.
+    #[test]
+    fn gpu_errors_name_an_action() {
+        // The exact line a clean Hyper-V guest produced on 2026-11-24.
+        let vm = "open GPU matmul: no OpenCL platforms: DLOPEN_RUNTIME_LOAD_FAILED";
+        let a = gpu_error_advice(vm);
+        assert!(a.contains("driver"), "must name the driver: {a}");
+        assert!(
+            a.contains("virtual machine") || a.contains("passthrough"),
+            "must name the VM case: {a}"
+        );
+        // OpenCL present, no GPU device.
+        let none = gpu_error_advice("no OpenCL GPU device found");
+        assert!(none.contains("--diagnose"), "{none}");
+        // Unknown failure still names the next command.
+        let unknown = gpu_error_advice("something new");
+        assert!(unknown.contains("--diagnose"), "{unknown}");
+        // The composed string keeps the original error text (evidence) and adds the action.
+        let s = gpu_error_with_advice(vm);
+        assert!(s.contains("DLOPEN_RUNTIME_LOAD_FAILED"), "{s}");
+        assert!(s.contains("what to do:"), "{s}");
+    }
+
+    /// Row 258 end to end: the string the operator reads, from the onboarding path.
+    #[test]
+    fn onboarding_benchmark_failure_names_an_action() {
+        let guest = "open GPU matmul: no OpenCL platforms: DLOPEN_RUNTIME_LOAD_FAILED";
+        let msg = crate::onboard::benchmark_error(guest);
+        assert!(msg.starts_with("GFLOPS benchmark: "), "{msg}");
+        assert!(msg.contains("DLOPEN_RUNTIME_LOAD_FAILED"), "{msg}");
+        assert!(msg.contains("what to do:"), "no action in: {msg}");
+        assert!(msg.contains("driver"), "no remedy in: {msg}");
     }
 }

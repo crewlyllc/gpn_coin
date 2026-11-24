@@ -986,6 +986,19 @@ pub struct LocalGpu {
 
 /// Measure the local GPU the same way `gpn_attest` does: hardware UUID →
 /// fingerprint bound to the chain genesis, then the FP32 GEMM benchmark.
+/// The benchmark failure text as it reaches the operator (row 258).
+///
+/// Kept as a named function so the test asserts the string a stranger actually
+/// sees, not a helper they never will: pre-fix this was
+/// `format!("GFLOPS benchmark: {e}")` and the whole outcome on a GPU-less guest
+/// was "... no OpenCL platforms: DLOPEN_RUNTIME_LOAD_FAILED" with no next step.
+pub(crate) fn benchmark_error(err: &str) -> String {
+    format!(
+        "GFLOPS benchmark: {}",
+        crate::gpu::gpu_error_with_advice(err)
+    )
+}
+
 pub fn probe_local_gpu(gflops_override: Option<u64>) -> Result<LocalGpu, String> {
     probe_local_gpu_with(gflops_override, None)
 }
@@ -1013,7 +1026,7 @@ pub fn probe_local_gpu_for_genesis(
 ) -> Result<LocalGpu, String> {
     let compute_gflops = match gflops_override {
         Some(g) => g,
-        None => crate::gpu::measure_gflops(0).map_err(|e| format!("GFLOPS benchmark: {e}"))?,
+        None => crate::gpu::measure_gflops(0).map_err(|e| benchmark_error(&e))?,
     };
     let gflops_was_override = gflops_override.is_some();
 

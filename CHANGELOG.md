@@ -26,6 +26,13 @@ SEO fix, and the missing end-to-end proof that a stranger can install, serve and
   fails the release.
 
 ### Fixed
+- **A failed GPU check now tells the operator what to do** (row 258): a clean Windows guest
+  without a GPU used to end onboarding with `GFLOPS benchmark: open GPU matmul: no OpenCL
+  platforms: DLOPEN_RUNTIME_LOAD_FAILED` — true, and useless. That line now carries a
+  `what to do:` sentence chosen from the failure class: install/repair the vendor GPU driver (or
+  give a virtual machine GPU passthrough), enable the card when OpenCL reports no device, or fix
+  the device permissions, with `gpn_node --diagnose` named as the fallback. The original error text
+  is kept verbatim, so nothing that was diagnosable is lost.
 - **`scripts/build-site-docs.py` emits the clean URLs the site actually uses** (row 255): the
   generator wrote `<link rel="canonical" href="…/docs/<slug>.html">`, `og:url` with `.html`, and
   nav/footer hrefs ending `.html`, so running it reverted the 2026-11-24 SEO 301 fix across 14
