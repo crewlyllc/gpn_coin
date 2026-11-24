@@ -1,3 +1,24 @@
+## 03:35 PT 0.3.73 — §5 closed (7/7): cosign `Verified OK` on the real downloaded artifact
+
+- **A0**: `head_sha=9fcad88…` (origin/main HEAD) ⇒ `total_count: 0` — docs-only, correct.
+  In-flight, not waited on: `45375310398` (sha `d5d98b9`) in_progress since 10:29 PT;
+  `45381828261` (sha `69bf900`, the §7 CI gate) still **pending** since 11:11 PT behind the
+  single-slot runner. No conclusion ⇒ not this run's box.
+- **Box worked — §5 last box, "verify the downloaded artifact with the verifier that matches the
+  mechanism":** downloaded both assets from the release API (not the site), hashed them, then
+  `cosign verify-blob --bundle gpn-windows.zip.bundle --certificate-identity-regexp
+  '^https://github\.com/jeremyzguo/gpn_coin/\.github/workflows/release-windows\.yml@.*$'
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com gpn-windows.zip`
+  ⇒ **`Verified OK`** (exit 0).
+  - zip 253,204,299 B sha256 `85267a4512b82525c6443add6e6857db859ae55b65c4609a7093790bf5fd1660`
+    == the asset digest GitHub reports; bundle 8,725 B `4394d983…af9a0`.
+  - Fulcio cert SAN `…/release-windows.yml@refs/heads/main`, issuer `sigstore-intermediate`,
+    Rekor logIndex 4074564004, integratedTime 1795512652.
+  - `releases.json` still serves 0.3.72 by design (manifest moves at cut), so the manifest-digest
+    half is §7/§8's job; expected 0.3.73 windows digest recorded in the box.
+- **§5 is now DONE 7/7.** Next unticked box in order: §6 "scan the built binaries for strings the
+  change added" (artifact already on disk at `/tmp/att-verify/gpn-windows.zip`).
+
 ## 03:15 PT 0.3.73 — §5 evidence over SSH; red CI root-caused (already fixed); mirror pair repaired
 
 - **A0**: `head_sha=69bf900…` ⇒ `total_count: 0` (docs-only, correct). Querying the **build** SHA
