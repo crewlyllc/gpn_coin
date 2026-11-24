@@ -1,3 +1,20 @@
+## 12:10 PT 0.3.74 §7 — RELEASED 0.3.74 (attestation verified by hand, cut published)
+
+- **A0 CI**: `origin/main` HEAD `a0f751e` (docs-only) ⇒ `GET /actions/runs?head_sha=a0f751e…` `total_count: 0`,
+  expected under `ci.yml` paths-ignore. Nothing red, nothing waited on.
+- **Stale tree caught again**: local HEAD `d077b32`, origin/main `a0f751e` — fast-forwarded before reading boxes.
+- **§7 box 1 TICKED**: re-downloaded `gpn-windows.zip.bundle` (9,033 B `5070f3e0…`) and ran `cosign verify-blob`
+  by hand against `/tmp/v074/gpn-windows.zip` (`70a265ed…b469`) ⇒ **`Verified OK`**.
+- **§7 box 2 TICKED — release published**: first `release-cut` attempt aborted at 3/6 with
+  `ABORT: no CI run for commit 6d5666a (6d5666acf6e7) within 25 commits`. Cause: **environment** — the checkout
+  is a shallow clone with `6d5666a` in `.git/shallow`, so `rev-list --first-parent` returned one commit and the
+  docs-only-gap walk found no ancestor. Fixed with `git fetch --unshallow origin`; cleared the stale
+  `~/.gpn/release-in-flight` (dead pid `2747590`); re-ran → exit 0, `live manifest is 0.3.74`, commit `c879718`.
+- **§7 boxes 3-4 TICKED**: `network.json latest_version: 0.3.74`; `releases.json` served `0.3.74` at 20:09:09Z
+  and again at 20:09:21Z.
+- **Next run**: §7b surfaces (site/GitHub/mirror agreement, capability discovery), then §8 `--verify-published`,
+  §9 self-update on a real node. No triage.
+
 ## 11:46 PT 0.3.74 §6 — artifact scan + version proof ticked (§6 2/2 DONE) [no triage]
 
 - **A0 CI**: `origin/main` HEAD `d077b32` (docs-only loop-log/checklist commit) ⇒
