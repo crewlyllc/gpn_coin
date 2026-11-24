@@ -1,3 +1,46 @@
+## 22:2x PT 0.3.72 §10 box 1 ticked — spec 55 built + enacted, item 251 proven live (Custom error: 6)
+
+- **A0**: `HEAD == origin/main == ad5e31c`; `GET /actions/runs?head_sha=ad5e31c…` ⇒ `total_count: 0`
+  (docs-only), nothing red, nothing waited on.
+- **First unticked box = §10 (prove the behaviour), item 251's half.** It was unticked because the
+  spec-55 runtime was not on chain. This run built and enacted it.
+- **Built**: new `gpn-node/scripts/build-spec55-wasm.sh` (spec-54 script, spec-55 output) from
+  `ad5e31c` — `wasm/gpn_runtime_spec55_free_entry_cooldown.compact.compressed.wasm` 532,694 B,
+  sha256 `e741547d…e083`, blake2 code hash `0x9af601a7…dc65`, decoded `spec_version: 55`; canonical
+  genesis WASM restored hash-identical `76f37b23…16fa97`. `runtime/src/lib.rs` 54→55 plus the
+  spec pin in `runtime/tests/attestation_identity_spec46.rs` bumped in the same change.
+- **A dev-chain rehearsal was attempted and abandoned for a venue reason** (recorded so nobody
+  repeats it): two `--chain dev` nodes on 30355/30356 never peered (`litep2p` advertises `/ws/`
+  addresses, the dialler uses `/tcp/`, `connected peers = 0`), and a single dev node is subject to
+  the supervisor's own "No peers — block sealing is PAUSED" policy, so a `set_code` has no block to
+  land in. Same conclusion spec 54 reached.
+- **Enacted live**: `Sudo.sudo(System.set_code)` signed by `5FyFZ2q…N8TnV` (nonce 17) ⇒
+  `runtime upgraded in place (forkless)`; **block 354,644, extrinsic index 1**. On-chain `:code` =
+  532,694 B, blake2 `0x9af601a7…dc65` (equals the built artifact — verified from
+  `state_getStorage(0x3a636f6465)`); `state_getRuntimeVersion` ⇒ 55 at 354,646/354,647/354,648 while
+  the chain kept sealing. Metadata now carries `FreeEntryGpuLastEntry`, `FreeEntryCooldown`,
+  `FreeEntryGpuRateLimited` (all absent at 21:40).
+- **Item 251 proven live** (`gpn-agent/examples/entry_rate_limit_live.rs`, new): fresh account
+  `0xc61cf47d…`, fresh fingerprint `0x5b603f6b…` mines at live difficulty (2,183,200,768 hashes,
+  33.2 s) and its free entry **lands in block 354,683** ⇒ `FreeEntryGpuLastEntry[f] = 354683`
+  (raw `0x7b690500` under prefix `twox128(GPUAttestation)‖twox128(FreeEntryGpuLastEntry)`). Account A
+  withdrew ⇒ `GpuOwner[f] = None`, `FreeEntryGpuLastEntry[f]` unchanged. A second fresh account with
+  the same fingerprint and a **bogus** proof is refused by the live pool with
+  `{"code":1010,"data":"Custom error: 6"}` ⇒ `FreeEntryGpuRateLimited`, 24 blocks after the entry
+  (cooldown 5,760) — `gpn-agent/examples/entry_reject_probe.rs` (new, no mining needed).
+- **FINDING that cost 40 minutes and is worth keeping**: the first attempt answered `Custom error: 1`
+  (proof), not 6. Cause: a node's transaction pool validates unsigned extrinsics against its
+  **native runtime** — 0.3.72's native spec is 54, whose ordering is "verify PoW, then fingerprint
+  gate" — so immediately after a `set_code` the pool still enforces the *previous* spec's entry
+  rules while block dispatch already runs the new wasm. `systemctl --user restart gpn-fleet.service`
+  (22:16:23) flipped the pool onto spec 55 and the same call then answered `Custom error: 6`.
+  Rule for the next person: **prove a `validate_unsigned` change only after restarting the node.**
+- **Still owed (not a blocker)**: the "outside the cooldown" half — a re-entry 5,760 blocks later that
+  succeeds with no poW — needs ~9.6 h of blocks; covered by the two pallet tests and will be
+  observed at the next entry after 354,683 + 5,760.
+- §10 box 1 ticked with the above inline. Next run: §10 box 2 (mark row 251 `DONE` with version, sha
+  and evidence), then §10b (timing) and §0b (archive + INDEX).
+
 ## 21:44 PT 0.3.72 §7b/§8/§9 ticked, §10 partial — item 251's runtime is NOT on chain (spec_version collision found)
 
 - **A0**: local tree was 2 commits behind (`b9f2e02` vs `origin/main` `a7e052e`), fast-forwarded

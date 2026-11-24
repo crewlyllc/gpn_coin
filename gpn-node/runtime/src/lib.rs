@@ -130,7 +130,11 @@ pub const VERSION: sp_version::RuntimeVersion = sp_version::RuntimeVersion {
     // reason (`InvalidTransaction::Custom(n)`) instead of `BadProof`, which the
     // pool renders as "Transaction has a bad signature". Requires set_code; the
     // genesis WASM stays frozen.
-    spec_version: 54,
+    // 55: item 251 — `FreeEntryGpuLastEntry` storage + `FreeEntryGpuRateLimited`
+    // refusal: fee-free entry is repeatable once per `FreeEntryCooldown`
+    // (5 760 blocks) per GPU fingerprint instead of permanent (`FreeEntryGpus`).
+    // Requires set_code; the genesis WASM stays frozen.
+    spec_version: 55,
     impl_version: 1,
     apis: RUNTIME_API_VERSIONS,
     transaction_version: 1,

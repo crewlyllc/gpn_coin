@@ -56,9 +56,11 @@ fn record(hash: [u8; 32]) -> AttestationRecord {
 /// · 54 a refused unsigned entry is reported as its real reason
 /// (`InvalidTransaction::Custom(n)`) instead of `BadProof` => "Transaction has
 /// a bad signature" (#243).
+/// · 55 free entry is repeatable once per `FreeEntryCooldown` (5 760 blocks) per
+/// GPU fingerprint — `FreeEntryGpuLastEntry` + `FreeEntryGpuRateLimited` (#251).
 #[test]
 fn spec_version_matches_live_chain() {
-    assert_eq!(VERSION.spec_version, 54);
+    assert_eq!(VERSION.spec_version, 55);
 }
 
 /// `testnet-no-stake` actually flips the runtime constant to zero; the default
