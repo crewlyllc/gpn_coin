@@ -261,6 +261,62 @@ fn log_pull_refusal(
     }
 }
 
+/// Remember and (at most once a minute per identity) journal a refused
+/// heartbeat — item #254.
+///
+/// Called from both refusal paths: an account the chain does not know
+/// (`onchain.is_none()`) and an ingest refusal (bad signature, stale, …). Both
+/// used to discard the body, which is why "which build is that box running"
+/// could not be answered for the 5th machine.
+fn remember_rejected_push(
+    store: &std::sync::Mutex<gpn_agent::provider_heartbeat::RejectStore>,
+    account: &str,
+    hb: Option<&Value>,
+    source_ip: &str,
+    reason: &str,
+    now: u64,
+) {
+    let peer_id = hb
+        .and_then(|v| v.get("peer_id").and_then(|x| x.as_str()))
+        .unwrap_or("")
+        .to_string();
+    let version = hb
+        .and_then(|v| v.get("version").and_then(|x| x.as_str()))
+        .map(String::from);
+    let git_sha = hb
+        .and_then(|v| v.get("git_sha").and_then(|x| x.as_str()))
+        .map(String::from);
+    let log_now = match store.lock() {
+        Ok(mut s) => s.record(
+            account,
+            &peer_id,
+            version.as_deref(),
+            git_sha.as_deref(),
+            source_ip,
+            reason,
+            now,
+        ),
+        // A poisoned lock must never hide the refusal.
+        Err(_) => true,
+    };
+    if log_now {
+        eprintln!(
+            "[push] rejected heartbeat account={} peer_id={} version={} git_sha={} \
+             source_ip={} reason={} — remembered in GET /api/rejected (further notices \
+             at most every {}s)",
+            account,
+            if peer_id.is_empty() { "-" } else { &peer_id },
+            version
+                .as_deref()
+                .unwrap_or("unknown (build did not report)"),
+            git_sha.as_deref().unwrap_or("-"),
+            source_ip,
+            reason,
+            gpn_agent::provider_heartbeat::REJECT_MINUTE_SECS,
+        );
+    }
+}
+
 /// OpenAI-shaped `usage` block for a completed chat job (item #53).
 ///
 /// The counts come from the inference backend (via the provider's store). An
@@ -5384,6 +5440,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // burying the rest of the journal (2026-11-03).
     let reject_log: Arc<Mutex<gpn_agent::provider_heartbeat::RejectLog>> =
         Arc::new(Mutex::new(gpn_agent::provider_heartbeat::RejectLog::new()));
+    // Item #254 — the identities behind refused heartbeats, with the build they
+    // reported and the address they came from, so "which version is that box
+    // running" is answerable from here (`GET /api/rejected`).
+    let reject_store: Arc<Mutex<gpn_agent::provider_heartbeat::RejectStore>> =
+        Arc::new(Mutex::new(gpn_agent::provider_heartbeat::RejectStore::new()));
     // Warm the GPN-price snapshot (chat//jobs convert USD → GPN base units) and
     // keep an eye on providers earning below their own declared cost.
     spawn_feed_refresh(
@@ -5527,6 +5588,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let assign_replay = assign_replay.clone();
         let assign_token_expected = assign_token_expected.clone();
         let reject_log = reject_log.clone();
+        let reject_store = reject_store.clone();
         let assign_store = assign_store.clone();
         let callback_url = callback_url.clone();
         let hdr = hdr.clone();
@@ -6040,9 +6102,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         respond_err!(413, "body too large");
                     }
                     let now = now_secs();
-                    let claimed = serde_json::from_str::<Value>(&body)
-                        .ok()
-                        .and_then(|v| v.get("address").and_then(|x| x.as_str()).map(String::from))
+                    // Parse once: the refusal line (#254) quotes the peer id and
+                    // the build the refused node reported, not just its account.
+                    let hb_json: Option<Value> = serde_json::from_str::<Value>(&body).ok();
+                    let claimed = hb_json
+                        .as_ref()
+                        .and_then(|v| v.get("address").and_then(|x| x.as_str()))
+                        .map(String::from)
                         .unwrap_or_default();
                     // Cheap structural check before touching the chain.
                     match gpn_agent::provider_heartbeat::ss58_to_pubkey(&claimed) {
@@ -6085,6 +6151,22 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         }
                     };
                     if onchain.is_none() {
+                        // #254: remember WHO was refused and WHAT it reported
+                        // before discarding the body. A refusal that loses the
+                        // version is why the 5th-machine investigation needed
+                        // guesswork between 0.3.64 and 0.3.69.
+                        let source_ip = req
+                            .remote_addr()
+                            .map(|a| a.ip().to_string())
+                            .unwrap_or_else(|| "unknown".to_string());
+                        remember_rejected_push(
+                            &reject_store,
+                            &claimed,
+                            hb_json.as_ref(),
+                            &source_ip,
+                            "not a registered provider",
+                            now,
+                        );
                         // State it once per window, then count. The condition is
                         // unchanged and still refused — only the repetition stops.
                         match reject_log.lock().unwrap().record(&claimed, now) {
@@ -6120,10 +6202,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             // Rate limiting is expected fleet behaviour, not an
                             // incident — stay quiet at info level.
                             if e != gpn_agent::provider_heartbeat::IngestError::RateLimited {
-                                eprintln!(
-                                    "[push] rejected heartbeat from {}: {}",
-                                    gpn_agent::provider_heartbeat::abbreviated(&claimed),
-                                    e.reason()
+                                let source_ip = req
+                                    .remote_addr()
+                                    .map(|a| a.ip().to_string())
+                                    .unwrap_or_else(|| "unknown".to_string());
+                                remember_rejected_push(
+                                    &reject_store,
+                                    &claimed,
+                                    hb_json.as_ref(),
+                                    &source_ip,
+                                    e.reason(),
+                                    now,
                                 );
                             }
                             respond_err!(e.status_code(), e.reason());
@@ -6271,6 +6360,28 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 // Static by design: it must answer even when the chain RPC is
                 // down, because it describes the protocol, not the tip.
                 (Method::Get, ["api", "finality"]) => gpn_agent::network_directory::finality_doc(),
+                // GET /api/rejected — the last N refused heartbeat identities
+                // (item #254): account, peer id, the build it reported, the
+                // source address, and why it was refused. This is public on the
+                // same basis as `/providers` (accounts and dialable endpoints
+                // are already public on chain); it exists so "which build is
+                // that machine running" does not need a login to the box.
+                (Method::Get, ["api", "rejected"]) => {
+                    let rows: Vec<Value> = reject_store
+                        .lock()
+                        .map(|s| {
+                            s.snapshot()
+                                .iter()
+                                .map(|r| serde_json::to_value(r).unwrap_or(json!({})))
+                                .collect()
+                        })
+                        .unwrap_or_default();
+                    json!({
+                        "rejected": rows,
+                        "count": rows.len(),
+                        "note": "a version of null means the refused build was too old to say"
+                    })
+                }
                 (Method::Get, ["api", "referrals"]) => {
                     let code = query_param(&url, "code")
                         .map(pct_decode)

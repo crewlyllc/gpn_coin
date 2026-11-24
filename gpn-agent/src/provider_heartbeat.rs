@@ -654,6 +654,118 @@ impl RejectLog {
     }
 }
 
+/// How often one rejected identity may be re-stated on the journal (item #254).
+///
+/// The same peer pushing every ~10 s produced 6,947 identical lines a day; one
+/// line a minute keeps the fact visible without burying the journal.
+pub const REJECT_MINUTE_SECS: u64 = 60;
+
+/// Upper bound on remembered rejected identities, so a scanner walking random
+/// ss58 strings cannot grow the store without limit.
+pub const REJECT_STORE_MAX: usize = 50;
+
+/// One refused heartbeat, remembered so "which build is that machine running"
+/// can be answered from the access point instead of by logging into the box
+/// (item #254: the 5th-machine investigation had to infer 0.3.64 vs 0.3.69).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct RejectedPush {
+    pub account: String,
+    pub peer_id: String,
+    /// What the refused build said about itself. `None` = it did not say
+    /// (pre-#201 build), which is itself the answer to the question.
+    pub version: Option<String>,
+    pub git_sha: Option<String>,
+    /// Originating address as the AP saw it (not the provider's claim).
+    pub source_ip: String,
+    pub reason: String,
+    pub first_seen: u64,
+    pub last_seen: u64,
+    pub count: u64,
+}
+
+/// Bounded store of the last [`REJECT_STORE_MAX`] refused identities.
+#[derive(Default)]
+pub struct RejectStore {
+    entries: HashMap<String, RejectedPush>,
+}
+
+impl RejectStore {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Records one refusal and answers `true` when it deserves a journal line
+    /// (first sight of this identity, or [`REJECT_MINUTE_SECS`] since the last).
+    pub fn record(
+        &mut self,
+        account: &str,
+        peer_id: &str,
+        version: Option<&str>,
+        git_sha: Option<&str>,
+        source_ip: &str,
+        reason: &str,
+        now: u64,
+    ) -> bool {
+        let key = format!("{account}|{peer_id}|{source_ip}");
+        if let Some(e) = self.entries.get_mut(&key) {
+            e.count += 1;
+            e.last_seen = now;
+            // A reinstall can change what the same identity reports; keep the
+            // newest claim so the answer is never a stale build string.
+            if version.is_some() {
+                e.version = version.map(str::to_string);
+            }
+            if git_sha.is_some() {
+                e.git_sha = git_sha.map(str::to_string);
+            }
+            e.reason = reason.to_string();
+            return now.saturating_sub(e.first_seen) >= REJECT_MINUTE_SECS;
+        }
+        if self.entries.len() >= REJECT_STORE_MAX {
+            // Evict the least recently seen; a fresh offender is never hidden
+            // behind an old one.
+            if let Some(oldest) = self
+                .entries
+                .iter()
+                .min_by_key(|(_, e)| e.last_seen)
+                .map(|(k, _)| k.clone())
+            {
+                self.entries.remove(&oldest);
+            }
+        }
+        self.entries.insert(
+            key,
+            RejectedPush {
+                account: account.to_string(),
+                peer_id: peer_id.to_string(),
+                version: version.map(str::to_string),
+                git_sha: git_sha.map(str::to_string),
+                source_ip: source_ip.to_string(),
+                reason: reason.to_string(),
+                first_seen: now,
+                last_seen: now,
+                count: 1,
+            },
+        );
+        true
+    }
+
+    /// Newest first, for `GET /api/rejected`.
+    pub fn snapshot(&self) -> Vec<RejectedPush> {
+        let mut out: Vec<RejectedPush> = self.entries.values().cloned().collect();
+        out.sort_by_key(|a| std::cmp::Reverse(a.last_seen));
+        out
+    }
+
+    pub fn len(&self) -> usize {
+        self.entries.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
+}
+
 /// Provider-side push configuration, resolved from the environment.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PushSettings {
@@ -1030,6 +1142,107 @@ mod tests {
         ingest(&mut reg, &signed(1_950), 2_000).unwrap();
         assert_eq!(reg.len(), MAX_ENTRIES);
         assert!(!reg.entries.contains_key(&(format!("{PEER}0"), address())));
+    }
+
+    /// #254 — a refused heartbeat is remembered with the build it reported, so
+    /// "which version is that box running" is answerable from the AP alone.
+    #[test]
+    fn a_rejected_push_is_remembered_with_its_reported_build() {
+        let mut s = RejectStore::new();
+        assert!(s.record(
+            "5Hgbpi",
+            "12D3KooPeer",
+            Some("0.3.69"),
+            Some("abc1234"),
+            "203.0.113.9",
+            "not a registered provider",
+            1_000,
+        ));
+        let rows = s.snapshot();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].account, "5Hgbpi");
+        assert_eq!(rows[0].peer_id, "12D3KooPeer");
+        assert_eq!(rows[0].version.as_deref(), Some("0.3.69"));
+        assert_eq!(rows[0].git_sha.as_deref(), Some("abc1234"));
+        assert_eq!(rows[0].source_ip, "203.0.113.9");
+        assert_eq!(rows[0].count, 1);
+    }
+
+    /// #254 — the journal line is once a minute per identity, not once per push.
+    #[test]
+    fn a_persistent_rejection_is_restated_once_a_minute() {
+        let mut s = RejectStore::new();
+        assert!(s.record(
+            "5Hgbpi",
+            "12D3KooPeer",
+            Some("0.3.69"),
+            None,
+            "203.0.113.9",
+            "not a registered provider",
+            1_000
+        ));
+        // Pushes inside the first minute: no further lines.
+        for t in 1..60 {
+            assert!(!s.record(
+                "5Hgbpi",
+                "12D3KooPeer",
+                Some("0.3.69"),
+                None,
+                "203.0.113.9",
+                "not a registered provider",
+                1_000 + t
+            ));
+        }
+        // Once a minute has passed since first sight, one line is due.
+        assert!(s.record(
+            "5Hgbpi",
+            "12D3KooPeer",
+            Some("0.3.69"),
+            None,
+            "203.0.113.9",
+            "not a registered provider",
+            1_060
+        ));
+        assert_eq!(s.snapshot()[0].count, 61);
+    }
+
+    /// #254 — the store is bounded; a scanner cannot grow it without limit and a
+    /// fresh offender is never hidden behind an old one.
+    #[test]
+    fn the_rejected_store_is_bounded_and_keeps_the_newest() {
+        let mut s = RejectStore::new();
+        for i in 0..(REJECT_STORE_MAX + 10) {
+            assert!(s.record(
+                &format!("acct{i}"),
+                "peer",
+                None,
+                None,
+                "203.0.113.9",
+                "not a registered provider",
+                1_000 + i as u64
+            ));
+        }
+        assert_eq!(s.len(), REJECT_STORE_MAX);
+        let rows = s.snapshot();
+        assert_eq!(rows[0].account, format!("acct{}", REJECT_STORE_MAX + 9));
+        assert!(!rows.iter().any(|r| r.account == "acct0"));
+    }
+
+    /// #254 — a pre-#201 build reports no version; that must show as `null`
+    /// ("it did not say"), never be invented.
+    #[test]
+    fn an_old_build_that_reports_no_version_is_recorded_as_null() {
+        let mut s = RejectStore::new();
+        s.record(
+            "5Hgbpi",
+            "peer",
+            None,
+            None,
+            "203.0.113.9",
+            "not a registered provider",
+            1_000,
+        );
+        assert_eq!(s.snapshot()[0].version, None);
     }
 
     #[test]

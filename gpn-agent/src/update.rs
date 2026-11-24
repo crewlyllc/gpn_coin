@@ -759,14 +759,15 @@ pub fn auto_update_enabled(raw: Option<&str>) -> bool {
     }
 }
 
-/// Default update-check cadence: **every 6 h**.
+/// Default update-check cadence: **every 1 h**.
 ///
-/// The 1 h value was the 2026-11-12 review window ("so a bad release is caught
-/// the same day") and it was reverted in 0.3.59 (#161) — a temporary setting
-/// with no revert date is how a debugging shortcut becomes permanent behaviour.
+/// The hourly cadence is the owner's decision (2026-11-12 review window: "so a
+/// bad release is caught the same day"; restated 2026-11-23 12:36 PT, row #250).
+/// 0.3.59 (#161) had temporarily raised it to 6 h as a debugging shortcut, which
+/// then became behaviour with no revert date — that is what #250 reverses.
 /// Operators can override either way with `GPN_UPDATE_CHECK_HOURS` (or
 /// `update_check_hours` in the node TOML).
-pub const DEFAULT_CHECK_HOURS: u64 = 6;
+pub const DEFAULT_CHECK_HOURS: u64 = 1;
 
 /// `GPN_UPDATE_CHECK_HOURS` → a duration, clamped to a sane range so a typo
 /// cannot turn into a request storm (min 1 h) or an never-checking node.
@@ -4084,14 +4085,14 @@ mod tests {
 
     #[test]
     fn check_interval_is_clamped() {
-        // #161 — the default is 6 h again. The 1 h value was the 2026-11-12 review
-        // cadence ("so a bad release is caught the same day") and it had no revert
-        // date; an unchanged default is how a debugging shortcut becomes behaviour.
+        // #250 (owner decision 2026-11-23 12:36 PT) — the default is hourly again:
+        // a bad release is caught the same day. The 6 h value was a helper's
+        // TEMPORARY setting from 2026-11-18 with no owner decision behind it.
         assert_eq!(
-            DEFAULT_CHECK_HOURS, 6,
-            "the default must be the 6 h cadence"
+            DEFAULT_CHECK_HOURS, 1,
+            "the default must be the owner's 1 h cadence"
         );
-        assert_eq!(check_interval(None), Duration::from_secs(6 * 3600));
+        assert_eq!(check_interval(None), Duration::from_secs(3600));
         assert_eq!(check_interval(Some(6)), Duration::from_secs(6 * 3600));
         assert_eq!(check_interval(Some(0)), Duration::from_secs(3600));
         assert_eq!(check_interval(Some(12)), Duration::from_secs(12 * 3600));
