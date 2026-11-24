@@ -1,3 +1,37 @@
+## 04:35 PT 0.3.73 — no box worked: §7 cut is gated on the CI conclusion; audit job's 38 RustSec hits filed as row 260
+
+- **A0**: origin/main HEAD `23a33078e794f7ac00f4fbef8604ed630ee4dd27` ⇒ `total_count: 0` — docs-only
+  (this is the §7-gate tick commit), so no CI run is expected and none is missing. `paths-ignore` holds.
+- **The gate run is finally building, not queued:** `45381828261` (sha `69bf900`, the §7 CI gate) was
+  **queued with 0 jobs from 11:11Z to 12:20Z** (both self-hosted runners `busy=true`; `45375310398`
+  held the Linux slot). At 12:20–12:25Z it was claimed: `fmt + clippy` **success** (all 11 steps incl.
+  `rustfmt (check, agent)` and both clippy jobs), `secret-scan` **success**, `Two-node GPU testnet`
+  **success**, linux `Build + unit tests` in progress at `Build gpn-agent (release)`, windows
+  `Build + unit tests` in progress at `Build + test gpn-node (release)`. ~74 min elapsed, so this is
+  not a stale run — cancelling it would restart the same 40–75 min Windows build. Not waited on.
+  Next run polls it once: `success` ⇒ `scripts/release-cut.sh --timeout 300` (box 2) and end.
+- **Two jobs report `failure` in that run and neither fails it** (both are `continue-on-error: true`
+  in `ci.yml`, so the run's conclusion is still `success`):
+  - `Dependency audit (cargo-audit / cargo-deny)`, step `cargo-audit (gpn-node)`:
+    `error: 38 vulnerabilities found!` / `warning: 36 allowed warnings found`, exit 1. Real findings,
+    not a broken job: `hickory-proto` 0.24.4 (11) + 0.25.2 (14) — 4 of them `7.5 (high)`, e.g.
+    `RUSTSEC-2026-0505 NSEC3 owner names not checked against the zone in DNSSEC validation`,
+    solution `>=0.26.0-beta.1`; `zstd-safe` 6.0.6 (8) + 7.2.4 (10) → `^7.4.0 OR >=8.2.0`;
+    `wasmtime` 36.0.19 (4); `quinn-proto` 0.11.18 (2); `lru` 0.12.5 / 0.7.8; `libz-sys` 1.1.29 (2);
+    `tokio` 1.53.1 → `>=1.53.3`; `chacha20` 0.10.1; `url` 2.5.8; `chrono` 0.4.45; `ring` 0.16.20;
+    `libsecp256k1` 0.7.2; plus unmaintained-only crates (`paste`, `instant`, `fxhash`, `derivative`,
+    `memmap2`, `pin-utils`, `parity-wasm`, `proc-macro-error`, `rand` 0.7.3). Filed as **row 260** — a
+    dependency bump is its own bundle (PATCH-level upgrades, two of them majors), and §0 forbids any
+    commit that is not this release's own while the checklist is open.
+  - `Build + unit tests (macos, manual)` — `failure` with **no steps and no log**
+    (`BlobNotFound` on the job-log blob). It is manual-trigger-only on `macos-latest` and
+    `continue-on-error`; macOS is not in the manifest, so it cannot block this release. Noted, not
+    chased this run.
+- **No box ticked this run** — every remaining 0.3.73 box (§7 cut → §7b → §8 → §9 → §10 → filing)
+  needs the published version, and publishing needs the CI conclusion above. Nothing was pushed
+  except this record.
+- No [TRIAGE] item this run.
+
 ## 04:12 PT 0.3.73 — §7 gate (1/5) ticked: cosign `Verified OK` on a fresh re-download of the exact assets `release-cut.sh` mirrors
 
 - **A0**: `head_sha=1c8900a7bbcf…` (origin/main HEAD) ⇒ `total_count: 0` — docs-only, correct.
