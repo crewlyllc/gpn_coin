@@ -13,20 +13,31 @@ use gpn_agent::onboard::{register_provider_entry_unsigned_call, EntryParams, Ent
 use subxt::tx::Payload;
 use subxt::OnlineClient;
 
-
 type Storage = subxt::storage::Storage<GpnConfig, OnlineClient<GpnConfig>>;
 
 async fn at_best(
     client: &OnlineClient<GpnConfig>,
     http: &str,
 ) -> Result<Storage, Box<dyn std::error::Error>> {
-    let body = serde_json::json!({"id":1,"jsonrpc":"2.0","method":"chain_getBlockHash","params":[]});
-    let v: serde_json::Value = reqwest::Client::new().post(http).json(&body).send().await?.json().await?;
+    let body =
+        serde_json::json!({"id":1,"jsonrpc":"2.0","method":"chain_getBlockHash","params":[]});
+    let v: serde_json::Value = reqwest::Client::new()
+        .post(http)
+        .json(&body)
+        .send()
+        .await?
+        .json()
+        .await?;
     let hash: subxt::utils::H256 = v["result"].as_str().unwrap_or_default().parse()?;
     Ok(client.storage().at(hash))
 }
 
-async fn get(at: &Storage, pallet: &str, entry: &str, params: Vec<subxt::dynamic::Value>) -> Option<Vec<u8>> {
+async fn get(
+    at: &Storage,
+    pallet: &str,
+    entry: &str,
+    params: Vec<subxt::dynamic::Value>,
+) -> Option<Vec<u8>> {
     let q = subxt::dynamic::storage(pallet, entry, params);
     match at.fetch(&q).await {
         Ok(Some(v)) => Some(v.encoded().to_vec()),

@@ -63,12 +63,7 @@ async fn block_number(http: &str) -> u64 {
 
 type Storage = subxt::storage::Storage<GpnConfig, OnlineClient<GpnConfig>>;
 
-async fn get(
-    at: &Storage,
-    pallet: &str,
-    entry: &str,
-    params: Vec<Value>,
-) -> Option<Vec<u8>> {
+async fn get(at: &Storage, pallet: &str, entry: &str, params: Vec<Value>) -> Option<Vec<u8>> {
     let q = subxt::dynamic::storage(pallet, entry, params);
     match at.fetch(&q).await {
         Ok(Some(v)) => Some(v.encoded().to_vec()),
@@ -80,7 +75,6 @@ async fn get(
     }
 }
 
-
 /// Storage view at the **best** head. `at_latest()` follows the finalized head,
 /// which on this PoW testnet is stuck at a block whose state the node has already
 /// discarded (`UnknownBlock: State already discarded`), so every read must pin the
@@ -88,7 +82,8 @@ async fn get(
 async fn at_best(
     client: &OnlineClient<GpnConfig>,
     http: &str,
-) -> Result<subxt::storage::Storage<GpnConfig, OnlineClient<GpnConfig>>, Box<dyn std::error::Error>> {
+) -> Result<subxt::storage::Storage<GpnConfig, OnlineClient<GpnConfig>>, Box<dyn std::error::Error>>
+{
     let h = rpc(http, "chain_getBlockHash", serde_json::json!([])).await;
     let hash: subxt::utils::H256 = h["result"].as_str().unwrap_or_default().parse()?;
     Ok(client.storage().at(hash))
@@ -148,20 +143,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("account A       = 0x{}", hex::encode(account_a));
     println!("gpu_info_hash   = 0x{}", hex::encode(gpu_info_hash));
 
-    let fp = vec![Value::from_bytes(&gpu_info_hash)];
+    let fp = vec![Value::from_bytes(gpu_info_hash)];
     println!(
         "GpuOwner[f] before = {:?} (expect None — fresh fingerprint)",
         get(&at, "GPUAttestation", "GpuOwner", fp.clone()).await
     );
     println!(
         "FreeEntryGpuLastEntry[f] before = {:?} (expect None)",
-        get(
-            &at,
-            "GPUAttestation",
-            "FreeEntryGpuLastEntry",
-            fp.clone()
-        )
-        .await
+        get(&at, "GPUAttestation", "FreeEntryGpuLastEntry", fp.clone()).await
     );
 
     // ── mine + submit the first free entry, retrying on a mid-flight retarget ──
@@ -280,10 +269,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let tx = subxt::dynamic::tx(
         "Balances",
         "transfer_keep_alive",
-        vec![
-            Value::from_bytes(&account_a),
-            Value::u128(1_000_000_000_000),
-        ],
+        vec![Value::from_bytes(account_a), Value::u128(1_000_000_000_000)],
     );
     let nonce = signer::current_nonce(&client, &endpoint, &sudo.account_id()).await;
     signer::submit_signed(&client, &tx, &sudo, nonce).await?;
@@ -291,14 +277,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let at = at_best(&client, &http).await?;
     println!(
         "[f] A account after funding = {:?}",
-        get(
-            &at,
-            "System",
-            "Account",
-            vec![Value::from_bytes(&account_a)]
-        )
-        .await
-        .map(|b| hex::encode(b))
+        get(&at, "System", "Account", vec![Value::from_bytes(account_a)])
+            .await
+            .map(hex::encode)
     );
 
     let withdraw = subxt::dynamic::tx("GPUAttestation", "withdraw_stake", Vec::<Value>::new());
@@ -314,13 +295,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
     println!(
         "[2] FreeEntryGpuLastEntry[f] still set = {:?} (the cooldown clock keeps running)",
-        get(
-            &at,
-            "GPUAttestation",
-            "FreeEntryGpuLastEntry",
-            fp.clone()
-        )
-        .await
+        get(&at, "GPUAttestation", "FreeEntryGpuLastEntry", fp.clone()).await
     );
 
     // ── 3) second, fresh account presents the same fingerprint with a
