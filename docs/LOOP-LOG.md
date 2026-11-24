@@ -1,3 +1,22 @@
+## 22:45 PT 0.3.72 FILED — checklist archived, INDEX row, rows 250–254 COMPLETE, timing recorded
+
+- **A0**: `origin/main = b51faad`, `HEAD = b51faad` (ff'd the docs commit). CI on the code sha
+  `cac222b`: run 45339748070 `in_progress` — noted, not waited on. Docs sha `b51faad` has
+  `total_count: 0` runs (paths-ignore working).
+- **Release verified before filing**: `releases.json` serves `0.3.72` (`published_at
+  2026-11-24T05:02:24Z`, linux+windows assets with sha256); the local node answers
+  `system_version` = `0.3.72`.
+- **§0b** ticked: `git mv docs/releases/0.3.72.md docs/releases/archive/0.3.72.md`;
+  `INDEX.md` row `| 0.3.72 | 2026-11-24 | 250, 251, 252, 253, 254 | archive/0.3.72.md |`.
+- **§10 last box** ticked: GPN-LIST rows 250–254 → `COMPLETE 0.3.72 (2026-11-24)` with the filing
+  note and the enacting commit `cac222b`; row 251's live proof is the 22:2x §10 entry (free entry
+  lands 354,683; same fingerprint with a bogus proof refused `Custom error: 6`).
+- **§10b** ticked: `scripts/release-timing.py 0.3.72 --json docs/releases/timing/0.3.72.json` ⇒
+  `49 of 57 seen`, `total: 6h46m`; md saved alongside. Slowest single step **42m38s =
+  `release-windows.yml` on box 1's single-slot runner** — it waits on a machine, not re-work;
+  shortening it needs a second Windows slot or a warm `target/` on box 1.
+- **Checklist now 0 unticked boxes.** No [TRIAGE] items. Next run: section C — every 0.3.72 item is
+  COMPLETE, so bundle the NEW rows into 0.3.73.
 ## 22:2x PT 0.3.72 §10 box 1 ticked — spec 55 built + enacted, item 251 proven live (Custom error: 6)
 
 - **A0**: `HEAD == origin/main == ad5e31c`; `GET /actions/runs?head_sha=ad5e31c…` ⇒ `total_count: 0`
