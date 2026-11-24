@@ -1,3 +1,31 @@
+## 04:12 PT 0.3.73 — §7 gate (1/5) ticked: cosign `Verified OK` on a fresh re-download of the exact assets `release-cut.sh` mirrors
+
+- **A0**: `head_sha=1c8900a7bbcf…` (origin/main HEAD) ⇒ `total_count: 0` — docs-only, correct.
+  No CI run has a conclusion for us: `45381828261` (sha `69bf900`, the §7 CI gate) is **pending
+  with 0 jobs** since 11:11Z, queued behind `45375310398` (sha `d5d98b9`, **in_progress** since
+  10:29Z — its `fmt + clippy`, `secret-scan` and linux jobs finished green; the Windows
+  `Build + test gpn-agent (release)` step has been running on DESKTOP-USBUADL since 11:37Z).
+  Not waited on; not cancelled either — that job is 30 min into a Windows build that will give the
+  same green conclusion a fresh dispatch would need another hour to reach (and cancelling it is what
+  would put a *new* build on the single slot). The release itself does not wait on it.
+- **Box worked — §7 `Refuse to cut unless §5's attestation checks passed`:** downloaded the two
+  `windows-latest` assets **afresh** from the release API into `/tmp/gate-verify` (asset ids
+  786524114 zip / 786526527 bundle) ⇒ 253,204,299 B sha256 `85267a45…1660` and 8,725 B
+  `4394d983…af9a0`, both equal to the digests the API reports — i.e. exactly the bytes
+  `release-cut.sh` step 2 pulls. `cosign verify-blob --bundle … --certificate-identity-regexp
+  '^https://github\.com/jeremyzguo/gpn_coin/\.github/workflows/release-windows\.yml@.*$'
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com gpn-windows.zip` ⇒
+  **`Verified OK`**, exit 0.
+  - Premise re-checked, not assumed: `release-cut.sh` mirrors the bundle (:907) and refuses a cut
+    without one (:908 `ABORT`), but runs no verifier — its only `cosign` mention is the comment at
+    :906. `linux-latest` has no bundle by design (`grep -c cosign release-linux-selfhosted.yml` ⇒ 0),
+    so the windows zip is the only attested artifact and it verifies.
+  - Mirror `crewlyllc/gpn_coin` pair is consistent: asset 786586810 zip `85267a45…` + 786860158
+    bundle `4394d983…` — step 2 and the mirror now serve the same signed bytes.
+- **Not yet cuttable:** §7's CI gate still has no conclusion (see A0). Next run reads
+  `45381828261` once; green ⇒ `scripts/release-cut.sh --timeout 300` (box 2, dispatched, run ends).
+- No [TRIAGE] item this run.
+
 ## 03:58 PT 0.3.73 — §6 closed (2/2): literals present in the published artifact; hashes tie it to box 1
 
 - **A0**: `head_sha=d471567…` (origin/main HEAD) ⇒ `total_count: 0` — docs-only, correct.
