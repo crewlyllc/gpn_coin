@@ -1,3 +1,24 @@
+## 20:15 PT 0.3.72 §5 windows build landed — attested zip published, scanned; §5 now 5/7
+
+- **A0**: origin/main HEAD = `6c39d8e` (docs-only loop log). `GET /actions/runs?head_sha=6c39d8e…`
+  ⇒ `total_count: 0` — expected, `ci.yml` paths-ignores `docs/**`; no red run owed an explanation.
+  Local tree was behind (`a285df2`); fast-forwarded before reading the checklist.
+- **Handle read, not waited on** (§5 windows box): run **45318140117** ⇒ `completed success`
+  2026-11-24T04:02:52Z, job `windows` 138189884819 24/25 steps, 26 min build after a 22 min queue
+  on box-1's single-slot runner. Dispatch-and-end paid off: two runs read the handle, neither waited.
+- **Box ticked (§5 windows build)**: `windows-latest` now holds `gpn-windows.zip` 253,194,900 B
+  `sha256:f38e7ea…34f2` + `gpn-windows.zip.bundle` 8,725 B; both re-downloaded through the assets
+  API, digests match the release, and `cosign verify-blob --bundle …` ⇒ **`Verified OK`**.
+  §5 is 5/7; the two remaining §5 boxes need the cut (they verify the *published* digest).
+- **§6 windows scan done** and it corrected one piece of evidence: `gpu_fingerprint` is not a
+  greppable literal in either artifact — the linux hit was a Rust **symbol name** (unstripped
+  binary), and rustc inlines short literals as mov-immediates (reproduced locally: `status_url`
+  appears as `status_u`+`rl` in two MOVs, zero contiguous bytes). Item 253's proof must be the live
+  `/providers` payload at §10, not a grep. Recorded in the checklist rather than left implied.
+- **Next run**: tick §7 box 1 (the pre-cut attestation check is already satisfied by the cosign
+  verification above, same bytes `release-cut.sh` step 2 downloads), then dispatch
+  `scripts/release-cut.sh --timeout 300`, write the handle, end the run.
+
 ## 19:54 PT 0.3.72 §5 windows build still executing (no box tickable this run)
 
 - **A0**: HEAD == `GET /commits/main` ⇒ `a285df2ed956f67d52951d6e912e75abc9d6a357` (docs-only §5/§6 tick).
