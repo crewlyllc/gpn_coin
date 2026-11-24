@@ -1,3 +1,15 @@
+## 18:24 PT 0.3.72 §3b box 253 ticked — GPU fingerprint labelled verified/unverified, docs say "claim"
+
+- **A0**: HEAD `fd948d8…` (full 40-char sha equal to `GET /commits/main`). `GET /actions/runs?head_sha=fd948d8…` ⇒ `CI pending`, run `45309072916` — noted, not waited on (rule: CI is observed).
+- **Box worked**: §3b item **253** (first unticked box). Code + tests were already in the tree from `b80e865`/`06bbc26`; the unticked clause was the documentation half ("docs say an unverified fingerprint is a claim").
+- **Verified, not assumed**: re-ran both surface tests this run — `cargo test --release --bin gpn_scheduler providers_view_labels_the_gpu_fingerprint` ⇒ `1 passed; 0 failed`; `cargo test --release --lib a_row_labels_the_gpu_fingerprint` ⇒ `1 passed; 0 failed`. Payload fields present in source at `gpn_scheduler.rs:1807` and `network_directory.rs:578` (`{"hash": p.gpu_info_hash, "verified": p.gpu_verified}`).
+- **Wrote**: `GPN-MASTER-REFERENCE.md` — new paragraph: hash is self-reported, `verified` only when `ChallengeVerified[who] == live AttestationChallenge`, `verified:false` = claim not measurement, `hash:null` = unknown not "no GPU", field always present.
+- **Fixed a stale doc found on the way**: `design-pow-entry.md` still said "fee-free entries per GPU fingerprint: 1, ever — `FreeEntryGpus`", which item 251 replaced with a 24 h cooldown (`FreeEntryGpuLastEntry`, named refusal `FreeEntryGpuRateLimited`). Corrected in the same commit.
+- **Pushed once**: `074799a docs(0.3.72): tick 3b item 253 — fingerprint label documented as a claim` (docs-only ⇒ no CI run per `paths-ignore`).
+- **Checklist**: §3b now 4/5, total 13/54. §1/§2 remain DONE.
+- **Next run**: §3b item 254 (rejected heartbeat journal + `GET /api/rejected` — notes say code+test done), then §3 bump/record.
+- No blocker, no [TRIAGE].
+
 ## 18:15 PT 0.3.72 §3b box 252 ticked — airdrop pays measured contribution (the producer was missing)
 
 - **A0**: `GET /commits/main` ⇒ `f7084de47fec2d6bbbfd1f52fcd80b60e6d2569a` (docs-only tick of box 251). `GET /actions/runs?head_sha=f7084de…` ⇒ `total_count: 0` — expected, `ci.yml` ignores `docs/**`/`**/*.md`. Nothing red, nothing waited on.
