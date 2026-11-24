@@ -1,3 +1,35 @@
+## 13:15 PT no open checklist, zero NEW rows — queue exhausted; 0.3.74 live and healthy; [TRIAGE] 256 still the only gate
+
+- **A0 CI**: `origin/main` HEAD `31d9afde9c111dd35f6bf4a36e527b2f56ab2410` ⇒
+  `GET /actions/runs?head_sha=31d9afde…` `total_count: 0` — docs-only commit, expected under
+  `ci.yml` paths-ignore. Nothing red, nothing waited on.
+- **§A — nothing IN-PROGRESS**: `GPN-LIST.md` state column parsed (`awk -F'|'` on every row):
+  199+32 `COMPLETE*`, **0 `NEW`, 0 `IN-PROGRESS`**, 6 `BLOCKED` (12/13/17/26/153/194 — long-standing
+  owner-deferred), 1 `AWAITING-OWNER` (256). `docs/releases/` has no open checklist: `0.3.74.md` is in
+  `archive/` with 55/56 boxes ticked, the unticked one being §0e (row 256, carried AWAITING-OWNER since
+  2026-11-24 00:3x PT). Nothing to work, nothing to bundle.
+- **§B already satisfied for 0.3.74** (re-verified this run, not assumed): `https://gpncoin.ai/releases.json`
+  ⇒ `"version": "0.3.74"`; local node pid **2765044** (`/home/jeremyg/.local/bin/gpn-node --chain testnet
+  --network-backend libp2p`, started for 0.3.74) answers `system_version` ⇒ **`"0.3.74"`**. Rows
+  257/259/260/261 are COMPLETE; checklist filed; INDEX.md row present.
+- **§C — nothing to bundle**: zero `NEW` rows. No version bump, no checklist generated, nothing pushed
+  (commit before this entry: `31d9afde`). Nothing new was invented to keep the loop busy.
+- **Health probe (rule 5a), all green**: AP `GET :8092/v1/models` ⇒ 200 in 1.1 ms;
+  `scripts/check-block-cadence.py --journal-unit gpn-fleet` ⇒ window 358084..358183, mean 17.85 s,
+  max 125.70 s, clause 1 **0 violations**, clause 2 4 suspect / **0 unexplained** (all four attributed to
+  `sealer: still searching template`), `RESULT: PASS`.
+- **[TRIAGE] item 256 — the only thing standing between us and a releasable gate.** Options unchanged:
+  A GPU-P from box 1's 5070 Ti into a Hyper-V guest; B wipe box 4's node state; C provision a test box.
+  This run adds one measured fact that sharpens the question: a GPU-less box is **not** broken — it is
+  deliberately tolerated. `spawn_onboard` (`gpn-agent/src/bin/gpn_node.rs:4447`) comments "A failed
+  onboarding must never take the node down: the node still syncs, mines and serves." So on GPN-209 the
+  node runs fine and simply never registers as a provider, and row 258's advice line tells the operator
+  why. That means the missing steps 3-6 are genuinely a *hardware* gap, not a code defect, and no code
+  change can close §0e. **Recommend A**, with the caveat that the guest will share box 1's GPU
+  fingerprint and box 1 is the build-priority runner — schedule it outside a release build window.
+- **Next run**: still nothing to bundle. Either 256 is decided (then §0e/0.3.75 can close), or a new
+  defect has to be opened to give the queue work.
+
 ## 13:05 PT 0.3.74 CLOSED — §8/§9/§10/§10b ticked, 4 rows COMPLETE, checklist filed
 
 - **A0 CI**: `origin/main` HEAD was `df3fbe93` (the site commit) ⇒ `GET /actions/runs?head_sha=df3fbe9366948259b0fd8fec2dec558994b4c2bd`
