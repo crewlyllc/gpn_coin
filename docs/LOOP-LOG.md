@@ -12,6 +12,19 @@
   (dispatch + end run), §6/§7 after green.
 - **No [TRIAGE]**: nothing needed a decision.
 
+## 09:58 PT 0.3.74 §4 Push (path-ignore + observe-only) ticked [no triage]
+
+- **A0 CI**: `origin/main` HEAD `1e29b4b` (docs-only) ⇒ `total_count 0`, expected. In flight:
+  code commit `6c23d0f` ⇒ run `45447907558` `in_progress` (`fmt + clippy` success, `secret-scan`
+  success, linux/windows building). Noted, **not waited on**.
+- **§4 boxes 1–3 ticked with one query each**: docs-only shas `a83a9e0` and `1e29b4b` both return
+  `total_count 0` while code sha `6c23d0f` starts run `45447907558` — `paths-ignore` is intact in
+  both directions; docs edits batched one commit per run.
+- **§4 box 4 left open on purpose**: it demands the *code* SHA's conclusion be `success`, and
+  `45447907558` is still building. Next run reads the run id and ticks it (or reads the failing log
+  if it went red) before §5.
+- **Next box**: §5 build both platforms (dispatch + end run, per the dispatch rule).
+
 ## 09:45 PT 0.3.74 box 4/4 — row 261 DONE: release-cut names the real lock state [no triage]
 
 - **A0 CI**: `origin/main` HEAD `a84f317` (docs-only loop-log commit) ⇒ `GET /actions/runs?head_sha=a84f317…`
