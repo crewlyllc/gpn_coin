@@ -1,3 +1,19 @@
+## 08:15 PT 0.3.74 box 1/4 — row 257 DONE: three docs pages published, live 200 [no triage]
+
+- **A0 CI**: `origin/main` HEAD `6c3040e` (docs-only) ⇒ `total_count 0`, as designed. After this run's
+  code push, run **45434293115** for `914f855…` is `pending` — noted, not waited on (§4 rule).
+- **§3b 257 — docs links to pages the generator never publishes.** Test first: added
+  `every internal docs link resolves to a published page` to `website/tests/docs-clean-urls.test.js`;
+  it failed on exactly `run-a-node.html: href="provider-address-and-models"`, `…="updates"`,
+  `…="node-gui-and-idle"` (`fail 1`).
+- Fix: the three slugs in `PAGES` (`scripts/build-site-docs.py`) + docs index cards + `website/sitemap.xml`,
+  all 14 pages regenerated. Test now `tests 3 / pass 3`. Commit `914f855`, pushed `6c3040e..914f855`.
+- Live proof: before push `404 404 404`; at **08:13:13 PT** `200 200 200` for
+  `/docs/updates` (82794 B), `/docs/node-gui-and-idle` (31639 B), `/docs/provider-address-and-models`
+  (18964 B), each with the expected `<title>`.
+- Boxes ticked: §1 (3/3), §2 (6/6), §3b 257. Next run starts §3b 259 (`install.ps1` false "node started").
+- No blockers, no triage.
+
 ## 07:52 PT 0.3.74 BUNDLED — rows 257/259/260/261 opened; checklist generated; CI dispatched (not waited on) [no triage]
 
 Every claim below is from a command run in this session (07:35–07:52 PT).
