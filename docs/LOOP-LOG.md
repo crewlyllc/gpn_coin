@@ -1,3 +1,22 @@
+## 19:15 PT 0.3.72 §4 "Push (once)" ticked, and both release builds dispatched on 98a06eb
+
+- **A0**: `GET /commits/main` ⇒ `98a06eb879775ca4e8d6c3e4bdd1fa727f5c622e` (docs-only §3 tick + loop log);
+  full-sha run query ⇒ `total_count: 0` — expected, `ci.yml:29-35` `paths-ignore`s `docs/**`.
+  A **code**-sha run was in flight: **45309072916** on `fd948d8`, `in_progress` 76 min at query time.
+  Jobs healthy: fmt+clippy success, secret-scan success, linux build+tests success (24 steps),
+  windows in step 7/17 (gpn-agent release build). Noted, not waited on.
+- **Box worked**: §4 "Push (once)" — all four boxes now ticked with evidence (paths-ignore verified,
+  one docs commit per run, CI observed not waited, full-sha query semantics).
+- **Dispatched, then ended** (§5): `release-linux-selfhosted.yml` run **45318137343** at 19:14 PT and
+  `release-windows.yml` run **45318140117** at 19:14 PT, both `head_sha = 98a06eb…` (same SHA box ticked).
+  Windows run queued behind CI's windows job on the single-slot box-1 runner — contention, not a fault.
+- **Checklist**: §1/§2/§3b/§3/§4 DONE; total **22/54**. Next run: read the two run ids, tick (or
+  re-dispatch) §5, then §6 artifact scan.
+- Runners API reports both runners `offline` while both are demonstrably executing jobs and
+  `pgrep -c -x Runner.Listener` = 1 with the user unit `active (running)` 5 days — the API status is
+  stale; the runner is fine. Worth ignoring in future A0 checks.
+- No blocker, no [TRIAGE].
+
 ## 18:55 PT 0.3.72 §3 "Bump and record" ticked — version, changelog, lockstep and seeds verified
 
 - **A0**: `origin/main` = `a5488275…` (docs-only tick of box 254) → `GET /actions/runs?head_sha=a5488275…`
