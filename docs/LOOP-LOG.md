@@ -1,3 +1,26 @@
+## 21:25 PT 0.3.72 PUBLISHED — §7 cut ticked from the finished log, site stamps live, §7b version surfaces ticked
+
+- **A0**: `HEAD == origin/main == b9f2e02` at start; `GET /actions/runs?head_sha=b9f2e02…` ⇒ one run
+  `45330494721 CI in_progress` (started 05:02Z) — noted, **not waited on**, per the A0 rule.
+- **§7 first unticked box — release-cut**: it had finished on its own. Log
+  `/tmp/release-cut-0.3.72.log` ⇒ `== 6/6 publish and verify`, `release-lock: released (0.3.72)`,
+  committed/pushed `b9f2e02`, live manifest `0.3.72`, anonymous `GET 206` on both assets
+  (linux 346,947,553 B `6307847085…`, windows 253,194,900 B `f38e7ea8…`), mirror check on
+  `crewlyllc/gpn_coin@linux-latest` / `@windows-latest` both 206. PID 2178060 exited.
+- **§7 network.json + releases.json-twice boxes ticked**: `network.json:25` `latest_version 0.3.72`;
+  `/releases.json` polled twice 10 s apart ⇒ identical `0.3.72` line with both digests.
+- **§7b three boxes ticked**: pushed `a76cc2f` (stamp 0.3.72 in `download.html`,
+  `docs/downloads.md`, `docs/run-a-node.md` + rendered pages, block 354,436 from
+  `chain_getHeader 0x56884`) and re-polled live: `/download` ⇒ `0.3.72`,
+  `/docs/run-a-node` + `/docs/downloads` ⇒ `0.3.72 — checked 2026-11-24 21:15 PT at block 354,436`.
+  GitHub API: both repos carry `gpn-linux.tar.gz` 346,947,553 B and `gpn-windows.zip` 253,194,900 B
+  under `linux-latest` / `windows-latest`. `seeds.json` has no version field — clause vacuous, noted.
+- **NEW row 255 (not bundled)**: `scripts/build-site-docs.py` still emits `.html` canonicals and
+  would revert `6980e71`'s SEO fix on any regeneration. Confirmed by regenerating into a dirty tree:
+  14 files with URL reversions. Hand-patched this release's stamps instead; fix tracked as row 255.
+- Remaining in 0.3.72: §7b capability-discoverability boxes, §8 `--verify-published`, §9 self-update,
+  §10 live proofs, §10b timing, §0b filing (archive + INDEX row).
+
 ## 20:56 PT 0.3.72 §5 closed (8/8) — attestation verified on the to-be-published digest; §7 cut dispatched
 
 - **A0**: `HEAD == origin/main == 9bf7828` (`docs(0.3.72): tick §5 provenance-ordering…`). 
