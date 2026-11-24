@@ -1,3 +1,26 @@
+## 05:28 PT 0.3.73 — Windows release leg still queued behind a 68-min CI build; nothing else workable, run ended
+
+- **A0**: `origin/main` HEAD `72014b19637de21ff4a7a629fbe3b03767b6c15d` ⇒
+  `GET /actions/runs?head_sha=72014b19…` `total_count: 0` — docs-only (the 05:08 poll log), expected
+  under `ci.yml` paths-ignore. Nothing red.
+- **Polled the Windows rebuild handle once.** `45397562142` (`d5d98b96`) ⇒ still **`queued`** at
+  13:35Z, 44 min after dispatch (12:51:23Z). Cause read from the API, not assumed: runners API shows
+  exactly two runners, `DESKTOP-USBUADL` `online busy=true` (Windows) and `openclawassist` `busy=false`,
+  and the job holding the slot is `45381828261` / `Build + unit tests (windows, self-hosted)` on
+  `DESKTOP-USBUADL`, started 12:20:27Z. Its step 6 `Build + test gpn-node (release)` finished
+  `success`; step 7 `Build + test gpn-agent (release)` `in_progress` since 13:01:08Z (27 min).
+  Run age 68 min — under the 90-min stale rule (13:50:27Z), so **not cancelled**; cancelling a
+  three-quarter-done release build to save 20 min would throw the work away.
+- **No box ticked.** §7 box 2 (`release-cut.sh --timeout 300`) keeps its handle: `require_green_ci`
+  keys on bundle stamp sha `d5d98b96` and the Windows half is not published yet. §0e box 1 and
+  §3b row 256 are `AWAITING-OWNER` (item 256 machine decision in `docs/NEEDS-TRIAGE.md`); §0b's two
+  filing boxes come after §10 by definition. Nothing else in the checklist is workable.
+- Next run: poll `45397562142` once more. If both legs are published ⇒ run
+  `scripts/release-cut.sh --timeout 300` detached, write the handle, end the run immediately.
+  If `45381828261` is still holding the runner **past 13:50:27Z** (90 min), cancel that CI run to
+  free the single Windows slot and let `45397562142` start.
+- No [TRIAGE] item this run.
+
 ## 05:08 PT 0.3.73 — rebuild legs: Linux green+publishing in 11 min, Windows still queued behind a 48-min CI build; run ended, no box ticked
 
 - **A0**: origin/main HEAD `654e111e43d1be5b0a6cfd3ecefd2c0e01cba0a6` ⇒ `total_count: 0` — docs-only
