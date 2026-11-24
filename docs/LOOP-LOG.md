@@ -1,3 +1,28 @@
+## 07:16 PT 0.3.73 — §7 + §7b + §8 verification boxes ticked on live evidence: site, GitHub/mirror and the released binary all say 0.3.73
+
+- **A0**: no CI for `bc8460b` — `total_count: 0` on the runs API. `bc8460b` is docs-only (`docs/…`),
+  under `ci.yml` paths-ignore; nothing red, nothing in flight that this run needed.
+- **§7 box 1 — TICKED**: `network.json` line 25 `"latest_version": "0.3.73"`, equal to the crate
+  version and to live `releases.json`.
+- **§7 box 2 — TICKED**: `https://gpncoin.ai/releases.json` polled at 15:11:26Z and 15:11:36Z ⇒
+  both `0.3.73 / 2026-11-24T14:36:56Z`, `linux 347037262 79623ab8…`, `windows 253204352 212db4c6…`.
+- **§7b GitHub box — TICKED**: API `releases/tags/{linux,windows}-latest` ⇒ `jeremyzguo/gpn_coin`
+  `gpn-linux.tar.gz` 347,037,262 B (13:02:21Z), `gpn-windows.zip` 253,204,352 B (14:11:44Z),
+  `.bundle` 8,949 B; `crewlyllc/gpn_coin` same three names/sizes at 14:33–14:35Z.
+- **§7b surfaces-agree box — TICKED**: anonymous download of the **published** linux tarball
+  (`sha256sum` ⇒ `79623ab8…9ea725`, equals manifest), extracted `./gpn-node` ⇒ `gpn-node 0.3.73`.
+  Site `0.3.73` = GitHub manifest bytes = binary version.
+- **§7b capability box — TICKED as N/A**: bundle is rows 255 (docs clean-URL generator) and 256
+  (stranger-lifecycle test) — build tooling + a test, no new user-facing capability to document.
+- **§8 four boxes — TICKED** on one command: `scripts/release-cut.sh --verify-published --version
+  0.3.73` ⇒ **exit 0**, `linux: … 347037262 … matches the manifest`, `windows: … 253204352 …
+  matches the manifest`, `PASS: both manifest assets are publicly downloadable by exact filename and
+  match their sha256/size`; plus live polls `/docs/downloads` ⇒ `0.3.73`, `/download` ⇒
+  `current-release">0.3.73`, `/docs/run-a-node` ⇒ `release 0.3.73`.
+- **Next**: §9 deploy/confirm (one node self-updates and the running process reports 0.3.73 — box 1
+  over SSH / the test VM), then §10 behaviour + §10b timing + §0b filing. No CI waits, no blockers.
+- **No [TRIAGE]**: nothing this run needed a decision.
+
 ## 06:52 PT 0.3.73 — §7b site stamps fixed and live: /download + /docs/run-a-node + /docs/downloads now say 0.3.73 / spec 55 / block 356,721; release-cut box ticked from commit `a6f5a3d`
 
 - **A0**: no CI to wait on — `a6f5a3d` was the release-cut commit (one file, `website/releases.json`)
