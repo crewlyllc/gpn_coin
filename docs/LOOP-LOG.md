@@ -1,3 +1,20 @@
+## 18:55 PT 0.3.72 §3 "Bump and record" ticked — version, changelog, lockstep and seeds verified
+
+- **A0**: `origin/main` = `a5488275…` (docs-only tick of box 254) → `GET /actions/runs?head_sha=a5488275…`
+  (full 40-char sha) ⇒ `total_count: 0` — expected for a docs SHA; `ci.yml` `paths-ignore`s `docs/**`.
+  No red run owed an explanation this turn.
+- **Box worked**: §3 "Bump and record" (first unticked group after all five §3b items were ticked).
+  - bump: already done at bundling — `gpn-agent/Cargo.toml:3` `version = "0.3.72"`, `CHANGELOG.md`
+    `## [0.3.72] - 2026-11-23` (“Bumped from 0.3.71”). A second patch bump would have produced 0.3.73
+    and orphaned this checklist, so it was not run.
+  - `scripts/bump-version.py --check` ⇒ `lockstep: 15 manifest(s) and 14 lockfile entr(ies) agree`,
+    `gpn version: 0.3.72`.
+  - seeds: `network.json:25` `"latest_version": "0.3.72"`; `install.sh` has no pinned version;
+    `install.ps1` mentions only historical versions in comments (lines 438/668/1028/1674/3284) and
+    resolves the release at runtime. No `website/seeds.json` exists in-tree.
+- **Next box**: §4 "Push (once)" — the CI-observation boxes there are already satisfied by the A0
+  query above; then §5 build both platforms (dispatch, record run id, end the run).
+
 ## 18:45 PT 0.3.72 §3b box 254 ticked — refused heartbeats now remember the build that pushed
 
 - **A0**: `GET /commits/main` ⇒ `abe09eeda6991b7ccd832761de647ef6f669709f` (docs-only tick of box 253);
