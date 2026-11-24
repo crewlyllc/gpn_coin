@@ -1,3 +1,20 @@
+## 12:22 PT 0.3.74 §7b — every version surface agrees (4/4 DONE)
+
+- **A0 CI**: `origin/main` HEAD `81c0c57d` (docs-only) ⇒ `GET /actions/runs?head_sha=81c0c57ddb62…` `total_count: 0`,
+  expected under `ci.yml` paths-ignore. Nothing red, nothing waited on. Tree was 3 commits stale — fast-forwarded first.
+- **§7b box 1 TICKED — and it was not green**: `releases.json` served `0.3.74` twice, but the *static* surfaces
+  were stale `0.3.73`: `download.html`'s `#current-release` fallback (only JS-overridden from `releases.json`, so a
+  no-JS/no-cache read showed the old version) and the "Verified against" stamps in `docs/run-a-node` +
+  `docs/downloads`. Fixed in `7974b2e5` after reading the real chain (`chain_getHeader` `0x5766a` = 357,994,
+  `state_getRuntimeVersion` `specVersion: 55`); live polls 12:21 PT ⇒ `/download` `0.3.74`, `/docs/run-a-node`
+  `release 0.3.74`, `/docs/downloads` `release 0.3.74`.
+- **§7b box 2-3 TICKED**: `linux-latest`/`windows-latest` on **both** `jeremyzguo` and `crewlyllc` carry
+  `877212c7…`, `70a265ed…`, `5070f3e0…` — byte-identical to the manifest. Built artifact `--version` ⇒ `gpn-node 0.3.74`.
+- **§7b box 4 TICKED as zero-capability**: bundle is 257/259/260/261 (docs links, installer message, cargo audit,
+  release-cut wording) — no user-facing capability added, so the per-capability copies number zero, stated rather than skipped.
+- **Note**: `seeds.json` carries no version field at all, so the checklist clause naming it is moot (recorded in the box).
+- **Next run**: §8 `--verify-published` (anonymous, no-cookie), then §9 self-update on a live node. No triage.
+
 ## 12:10 PT 0.3.74 §7 — RELEASED 0.3.74 (attestation verified by hand, cut published)
 
 - **A0 CI**: `origin/main` HEAD `a0f751e` (docs-only) ⇒ `GET /actions/runs?head_sha=a0f751e…` `total_count: 0`,
