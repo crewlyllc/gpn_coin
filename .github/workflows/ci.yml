@@ -383,6 +383,14 @@ jobs:
       - name: Access points (published multiaddrs match the live seed list)
         run: node --test website/tests/access-points.test.js
 
+      # Row 255: Cloudflare serves clean URLs (/docs/<slug>, /download, ...), but
+      # scripts/build-site-docs.py regenerates the committed pages and once put
+      # every .html URL back. The guard existed only as a test nobody ran, so it
+      # is wired here: fails if a generated page or the generator's own
+      # templates emit a .html URL.
+      - name: Docs generator clean URLs (no .html links in pages or templates)
+        run: node --test website/tests/docs-clean-urls.test.js
+
       # The Worker's /api/join path: proxies to the AP, keeps the always-200
       # JSON shape, and falls back to email only when nothing was stored.
       - name: Worker unit tests (/api/join + proxies)
