@@ -1,3 +1,22 @@
+## 05:08 PT 0.3.73 — rebuild legs: Linux green+publishing in 11 min, Windows still queued behind a 48-min CI build; run ended, no box ticked
+
+- **A0**: origin/main HEAD `654e111e43d1be5b0a6cfd3ecefd2c0e01cba0a6` ⇒ `total_count: 0` — docs-only
+  (row 261 filing), expected under `ci.yml` paths-ignore. Nothing red.
+- **Polled the two rebuild handles once, as the 04:52 run ordered.** Linux binaries `45397558122`
+  (`d5d98b96`) ⇒ `completed:success` at 13:02Z after 11 min; `linux-latest` asset `gpn-linux.tar.gz`
+  updated 13:02:21Z, 347,037,262 B, `sha256:79623ab8…9ea725` — new bytes, not the e33e2c8 pair.
+  Windows binaries `45397562142` ⇒ still `queued` at 13:08Z: the single Windows runner is
+  `busy=true` on CI run `45381828261`'s job `Build + unit tests (windows, self-hosted)`, started
+  12:20Z (48 min). Under the 90-minute stale threshold, so **not cancelled** — a Windows build is
+  40–75 min and cancelling would throw away 48 min for nothing.
+- **No box ticked.** §7 box 2 (`release-cut.sh`) still holds its handle and stays unticked: its
+  `require_green_ci` keys on the bundle stamp sha `d5d98b96`, and the Windows half of that stamp is
+  not published yet. Nothing else in the checklist is workable (§0e/§3b-256 are AWAITING-OWNER).
+- Next run: poll `45397562142` once. Both green ⇒ `scripts/release-cut.sh --timeout 300` and end
+  the run on the dispatch. If the Windows job is still queued/in-progress past ~13:50Z (90 min on
+  that CI run), cancel `45381828261` to free the slot and re-dispatch `45397562142`.
+- No [TRIAGE] item this run.
+
 ## 04:52 PT 0.3.73 — §7 cut refused on the build sha's red CI; both legs REBUILT from `d5d98b96` (dispatched, handles written, run ended)
 
 - **A0**: `head_sha=0bee223157057d4b212698bcb6a8a13cc7accf44` (origin/main HEAD) ⇒ `total_count: 0`
