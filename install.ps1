@@ -2380,6 +2380,80 @@ function Wait-NodeUp {
   return $false
 }
 
+# ------------------------------------------------- #259: did it actually start?
+# `schtasks /Run` exits 0 as soon as the task is handed to the scheduler. For a
+# task whose principal is Interactive, with no logged-in desktop session, that
+# hand-off succeeds and nothing ever runs: the task sits in Ready with
+# LastTaskResult 267011 (0x41303, "task has not yet run"), no gpn-node process
+# exists and no node.log is written. The installer used to print
+# "node started (GPN-Node)" on the strength of that rc=0 (found 2026-11-24 on
+# GPN-209, headless Hyper-V guest). rc=0 is not a witness; a live process or a
+# answering RPC is.
+# A gpn-node process on this machine, or $null. Deliberately its own function:
+# Get-NodeProcess lives inside the start-gpn.ps1 template string, so it is not
+# in the installer's own scope (checked with the AST, 2026-11-24).
+function Get-LiveNodeProcess {
+  @(Get-Process -Name 'gpn_node','gpn-node' -ErrorAction SilentlyContinue) | Select-Object -First 1
+}
+
+function Get-NodeTaskDiagnosis {
+  param([string]$Name = 'GPN-Node')
+  $d = [pscustomobject]@{ State = ''; Principal = ''; UserId = ''; LastTaskResult = '' }
+  try {
+    $t = Get-ScheduledTask -TaskName $Name -ErrorAction Stop
+    $d.State = [string]$t.State
+    $d.Principal = [string]$t.Principal.LogonType
+    $d.UserId = [string]$t.Principal.UserId
+  } catch { }
+  try {
+    $d.LastTaskResult = [string](Get-ScheduledTaskInfo -TaskName $Name -ErrorAction Stop).LastTaskResult
+  } catch { }
+  return $d
+}
+
+# Bounded wait for a real witness that the node started. Returns
+# { Started; Witness ('process'|'rpc'|'none'); Principal; UserId; State; LastTaskResult }.
+# Probes are parameters so the headless case is testable without a Windows box.
+function Confirm-NodeStarted {
+  param(
+    [int]$Seconds = 60,
+    [int]$PollSeconds = 2,
+    [scriptblock]$ProcessProbe = { Get-LiveNodeProcess },
+    [scriptblock]$RpcProbe = { Test-NodeUp },
+    [scriptblock]$TaskProbe = { Get-NodeTaskDiagnosis -Name $NodeTask },
+    [string]$TaskName = 'GPN-Node'
+  )
+  $deadline = (Get-Date).AddSeconds($Seconds)
+  while ($true) {
+    if (& $ProcessProbe) {
+      return [pscustomobject]@{ Started = $true; Witness = 'process'; Principal = ''; UserId = ''; State = ''; LastTaskResult = '' }
+    }
+    if ((Get-Date) -ge $deadline) { break }
+    Start-Sleep -Seconds $PollSeconds
+  }
+  if (& $RpcProbe) {
+    return [pscustomobject]@{ Started = $true; Witness = 'rpc'; Principal = ''; UserId = ''; State = ''; LastTaskResult = '' }
+  }
+  # Statement-form on purpose: Windows PowerShell 5.1 rejects `if` inside a
+  # hashtable literal, and this file must run under 5.1 (the site snippet does).
+  $d = & $TaskProbe
+  $principal = ''; $userId = ''; $state = ''; $ltr = ''
+  if ($d) {
+    $principal = [string]$d.Principal
+    $userId = [string]$d.UserId
+    $state = [string]$d.State
+    $ltr = [string]$d.LastTaskResult
+  }
+  return [pscustomobject]@{
+    Started        = $false
+    Witness        = 'none'
+    Principal      = $principal
+    UserId         = $userId
+    State          = $state
+    LastTaskResult = $ltr
+  }
+}
+
 # Verify the whole point of the task: a simulated reboot brings the node back
 # with no user action. Run/up -> End/Ready -> Run/up again.
 function Verify-NodeTask {
@@ -3647,7 +3721,7 @@ if (-not $NoStart) {
     Invoke-Step "schtasks /Run /TN $NodeTask" {
       $rc = Invoke-Schtasks @('/Run', '/TN', $NodeTask)
       if ($rc -eq 0) {
-        Say "node started ($NodeTask)"
+        Say "schtasks /Run $NodeTask returned 0; waiting for the node to appear"
       } else {
         # The task exists but cannot be started (typical when it belongs to
         # another account). Start it directly so the install still ends with a
@@ -3664,6 +3738,55 @@ if (-not $NoStart) {
     Say 'no scheduled task -- starting the node directly'
     Invoke-Step "start node detached: $NodeCmd" {
       Start-NodeDetached
+    }
+  }
+
+  # #259: rc=0 from schtasks /Run is not proof the node started. Wait for a real
+  # witness (a gpn-node process, or the RPC answering) before saying anything.
+  if (-not $WhatIf) {
+    Say 'checking that the node really started (process or RPC, up to 60s)'
+    $startCheck = Confirm-NodeStarted -Seconds 60 -TaskName $NodeTask
+    if (-not $startCheck.Started -and $script:NodeAutostart -eq 'task') {
+      # The task produced nothing. One direct start before declaring failure: the
+      # fault may be the task's logon type, not the binary.
+      Warn "the $NodeTask task produced no node -- starting it directly"
+      Invoke-Step "start node detached: $NodeCmd" {
+        Start-NodeDetached
+      }
+      $startCheck = Confirm-NodeStarted -Seconds 60 -TaskName $NodeTask
+    }
+    if ($startCheck.Started) {
+      Say "node is running (witness: $($startCheck.Witness))"
+      if ($script:NodeAutostart -eq 'task' -and $startCheck.Witness -ne 'process') {
+        Say "autostart is configured ($NodeTask); this machine starts it at logon"
+      }
+    } else {
+      Write-Host ''
+      Write-Host 'The node did NOT start -- the installer will not claim that it did.' -ForegroundColor Red
+      if ($startCheck.Principal) {
+        Write-Host "  scheduled task : $NodeTask (principal LogonType=$($startCheck.Principal)$(if ($startCheck.UserId) { ", user $($startCheck.UserId)" }))" -ForegroundColor Red
+      }
+      if ($startCheck.State) { Write-Host "  task state     : $($startCheck.State)" -ForegroundColor Red }
+      if ($startCheck.LastTaskResult) {
+        $ltrNote = if ($startCheck.LastTaskResult -eq '267011') { ' (0x41303 - task has not yet run)' } else { '' }
+        Write-Host "  LastTaskResult : $($startCheck.LastTaskResult)$ltrNote" -ForegroundColor Red
+      }
+      if ($startCheck.Principal -eq 'Interactive') {
+        Write-Host '  cause: the task runs at logon as an interactive user, and this install ran with no' -ForegroundColor Red
+        Write-Host '         desktop session for that user -- so it can never start the node from here.' -ForegroundColor Red
+        Write-Host "  fix:   log in as that user (then it starts at logon), or run from that session:" -ForegroundColor Red
+        Write-Host "             schtasks /Run /TN $NodeTask" -ForegroundColor Red
+        Write-Host "         or start it now with: $NodeCmd" -ForegroundColor Red
+      } elseif (-not $startCheck.Principal) {
+        Write-Host '  cause: no scheduled task could be queried and no node process or RPC appeared.' -ForegroundColor Red
+        Write-Host "  fix:   start it by hand ($NodeCmd) and read $NodeLog" -ForegroundColor Red
+      } else {
+        Write-Host "  cause: the $NodeTask task did not produce a node (principal is not Interactive)." -ForegroundColor Red
+        Write-Host "  fix:   start it by hand ($NodeCmd) and read $NodeLog" -ForegroundColor Red
+      }
+      Write-Host "  log:           $InstallLog" -ForegroundColor Red
+      try { Stop-Transcript | Out-Null } catch { }
+      exit 1
     }
   }
 }
