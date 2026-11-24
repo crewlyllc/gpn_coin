@@ -1,3 +1,26 @@
+## 06:52 PT 0.3.73 — §7b site stamps fixed and live: /download + /docs/run-a-node + /docs/downloads now say 0.3.73 / spec 55 / block 356,721; release-cut box ticked from commit `a6f5a3d`
+
+- **A0**: no CI to wait on — `a6f5a3d` was the release-cut commit (one file, `website/releases.json`)
+  and `0e92426` is docs-only, both under `ci.yml` paths-ignore. Nothing red, nothing in flight that
+  this run needed.
+- **§7 box `release-cut` — TICKED** on evidence: `a6f5a3d` signed `website/releases.json`;
+  `https://gpncoin.ai/releases.json` ⇒ `0.3.73 / 2026-11-24T14:36:56Z` twice 10 s apart
+  (`linux 79623ab8… 347,037,262`, `windows 212db4c6… 253,204,352`); GitHub API shows identical
+  sizes on `linux-latest` / `windows-latest` in **both** `jeremyzguo/gpn_coin` and the
+  `crewlyllc/gpn_coin` mirror (+ `gpn-windows.zip.bundle` 8,949 B).
+- **§7b box 1 — TICKED** (worked this run): the static surfaces were still 0.3.72 — `download.html`'s
+  no-JS `current-release` fallback (the JS already read `releases.json`) and the `Verified against:`
+  line in `docs/run-a-node.md` / `docs/downloads.md` (chain spec 54 / 0.3.72 / block 354,436).
+  Edited both Markdown stamps to `chain spec 55 / release 0.3.73 — checked 2026-11-24 06:51 PT at
+  block 356,721` (block read live from `chain_getHeader`, spec from `state_getRuntimeVersion`),
+  regenerated with `scripts/build-site-docs.py --date 2026-11-24`, commit `0e92426`, pushed.
+  Live after Cloudflare rebuild: `/download` ⇒ `current-release">0.3.73`; `/docs/run-a-node` and
+  `/docs/downloads` ⇒ the new stamp. `seeds.json` has no version field (noted, not skipped).
+- **Remaining §7b**: GitHub-surface box, both-surfaces-agree box, capability box (expected n/a —
+  this batch adds no generation capability), then §8 stranger checks, §9 deploy/confirm (the local
+  node still answers `system_version` ⇒ 0.3.72), §10 proof, §10b timing, §0b filing.
+- **No [TRIAGE] this run.** Item 256 stays AWAITING-OWNER (GPU guest question already filed).
+
 ## 06:10 PT 0.3.73 — Windows leg executing (step 18/23, packaging); slot is genuinely building, not stale; box 1 still runs 0.3.72 by design; nothing to tick
 
 - **A0**: `origin/main` HEAD `e80cc674fb05f60cc449d8971a49334feac0ce9f` (docs-only, the 05:52 log)
