@@ -1,3 +1,34 @@
+## 21:44 PT 0.3.72 §7b/§8/§9 ticked, §10 partial — item 251's runtime is NOT on chain (spec_version collision found)
+
+- **A0**: local tree was 2 commits behind (`b9f2e02` vs `origin/main` `a7e052e`), fast-forwarded
+  before reading the checklist. No CI run owed: both commits are docs-only, `paths-ignore` working.
+- **§7b capability box ticked `n/a`**: the batch (250–254) adds no chat/image/video/audio/fine-tune/ML
+  capability — all five are fleet/chain/API-behaviour changes; `grep -rl gpu_fingerprint website/` ⇒
+  no hits, so no site text went stale.
+- **§8 stranger verification (4/4) ticked**: `scripts/release-cut.sh --verify-published --version
+  0.3.72` exit 0 — linux 346,947,553 B `6307847085203111…855f`, windows 253,194,900 B
+  `f38e7ea8e1736ace…34f2`, `PASS: both manifest assets are publicly downloadable`; live stamps polled
+  (`/download` `current-release">0.3.72`, `/docs/downloads` and `/docs/run-a-node` `release 0.3.72 —
+  checked 2026-11-24 21:15 PT at block 354,436`).
+- **§9 deploy (4/4) ticked**: this host's own `gpn-update.service` applied 0.3.72 at 21:25:58 —
+  `confirm: process=up rpc=yes 4s version=0.3.72` / `confirmed 0.3.72 is running`; `system_version`
+  on `:9944` ⇒ `0.3.72`; `versions/0.3.71` + `current.previous` retained for rollback; block imports
+  continued straight through the restart (#354463 → #354473).
+- **§10 partially proven**: 250 (`gpn-update.timer` `OnUnitActiveSec=1h`, last 21:24:38 / next
+  22:25:20), 252 (live contribution export, idle account allocation 0.0), 253 (live `/providers`
+  rows carry `gpu_fingerprint {hash, verified:false}`), 254 (live rejected-heartbeat journal line)
+  all observed on real hardware today. Peers box ticked: 335 × `Idle (3 peers)`, 0 bans/isolation.
+- **FINDING — item 251 cannot be proven live: its runtime is not on the chain.** `state_getMetadata`
+  on the live chain (spec 54) has `FreeEntryGpus`/`Attestations`/`ChallengeVerified` but **not**
+  `FreeEntryGpuLastEntry`, `FreeEntryCooldown` or `FreeEntryGpuRateLimited`. Worse, the tree still
+  carries `spec_version: 54` (`gpn-node/runtime/src/lib.rs:133`) while compiling different runtime
+  code than the 54 on chain — the exact ambiguity a spec bump exists to prevent. Next run: bump spec
+  to 55, build the wasm, rehearse with `scripts/gov-upgrade-rehearsal.sh`, `set_code`, verify
+  `FreeEntryGpuLastEntry` in metadata, then run the live re-registration test (inside 24 h ⇒ named
+  code 6; outside ⇒ entry with no proof of work). §10 box 1 stays **unticked** until then — 0.3.72 is
+  not closed.
+- Commit `948f898`, pushed `a7e052e..948f898 -> main` (docs-only, no CI started).
+
 ## 21:25 PT 0.3.72 PUBLISHED — §7 cut ticked from the finished log, site stamps live, §7b version surfaces ticked
 
 - **A0**: `HEAD == origin/main == b9f2e02` at start; `GET /actions/runs?head_sha=b9f2e02…` ⇒ one run
