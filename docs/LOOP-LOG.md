@@ -1,3 +1,11 @@
+## 02:25 PT 0.3.73 — §2 "Full affected suites" ticked (lib 800 + website 29 green)
+
+- **A0**: `git pull --ff-only` ⇒ HEAD `9bfa3c7` = `origin/main`. `GET /actions/runs?head_sha=9bfa3c7…` ⇒ `total_count: 0` — docs-only SHA, `paths-ignore` intact, nothing to wait on.
+- **Box §2 "Full affected suites run, not just the new test"**: `gpn-agent` `cargo test --release --lib` ⇒ `800 passed; 0 failed; 14 ignored` (6.81s); `cargo test --release --bins` ⇒ all targets ok (`22`/`10`/`8` passed, 0 failed); `website` `node --test tests/*.test.js` ⇒ `tests 29 / pass 29 / fail 0` (incl. `docs-clean-urls.test.js` for row 255).
+- **Gotcha logged**: `node --test tests/` (directory arg) is not a suite run — it reports `pass 0 / fail 1`. Use the `*.test.js` glob.
+- **Next unticked box**: §2 "A call site exists for anything new". (§0e box 1 and §3b row 256 remain AWAITING-OWNER on the GPU-machine [TRIAGE] question.)
+- No decision needed.
+
 ## 01:55 PT 0.3.73 — §2 box 2 ticked (fmt + CI-identical clippy clean on HEAD)
 
 - **A0**: `origin/main` HEAD `33dcd36fc3ed54075710a094e62952fea7b5f57c` == local HEAD.
