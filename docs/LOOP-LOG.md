@@ -1,3 +1,32 @@
+## 00:1x PT STRANGER LIFECYCLE — script written, steps 1-2 pass on a clean guest, step 3 names a useless reason
+
+- **A0**: `HEAD = origin/main = 8d1c515`; `GET /actions/runs?head_sha=8d1c515…` ⇒ `total_count: 0`
+  (docs-only). The code commit from the last run (`61212a0`, row 255) does have a run —
+  `45347253922` — still `in_progress` at start; noted, not waited on.
+- **Box worked: §0e / row 256 — the stranger lifecycle.** `scripts/stranger-lifecycle.ps1` did not
+  exist; it is written now (six named steps, ASCII-only for PS 5.1, exit code = first failed step,
+  `[Parser]::ParseFile` clean, 0 high bytes).
+- **Real run on GPN-209** (Hyper-V guest on box 1, Server 2022 eval, node state wiped, no token, no
+  repo access): **step 1 PASS** — site snippet → `253,194,900` bytes, sha256 `f38e7ea8e1736ace` ==
+  `releases.json`, `install.ps1` exit 0 in 557 s. **step 2 PASS** — `C:\gpn\bin\gpn-node.exe
+  --version` = `0.3.72` = manifest. **step 3 FAIL** — `[onboard] ! onboarding did not complete:
+  GFLOPS benchmark: open GPU matmul: no OpenCL platforms: DLOPEN_RUNTIME_LOAD_FAILED`; the guest has
+  only `Microsoft Hyper-V Video`, so nothing is registered and steps 4-6 cannot run there.
+- **Three bugs the run found, two filed:**
+  - the lifecycle script itself died twice with no report line: `curl`'s progress meter on stderr
+    plus `$ErrorActionPreference='Stop'` is a terminating error. Fixed with `-fsSL` and a native
+    wrapper (`Invoke-Native`) that runs natives under `Continue` and reads `$LASTEXITCODE`.
+  - row **257** — the DLOPEN message names a mechanism, not an action a stranger can take.
+  - row **258** — `install.ps1` prints `node started (GPN-Node)` while `GPN-Node` (LogonType
+    Interactive, no interactive session) never ran: `LastTaskResult 267011` (0x41303), no process,
+    no `node.log`, and `startup-summary.txt` itself says `binary path: not running`.
+- **Not ticked**: §0e box 1 (needs a GPU-attached guest for steps 3-6) and box 2 (row 257). Box 3
+  ticked with that environment reason, which is the box's own escape hatch.
+- Next run: either attach a GPU partition to a clean guest (driver install inside the guest) so
+  steps 3-6 can run, or, if the owner prefers, run the lifecycle on box 4 after a node-state wipe —
+  that is a decision about his machines, so it goes to `NEEDS-TRIAGE.md` as **[TRIAGE]** if the loop
+  cannot attach a GPU by itself.
+
 ## 23:5x PT 0.3.73 §3b box 1 ticked — docs generator emits clean URLs, regeneration proven a no-op (item 255)
 
 - **A0**: `origin/main = 109120c`; `GET /actions/runs?head_sha=109120c…` ⇒ `total_count: 0` (docs-only,
