@@ -1,3 +1,30 @@
+## 23:5x PT 0.3.73 §3b box 1 ticked — docs generator emits clean URLs, regeneration proven a no-op (item 255)
+
+- **A0**: `origin/main = 109120c`; `GET /actions/runs?head_sha=109120c…` ⇒ `total_count: 0` (docs-only,
+  paths-ignore correct). Nothing red, nothing waited on. Local tree was one commit behind and was
+  ff'd to `109120c` before work started.
+- **First unticked work box = §3b item 255** (clean URLs from `scripts/build-site-docs.py`).
+- **Fix**: NAV/HEAD/FOOT/crumbs/cards/quick links now emit `..`, `./`, `../download`, `<slug>`;
+  canonical/og:url come from a `{url}` param (`/docs/<slug>`, `/docs/` for the index);
+  `rewrite_links` maps intra-docs `.md` through a `src→slug` table and strips `.html`; `--date` pins
+  the "Last generated" stamp.
+- **No-op proof**: `scripts/build-site-docs.py --date 2026-11-03 && git diff --stat` ⇒ only
+  `run-a-node.html` (+221) and `fast-sync.html` (+109) — the two pages whose Markdown genuinely
+  changed since the last generation. The other nine pages regenerate byte-identically.
+- **Test (fails before, passes after)**: new `website/tests/docs-clean-urls.test.js`; it fails on the
+  pre-fix generator (`✖ the docs generator's templates emit clean URLs`) and passes now; full site
+  suite `tests 29 / pass 29 / fail 0`.
+- **Drift fixed so regeneration does not revert hand-patches**: six pages' Markdown resynced to their
+  published stamp (0.3.65 / 2026-11-21 / block 340,878), one-pager `LIVE` 0.3.64, technical-overview
+  status 0.3.62 plus the "Settlement is depth, not finality" bullet — `/api/finality` re-checked live
+  (`{"mode":"depth","confirmations":288,"finalized_head":null}`).
+- **Push (one)**: `61212a0` → `origin/main`. CI run `45347253922` created (pending) — **not waited on**;
+  next run checks it. This commit does contain `scripts/` so it is a code change and does build.
+- **New row 257 (NEW)**: three internal docs links (`updates`, `node-gui-and-idle`,
+  `provider-address-and-models`) point at pages the generator never publishes — `404 404 404` live.
+  Not filed as part of 0.3.73 (one box per run); next bundle carries it.
+- Next run: §3b box 256 (stranger lifecycle on a clean Windows guest). No [TRIAGE] items.
+
 ## 23:0x PT BUNDLED 0.3.73 — rows 255 (clean-URL docs generator) + 256 (stranger lifecycle proof)
 
 - **A0**: `HEAD = origin/main = b83c123`; CI for that sha `total_count: 0` (docs-only, paths-ignore
