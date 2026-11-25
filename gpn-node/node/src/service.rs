@@ -2803,14 +2803,25 @@ pub async fn new_full<
                                             ),
                                         );
                                         {
+                                            // Row 262: a `deep-fork` refusal is held
+                                            // until the fork is actually over — see
+                                            // `fork_choice::next_pending`. A claim that
+                                            // carries no work figure (row 194) says
+                                            // nothing about the fork and must not
+                                            // release the sealing pause.
                                             let mut f = fork_shared.lock().unwrap();
-                                            if decision.pauses_sealing() {
-                                                f.pending.insert(
-                                                    who.clone(),
-                                                    decision.result_slug(),
-                                                );
-                                            } else {
-                                                f.pending.remove(&who);
+                                            let next = fc::next_pending(
+                                                f.pending.get(&who).copied(),
+                                                decision,
+                                                peer_tip_held,
+                                            );
+                                            match next {
+                                                Some(reason) => {
+                                                    f.pending.insert(who.clone(), reason);
+                                                }
+                                                None => {
+                                                    f.pending.remove(&who);
+                                                }
                                             }
                                         }
                                         refresh_forked_marker(

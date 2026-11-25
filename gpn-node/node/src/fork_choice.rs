@@ -313,6 +313,44 @@ pub fn work_for_tip(
     }
 }
 
+/// The pending-fork entry for a peer after one of its claims.
+///
+/// Row 262 (measured on 0.3.75, box 3, 2026-11-24 17:26:15 PT): `pending[peer]
+/// = deep-fork` was written by a refusal (ours #692, theirs #53, `depth=633`),
+/// and the peer's *next* announce carried no work figure — row 194's rule,
+/// because the cached measurement belongs to a different tip — so `evaluate`
+/// answered `Keep(WorkUnavailable)` and the caller deleted the entry.
+/// `gpn-forked` then vanished ~23 s later while that heavier branch was still
+/// there, and sealing resumed underneath a fork that had not gone away.
+///
+/// So a `DeepFork` refusal survives a claim that measures nothing: an
+/// unmeasured claim is not evidence that the heavier branch is gone. It is
+/// released by
+/// - a claim whose tip is a block we hold (the peer is on our own chain), or
+/// - a claim that *does* measure the fork and answers not-heavier / peer-ahead
+///   (the branch no longer threatens us), or
+/// - the link closing (the caller drops the entry on stream close).
+///
+/// Other reasons keep the old per-claim behaviour: only `DeepFork` is held,
+/// because only `DeepFork` names a fork that outlives one announcement.
+pub fn next_pending(
+    previous: Option<&str>,
+    decision: Decision,
+    peer_tip_held: bool,
+) -> Option<&'static str> {
+    if decision.pauses_sealing() {
+        return Some(decision.result_slug());
+    }
+    let holding_deep_fork = previous == Some(RefuseReason::DeepFork.slug());
+    if holding_deep_fork
+        && !peer_tip_held
+        && matches!(decision, Decision::Keep(KeepReason::WorkUnavailable))
+    {
+        return Some(RefuseReason::DeepFork.slug());
+    }
+    None
+}
+
 /// The one INFO line per state change, shape fixed by the owner:
 /// `work ours=X theirs=Y peer=P; reorg=<accepted/refused:reason>`.
 pub fn line(ours: &Tip, theirs: &Tip, peer: &str, decision: Decision) -> String {
@@ -559,6 +597,44 @@ mod tests {
         assert_eq!(work_for_tip(Some((287, h, 573_890)), 287, other), None);
         // Nothing measured yet: nothing claimed.
         assert_eq!(work_for_tip(None, 287, h), None);
+    }
+
+    #[test]
+    fn a_deep_fork_refusal_outlives_a_work_less_claim() {
+        // Row 262, measured on box 3 at 2026-11-24 17:26:15 PT: the refusal
+        // (`ours #692`, `theirs #53`, `depth=633`) inserted `pending[peer]`
+        // `=deep-fork`, and the peer's next announce — which by row 194's rule
+        // carries no work figure, because the cached measurement belongs to
+        // another tip — evaluated to Keep(WorkUnavailable) and deleted the
+        // entry, so `gpn-forked` vanished while the heavier branch was there.
+        let ours = tip(GENESIS, 692, H1, Some(1_030_915));
+        let theirs = tip(GENESIS, 53, H2, Some(2_364_454));
+        let refused = evaluate(&ours, &theirs, ctx());
+        assert_eq!(refused.result_slug(), "deep-fork");
+        let held = next_pending(None, refused, false);
+        assert_eq!(held, Some("deep-fork"));
+
+        let mut later = theirs;
+        later.work = None;
+        let d2 = evaluate(&ours, &later, ctx());
+        assert_eq!(d2, Decision::Keep(KeepReason::WorkUnavailable));
+        assert!(!d2.pauses_sealing());
+        // The claim measures nothing about the fork, so the pause stays.
+        assert_eq!(next_pending(held, d2, false), Some("deep-fork"));
+        // A claim whose tip is a block we hold is on our own chain: fork over.
+        assert_eq!(next_pending(held, d2, true), None);
+        // A claim that does measure the fork and is not heavier releases it.
+        let lighter = tip(GENESIS, 53, H2, Some(1_000));
+        let d3 = evaluate(&ours, &lighter, ctx());
+        assert_eq!(d3, Decision::Keep(KeepReason::NotHeavier));
+        assert_eq!(next_pending(held, d3, false), None);
+        // A peer announcing a chain ahead by height is ordinary forward sync.
+        let ahead = tip(GENESIS, 700, H2, Some(9_999_999));
+        let d4 = evaluate(&ours, &ahead, ctx());
+        assert_eq!(d4, Decision::Keep(KeepReason::PeerAhead));
+        assert_eq!(next_pending(held, d4, false), None);
+        // Every other reason keeps today's behaviour: only deep-fork is sticky.
+        assert_eq!(next_pending(Some("primary-authoritative"), d2, false), None);
     }
 
     #[test]
