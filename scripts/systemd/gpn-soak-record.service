@@ -1,0 +1,10 @@
+[Unit]
+Description=GPN soak recorder (row 273) — one day of numbers into docs/soak-<start>.md
+
+[Service]
+Type=oneshot
+WorkingDirectory=/home/jeremyg/gpn-loop
+ExecStart=/bin/bash /home/jeremyg/gpn-loop/scripts/soak-record-daily.sh
+# exit 2 = node unreachable; recorded in ~/.gpn/soak-record.log, not fatal to the soak
+SuccessExitStatus=0 2
+Nice=10

@@ -1,3 +1,46 @@
+## 15:39 PT — box 2 of 0.3.80 started: row 273, the seven-day soak is now recording real numbers (day 1 of 7)
+
+**A0 (CI):** HEAD `c1c2a457` is docs-only ⇒ `GET /actions/runs?head_sha=c1c2a45…` **total_count: 0**, exactly what
+`paths-ignore` promises. The two code SHAs behind it: `ce61dd2f` (row 277 fix) ⇒ run `45720343974` **pending**,
+`63d81c72` ⇒ run `45717607703` **in_progress**. Not acted on, not waited on — nothing red to fix.
+
+**Box started (§3b box 2) — 273, seven-day soak against `docs/STABILITY-GATE.md`.** This box cannot be ticked in
+one run by construction, so it is handled the way §0c says to handle long steps: start it, write the handle, end.
+
+- **Handle:** `docs/soak-2026-11-25.md`, day 1 recorded 23:39Z. Box ticks on day 7 (**2026-12-02**) when the file
+  holds seven consecutive days plus a verdict per gate test. A missed day restarts the soak; nothing is back-filled.
+- **Collector:** `scripts/soak-record.py` (what it measures: height + effective interval since the previous record,
+  authored-timestamp p50/p95 over the last 200 blocks, peers now and across 24 h of journal, imports and the longest
+  import gap, systemd starts/stops, update outcome, AP jobs, every `Reason:`/ban line, the three gate-6 strings, and
+  box 1's own peers/height over SSH). Wrapper `scripts/soak-record-daily.sh`, user timer `gpn-soak-record.timer`
+  (daily 09:07 ±5 min) — **verified by running it**: `systemctl --user start gpn-soak-record.service` ⇒
+  `Result=success ExecMainStatus=0`, which wrote the day section. The loop also runs the recorder each pass, so a
+  day normally has several readings and the last wins (idempotent by `splice_day`).
+- **Day-1 numbers (this host):** height **364401**; imports **3,785** in 24 h with the longest import gap **144 s**
+  ending 11:47Z; peers **3** now, journal over 11,505 idle lines min **1** / max 3 and **0 lines at 0 peers**;
+  `Reason:`/ban lines **0**; gate 6 `unfunded` / `Incompatible pruning modes` / `update declined` all **0**;
+  AP `/jobs` **229 succeeded of 256 attempted**; 4 systemd starts/stops (deploys, not crashes — `NRestarts=0`);
+  cadence p50 **11.38 s**, p95 **42.99 s**. Box 1: `peers=2 syncing=False height=364402`.
+- **Drift discipline:** p50 11.38 s is *faster* than the 13.4 s reference, so it is recorded as the number it is —
+  not as an improvement — and the 43 s p95 is named as the mining tail we see in every 200-block window. Drift is a
+  day-over-day move and will be called drift.
+
+**Two bugs in my own collector, found by using it:**
+1. `Timestamp::Now` was decoded **big-endian**, printing `9.0e18` (a year-2256 timestamp). Now
+   `ts_from_storage_hex()` decodes SCALE u64 LE; entry-1 value `0x7d631215a2010000` ⇒ `1795649856381` =
+   2026-11-25T23:37:36Z, matching the node's own clock.
+2. The box-1 probe looked for `scripts/box1.sh` in the repo, where it does not exist — it printed
+   "unreachable" for a machine that was up. Now `~/.openclaw/workspace/scripts/box1.sh` is a candidate, and an
+   unreachable box is recorded with its exit code rather than silently omitted.
+`scripts/tests/test-soak-record.py` → **21 checks passed, 0 failed** (LE decode, xxh64 reference vectors, storage
+key shape, day-splice idempotency, day indexing).
+
+**Not ticked, and why:** the box's own "done when" is seven consecutive days. Ticking it today would be the
+"looks finished" failure the whole checklist exists to prevent.
+
+**Next run:** §3b box 3 (274, per-node telemetry JSON) — and re-run the recorder first so day 2 starts with a fresh
+reading.
+
 ## 15:2x PT — box 1 of 0.3.80 ticked: row 277, an aborted `release-cut` no longer leaves the repo locked
 
 **A0 (CI):** HEAD `63d81c72` (`release(0.3.80): open the batch …`) ⇒ run `45717607703` `in_progress`, not acted

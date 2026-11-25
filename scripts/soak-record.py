@@ -1,0 +1,421 @@
+#!/usr/bin/env python3
+"""Record one day of soak numbers for row 273 (docs/STABILITY-GATE.md).
+
+Writes/replaces today's section in `docs/soak-<start-date>.md` with numbers a
+stranger could re-run:
+
+  * height, and the *effective* block interval since the previous record
+    (height delta / elapsed time) -- this is the only number that catches a stall
+    nobody was watching
+  * authored-timestamp p50/p95 over the last --window blocks (cadence detail)
+  * peers / isSyncing now, peers seen across the last 24 h of the journal
+  * restart count and start times for gpn-fleet.service in the last 24 h
+  * update outcomes for the day (update.log / last-exit.json)
+  * jobs attempted/succeeded from ~/.gpn/assignments.json + AP :8092/jobs
+  * every `Reason:` / ban line the journal emitted in the window
+  * box 1 (the second soak machine) via scripts/box1.sh, recorded as
+    "unreachable (<exit code>)" rather than silently omitted
+
+Idempotent per date: re-running replaces that date's section, keeping the
+latest full-window numbers. State for the effective-interval calc lives in
+~/.gpn/soak-state.json.
+
+Usage: scripts/soak-record.py [--days 7] [--window 200] [--root <repo>]
+Exit codes: 0 recorded, 2 nothing to record (node unreachable).
+"""
+import argparse
+import json
+import os
+import re
+import statistics
+import struct
+import subprocess
+import sys
+import time
+import urllib.request
+from datetime import datetime, timedelta, timezone
+
+RPC = "http://127.0.0.1:9944"
+STATE = os.path.expanduser("~/.gpn/soak-state.json")
+M64 = 0xFFFFFFFFFFFFFFFF
+
+
+# ---------- substrate helpers (same xxh64 as gpn-state-query.py) ----------
+def _xxh64(data, seed=0):
+    P1 = 0x9E3779B185EBCA87; P2 = 0xC2B2AE3D27D4EB4F; P3 = 0x165667B19E3779F9
+    P4 = 0x85EBCA77C2B2AE63; P5 = 0x27D4EB2F165667C5; M = M64
+
+    def rotl(x, r):
+        return ((x << r) | (x >> (64 - r))) & M
+    n = len(data); i = 0
+    if n >= 32:
+        v1 = (seed + P1 + P2) & M; v2 = (seed + P2) & M; v3 = seed & M; v4 = (seed - P1) & M
+        while i + 32 <= n:
+            v1 = (rotl((v1 + int.from_bytes(data[i:i + 8], 'little') * P2) & M, 31) * P1) & M
+            v2 = (rotl((v2 + int.from_bytes(data[i + 8:i + 16], 'little') * P2) & M, 31) * P1) & M
+            v3 = (rotl((v3 + int.from_bytes(data[i + 16:i + 24], 'little') * P2) & M, 31) * P1) & M
+            v4 = (rotl((v4 + int.from_bytes(data[i + 24:i + 32], 'little') * P2) & M, 31) * P1) & M
+            i += 32
+        h = (rotl(v1, 1) + rotl(v2, 7) + rotl(v3, 12) + rotl(v4, 18)) & M
+        for v in (v1, v2, v3, v4):
+            v = (rotl((v * P2) & M, 31) * P1) & M
+            h = ((h ^ v) * P1 + P4) & M
+    else:
+        h = (seed + P5) & M
+    h = (h + n) & M
+    while i + 8 <= n:
+        h = (rotl(h ^ ((rotl((int.from_bytes(data[i:i + 8], 'little') * P2) & M, 31) * P1) & M), 27) * P1 + P4) & M
+        i += 8
+    if i + 4 <= n:
+        h = (rotl(h ^ ((int.from_bytes(data[i:i + 4], 'little') * P1) & M), 23) * P2 + P3) & M
+        i += 4
+    while i < n:
+        h = (rotl(h ^ (data[i] * P5 & M), 11) * P1) & M
+        i += 1
+    h ^= h >> 33; h = (h * P2) & M
+    h ^= h >> 29; h = (h * P3) & M
+    h ^= h >> 32
+    return h
+
+
+def twox128(d):
+    return struct.pack('<Q', _xxh64(d, 0)) + struct.pack('<Q', _xxh64(d, 1))
+
+
+TS_KEY = (twox128(b"Timestamp") + twox128(b"Now")).hex()
+
+
+def q(method, params=None, timeout=10):
+    req = urllib.request.Request(
+        RPC, data=json.dumps({"jsonrpc": "2.0", "id": 1, "method": method,
+                              "params": params or []}).encode(),
+        headers={"Content-Type": "application/json"})
+    return json.load(urllib.request.urlopen(req, timeout=timeout)).get("result")
+
+
+def rpc_with_retry(method, params=None, tries=3):
+    last = None
+    for _ in range(tries):
+        try:
+            return q(method, params)
+        except Exception as e:  # noqa: BLE001
+            last = e
+            time.sleep(2)
+    raise last
+
+
+def ts_from_storage_hex(r):
+    """Decode a `state_getStorage` value for `Timestamp::Now`: SCALE u64 ms, LE.
+
+    A big-endian decode here reads 1795649856381 as 9.0e18, i.e. a timestamp in the
+    year 2256 — that mistake shipped in the first version of this file and is what
+    this function exists to keep testable.
+    """
+    if not r:
+        return None
+    raw = bytes.fromhex(r[2:] if r.startswith("0x") else r)
+    return int.from_bytes(raw[:8], "little")
+
+
+def ts_at(block_hash):
+    return ts_from_storage_hex(q("state_getStorage", [TS_KEY, block_hash]))
+
+
+def splice_day(existing_text, header, section):
+    """Keep the document header, replace any earlier section for the same day.
+
+    Idempotent by construction: the recorder runs several times a day (timer + every
+    loop pass) and must not stack duplicate day sections.
+    """
+    head = ""
+    if existing_text and "\n### Day " in existing_text:
+        head = existing_text.split("\n### Day ", 1)[0].rstrip("\n")
+    elif existing_text:
+        head = existing_text.rstrip("\n")
+    if not head.strip():
+        head = header.rstrip("\n")
+    return head + "\n\n" + section.rstrip("\n") + "\n"
+
+
+def authored_intervals(window):
+    """Intervals (s) between authored timestamps of the last `window` blocks."""
+    best = int(rpc_with_retry("chain_getHeader")["number"], 16)
+    start = max(1, best - window)
+    stamps = []
+    hashes = {}
+    for n in range(start, best + 1):
+        h = q("chain_getBlockHash", [n])
+        if not h:
+            continue
+        hashes[n] = h
+    for n, h in hashes.items():
+        t = ts_at(h)
+        if t:
+            stamps.append(t)
+    stamps.sort()
+    return best, [(b - a) / 1000.0 for a, b in zip(stamps, stamps[1:])]
+
+
+def journal(since, grep=None, unit="gpn-fleet.service", fmt="cat"):
+    cmd = ["journalctl", "--user", "-u", unit, "--since", since, "-o", fmt, "--no-pager"]
+    try:
+        out = subprocess.run(cmd, capture_output=True, text=True, timeout=60).stdout
+    except Exception:  # noqa: BLE001
+        return ""
+    if grep:
+        return "\n".join(l for l in out.splitlines() if re.search(grep, l))
+    return out
+
+
+def systemd_props(unit="gpn-fleet.service"):
+    try:
+        raw = subprocess.run(["systemctl", "--user", "show", unit,
+                              "-p", "NRestarts", "-p", "ActiveEnterTimestamp",
+                              "-p", "SubState", "-p", "ExecMainStartTimestamp"],
+                             capture_output=True, text=True, timeout=30).stdout
+    except Exception:  # noqa: BLE001
+        return {}
+    d = {}
+    for line in raw.splitlines():
+        if "=" in line:
+            k, v = line.split("=", 1)
+            d[k] = v
+    return d
+
+
+def import_gaps(since):
+    """(imported blocks, longest gap between imports in seconds, when) from the
+    journal over `since`. Full-window coverage, independent of any sampling."""
+    out = journal(since, grep=r"Imported #", fmt="short-iso")
+    stamps = []
+    for line in out.splitlines():
+        m = re.match(r"^([0-9-]+)[T ]([0-9:]{8})", line)
+        if not m:
+            continue
+        try:
+            stamps.append(datetime.strptime(f"{m.group(1)} {m.group(2)}",
+                                            "%Y-%m-%d %H:%M:%S").timestamp())
+        except ValueError:
+            continue
+    stamps.sort()
+    if len(stamps) < 2:
+        return len(stamps), None, None
+    gaps = [(b - a, b) for a, b in zip(stamps, stamps[1:])]
+    worst, when = max(gaps)
+    return len(stamps), worst, datetime.fromtimestamp(when, timezone.utc).strftime("%H:%M UTC")
+
+
+GATE6_PATTERNS = {
+    "unfunded": r"unfunded",
+    "Incompatible pruning modes": r"Incompatible pruning modes",
+    "update declined": r"update declined",
+}
+
+
+def gate6_counts(since):
+    """STABILITY-GATE test 6: no silent failures. Counts the three named strings."""
+    out = {}
+    for label, pat in GATE6_PATTERNS.items():
+        out[label] = len([l for l in journal(since, grep=pat).splitlines() if l.strip()])
+    return out
+
+
+def jobs_numbers():
+    """attempted/succeeded from the AP job API and the local assignment store."""
+    attempted = succeeded = failed = None
+    try:
+        req = urllib.request.Request("http://127.0.0.1:8092/jobs")
+        data = json.load(urllib.request.urlopen(req, timeout=15))
+        rows = data if isinstance(data, list) else data.get("jobs", [])
+        attempted = len(rows)
+        succeeded = sum(1 for r in rows if str(r.get("state", "")).lower() in
+                        ("completed", "complete", "settled", "succeeded", "done"))
+        failed = sum(1 for r in rows if str(r.get("state", "")).lower() in
+                     ("failed", "expired", "rejected"))
+    except Exception:  # noqa: BLE001
+        pass
+    return attempted, succeeded, failed
+
+
+def update_outcome():
+    bits = []
+    for p in ("~/.gpn/update/update.log", "~/.gpn/last-exit.json"):
+        path = os.path.expanduser(p)
+        if os.path.exists(path):
+            try:
+                st = os.stat(path)
+                age_h = (time.time() - st.st_mtime) / 3600.0
+                if age_h <= 24:
+                    tail = subprocess.run(["tail", "-3", path], capture_output=True,
+                                          text=True, timeout=15).stdout.strip().replace("\n", " | ")
+                    bits.append(f"`{os.path.basename(path)}` ({age_h:.1f}h old): {tail[:300]}")
+            except Exception as e:  # noqa: BLE001
+                bits.append(f"{p}: unreadable ({e})")
+    return bits or ["no update activity in the last 24 h"]
+
+
+def box1_snapshot(root):
+    """Second soak machine. A failure is recorded, never omitted."""
+    candidates = [os.path.join(root, "scripts", "box1.sh"),
+                  os.path.expanduser("~/.openclaw/workspace/scripts/box1.sh")]
+    script = next((c for c in candidates if os.path.exists(c)), None)
+    if not script:
+        return "unreachable (no box1.sh at " + " or ".join(candidates) + ")"
+    ps = ("$h=(Invoke-RestMethod -Uri http://127.0.0.1:9944 -Method Post "
+          "-ContentType 'application/json' "
+          "-Body '{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"system_health\",\"params\":[]}').result;"
+          "$b=(Invoke-RestMethod -Uri http://127.0.0.1:9944 -Method Post "
+          "-ContentType 'application/json' "
+          "-Body '{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"chain_getHeader\",\"params\":[]}').result.number;"
+          "\"peers=$($h.peers) syncing=$($h.isSyncing) height=$([Convert]::ToInt64($b,16))\"")
+    try:
+        r = subprocess.run([script, ps], capture_output=True, text=True, timeout=180)
+    except subprocess.TimeoutExpired:
+        return "unreachable (timeout 180s)"
+    out = (r.stdout or "").strip().splitlines()
+    out = [l for l in out if l.strip()]
+    if r.returncode != 0 and not out:
+        return f"unreachable (box1.sh exit {r.returncode})"
+    return out[-1] if out else f"no output (exit {r.returncode})"
+
+
+def load_state():
+    try:
+        with open(STATE) as f:
+            return json.load(f)
+    except Exception:  # noqa: BLE001
+        return {}
+
+
+def save_state(st):
+    os.makedirs(os.path.dirname(STATE), exist_ok=True)
+    tmp = STATE + ".tmp"
+    with open(tmp, "w") as f:
+        json.dump(st, f, indent=1)
+    os.replace(tmp, STATE)
+
+
+def day_index(start_date, today):
+    return (today - start_date).days + 1
+
+
+def main():
+    global RPC
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--days", type=int, default=7)
+    ap.add_argument("--window", type=int, default=200)
+    ap.add_argument("--root", default=os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    ap.add_argument("--rpc", default=RPC)
+    args = ap.parse_args()
+    RPC = args.rpc
+
+    now = datetime.now(timezone.utc)
+    st = load_state()
+    if "start_date" not in st:
+        st["start_date"] = now.strftime("%Y-%m-%d")
+    start = datetime.strptime(st["start_date"], "%Y-%m-%d").replace(tzinfo=timezone.utc)
+    doc = os.path.join(args.root, "docs", f"soak-{st['start_date']}.md")
+
+    try:
+        health = rpc_with_retry("system_health")
+    except Exception as e:  # noqa: BLE001
+        print(f"node unreachable: {e}", file=sys.stderr)
+        return 2
+
+    best, intervals = authored_intervals(args.window)
+    p50 = statistics.median(intervals) if intervals else float("nan")
+    p95 = (statistics.quantiles(intervals, n=20)[18] if len(intervals) >= 20
+           else (max(intervals) if intervals else float("nan")))
+
+    # effective interval since the previous record = the stall catcher
+    prev = st.get("last") or {}
+    eff = None
+    if prev.get("height") and prev.get("ts") and best > prev["height"]:
+        dt = now.timestamp() - prev["ts"]
+        if dt > 60:
+            eff = (best - prev["height"]) / dt
+
+    since = (now - timedelta(hours=24)).strftime("%Y-%m-%d %H:%M:%S")
+    bans = journal(since, grep=r"Reason:|banned|ban ")
+    starts = journal(since, grep=r"^(Started|Stopped) ")
+    n_start = sum(1 for l in starts.splitlines() if l.startswith("Started "))
+    n_stop = sum(1 for l in starts.splitlines() if l.startswith("Stopped "))
+    n_imports, worst_gap, gap_at = import_gaps(since)
+    g6 = gate6_counts(since)
+    props = systemd_props()
+    att, succ, fail = jobs_numbers()
+    box1 = box1_snapshot(args.root)
+    day = day_index(start, now)
+
+    peers_lines = journal(since, grep=r"peers")
+    peer_nums = [int(m.group(1)) for m in
+                 (re.search(r"\((\d+) peers\)", l) for l in peers_lines.splitlines()) if m]
+    zero_peer = sum(1 for n in peer_nums if n == 0)
+
+    lines = []
+    lines.append(f"### Day {day} — {now.strftime('%Y-%m-%d %H:%M UTC')}")
+    lines.append("")
+    lines.append(f"- height: **{best}**")
+    if eff is not None:
+        lines.append(f"- effective block interval since previous record "
+                     f"({best - prev['height']} blocks in {(now.timestamp()-prev['ts'])/3600:.2f} h): "
+                     f"**{eff:.2f} s**"
+                     + ("" if eff < 15 else "  ⚠️ slower than the 13.4 s baseline — name this as drift"))
+    else:
+        lines.append("- effective block interval: n/a (first record of this soak)")
+    lines.append(f"- authored interval over the last {len(intervals)} blocks: "
+                 f"p50 **{p50:.2f} s**, p95 **{p95:.2f} s**")
+    lines.append(f"- peers now: **{health.get('peers')}**, isSyncing={health.get('isSyncing')}"
+                 + (f"; journal 24 h: {len(peer_nums)} idle lines, min **{min(peer_nums)}** / "
+                    f"max {max(peer_nums)}, lines at 0 peers: **{zero_peer}**"
+                    if peer_nums else "; no peer log lines in 24 h"))
+    if n_imports:
+        lines.append(f"- imports in 24 h: **{n_imports}** blocks, longest gap between imports "
+                     f"**{worst_gap:.0f} s** (ending {gap_at})")
+    lines.append(f"- gpn-fleet.service: NRestarts={props.get('NRestarts','?')}, "
+                 f"state={props.get('SubState','?')}, active since {props.get('ActiveEnterTimestamp','?')}, "
+                 f"**{n_start} systemd starts / {n_stop} stops in 24 h** "
+                 f"(manual or deploy restarts, not crashes — NRestarts counts only failed units)")
+    lines.append(f"- jobs: attempted={att}, succeeded={succ}, failed={fail} (AP :8092/jobs)")
+    lines.append("- update: " + "; ".join(update_outcome()))
+    lines.append(f"- `Reason:`/ban lines in 24 h: **{len([l for l in bans.splitlines() if l.strip()])}**")
+    lines.append("- gate 6 (silent failures) in 24 h: " + ", ".join(
+        f"`{k}` **{v}**" for k, v in g6.items()))
+    if bans.strip():
+        for l in bans.strip().splitlines()[:5]:
+            lines.append(f"  - `{l.strip()[:200]}`")
+    lines.append(f"- box 1: {box1}")
+    lines.append("")
+    section = "\n".join(lines)
+
+    header = (f"# Soak {st['start_date']} — {args.days} days, row 273\n\n"
+              "Machine A: this host (`openclawassist`, node + AP + providers).\n"
+              "Machine B: box 1 (Windows, reachable over SSH; recorded per day, never omitted).\n\n"
+              "Protocol: `scripts/soak-record.py` is run at least once per day and appends that day's\n"
+              "numbers below (idempotent per date — a second run replaces the day's section with the\n"
+              "latest full-window numbers). p50/p95 are authored-timestamp intervals over the last 200\n"
+              "blocks; the effective interval is height delta over elapsed wall time between records and\n"
+              "is the only number that catches a stall nobody was watching. Verdicts per\n"
+              "`docs/STABILITY-GATE.md` test are written on the final day.\n\n"
+              "Baseline (day 1, this host): block interval p50 13.4 s is the reference cadence; a move\n"
+              "to 18 s is drift and must be named as drift, not reported as healthy.\n\n")
+
+    existing = ""
+    if os.path.exists(doc):
+        existing = open(doc).read()
+    body = splice_day(existing, header, section)
+    tmp = doc + ".tmp"
+    with open(tmp, "w") as f:
+        f.write(body)
+    os.replace(tmp, doc)
+
+    st["last"] = {"height": best, "ts": now.timestamp(), "peers": health.get("peers")}
+    st.setdefault("days", {})[now.strftime("%Y-%m-%d")] = best
+    save_state(st)
+
+    print(f"recorded day {day} at height {best}: {doc}")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

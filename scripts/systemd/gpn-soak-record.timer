@@ -1,0 +1,12 @@
+[Unit]
+Description=Record one day of the GPN seven-day soak (row 273) every day at 09:07
+
+[Timer]
+OnCalendar=*-*-* 09:07:00
+RandomizedDelaySec=300
+AccuracySec=1min
+Persistent=true
+Unit=gpn-soak-record.service
+
+[Install]
+WantedBy=timers.target
