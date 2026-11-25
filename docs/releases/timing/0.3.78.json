@@ -1,7 +1,7 @@
 {
   "version": "0.3.78",
   "start": "2026-11-25T06:04:11-08:00",
-  "total_s": 11648,
+  "total_s": 12019,
   "rows": [
     {
       "box": "`scripts/bump-version.py patch`",
@@ -298,6 +298,134 @@
       "since_start_s": 11648,
       "step_s": 0,
       "sha": "c721229dc318f57ed5086a3e44b88c0c63a51d00"
+    },
+    {
+      "box": "The finished checklist is in `docs/releases/archive/<version>.md",
+      "section": "0b. Every tick carries notes; every finished checklist is filed",
+      "ticked_at": "2026-11-25T09:24:30-08:00",
+      "since_start_s": 12019,
+      "step_s": 371,
+      "sha": "282d7384ac2ee497d53c118ce0779e604057f739"
+    },
+    {
+      "box": "`docs/releases/INDEX.md` has a row for this version, with the it",
+      "section": "0b. Every tick carries notes; every finished checklist is filed",
+      "ticked_at": "2026-11-25T09:24:30-08:00",
+      "since_start_s": 12019,
+      "step_s": 0,
+      "sha": "282d7384ac2ee497d53c118ce0779e604057f739"
+    },
+    {
+      "box": "Every step failure names a cause a stranger can act on",
+      "section": "0e. A stranger must be able to join and stay joined (owner rule, 2026-11-23)",
+      "ticked_at": "2026-11-25T09:24:30-08:00",
+      "since_start_s": 12019,
+      "step_s": 0,
+      "sha": "282d7384ac2ee497d53c118ce0779e604057f739"
+    },
+    {
+      "box": "If the lifecycle cannot be run this release, say so in the check",
+      "section": "0e. A stranger must be able to join and stay joined (owner rule, 2026-11-23)",
+      "ticked_at": "2026-11-25T09:24:30-08:00",
+      "since_start_s": 12019,
+      "step_s": 0,
+      "sha": "282d7384ac2ee497d53c118ce0779e604057f739"
+    },
+    {
+      "box": "Name the behaviour in one sentence, and the machine-observable t",
+      "section": "1. Test first (before any code is written)",
+      "ticked_at": "2026-11-25T09:24:30-08:00",
+      "since_start_s": 12019,
+      "step_s": 0,
+      "sha": "282d7384ac2ee497d53c118ce0779e604057f739"
+    },
+    {
+      "box": "Write the test that fails now. Paste the failing output. No fix ",
+      "section": "1. Test first (before any code is written)",
+      "ticked_at": "2026-11-25T09:24:30-08:00",
+      "since_start_s": 12019,
+      "step_s": 0,
+      "sha": "282d7384ac2ee497d53c118ce0779e604057f739"
+    },
+    {
+      "box": "If the change cannot be tested, stop and tell Jeremy",
+      "section": "1. Test first (before any code is written)",
+      "ticked_at": "2026-11-25T09:24:30-08:00",
+      "since_start_s": 12019,
+      "step_s": 0,
+      "sha": "282d7384ac2ee497d53c118ce0779e604057f739"
+    },
+    {
+      "box": "The test passes.",
+      "section": "2. Implement",
+      "ticked_at": "2026-11-25T09:24:30-08:00",
+      "since_start_s": 12019,
+      "step_s": 0,
+      "sha": "282d7384ac2ee497d53c118ce0779e604057f739"
+    },
+    {
+      "box": "`cargo fmt --check` clean; clippy with CI's `-D warnings` clean.",
+      "section": "2. Implement",
+      "ticked_at": "2026-11-25T09:24:30-08:00",
+      "since_start_s": 12019,
+      "step_s": 0,
+      "sha": "282d7384ac2ee497d53c118ce0779e604057f739"
+    },
+    {
+      "box": "Full affected suites run, not just the new test.",
+      "section": "2. Implement",
+      "ticked_at": "2026-11-25T09:24:30-08:00",
+      "since_start_s": 12019,
+      "step_s": 0,
+      "sha": "282d7384ac2ee497d53c118ce0779e604057f739"
+    },
+    {
+      "box": "A call site exists for anything new",
+      "section": "2. Implement",
+      "ticked_at": "2026-11-25T09:24:30-08:00",
+      "since_start_s": 12019,
+      "step_s": 0,
+      "sha": "282d7384ac2ee497d53c118ce0779e604057f739"
+    },
+    {
+      "box": "Nothing new is off by default behind a flag nobody sets.",
+      "section": "2. Implement",
+      "ticked_at": "2026-11-25T09:24:30-08:00",
+      "since_start_s": 12019,
+      "step_s": 0,
+      "sha": "282d7384ac2ee497d53c118ce0779e604057f739"
+    },
+    {
+      "box": "The change is in the tree you are about to release:",
+      "section": "2. Implement",
+      "ticked_at": "2026-11-25T09:24:30-08:00",
+      "since_start_s": 12019,
+      "step_s": 0,
+      "sha": "282d7384ac2ee497d53c118ce0779e604057f739"
+    },
+    {
+      "box": "Every capability added in this bundle is discoverable from gpnco",
+      "section": "7b. Every surface that names a version must be updated",
+      "ticked_at": "2026-11-25T09:24:30-08:00",
+      "since_start_s": 12019,
+      "step_s": 0,
+      "sha": "282d7384ac2ee497d53c118ce0779e604057f739"
+    },
+    {
+      "box": "`scripts/release-timing.py <version> --json docs/releases/timing",
+      "section": "10b. Record how long the steps took",
+      "ticked_at": "2026-11-25T09:24:30-08:00",
+      "since_start_s": 12019,
+      "step_s": 0,
+      "sha": "282d7384ac2ee497d53c118ce0779e604057f739"
+    },
+    {
+      "box": "Name the slowest step and say what would shorten it. A step that",
+      "section": "10b. Record how long the steps took",
+      "ticked_at": "2026-11-25T09:24:30-08:00",
+      "since_start_s": 12019,
+      "step_s": 0,
+      "sha": "282d7384ac2ee497d53c118ce0779e604057f739"
     }
   ]
 }
