@@ -25,7 +25,11 @@ cache="${GPN_CI_CACHE:-$HOME/.ci-cache}"
 # was 88 G while the worktree added another 66 G (`gpn-agent/target` alone was
 # 48 G, 44 G of it debug) and the root FS still hit the 10 % floor. Space-separated
 # list of checkout roots to scan for `<crate>/target/debug` (item #184).
-target_roots="${GPN_TARGET_ROOTS-$HOME/.openclaw/workspace/projectmanager07}"
+# 2026-11-25: the working clone is ~/gpn-loop (projectmanager07 was deleted); this
+# default still named the dead checkout, so the checkout-tree scan silently found
+# nothing to measure. Note the 2026-11-22 lesson above still applies: this script
+# is the guarded replacement, not the daily `find -delete`.
+target_roots="${GPN_TARGET_ROOTS-$HOME/gpn-loop}"
 
 # Measure the filesystem that actually holds the trees; the cache may be absent
 # on a host that only has checkouts.

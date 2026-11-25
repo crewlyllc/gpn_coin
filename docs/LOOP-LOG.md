@@ -1,3 +1,45 @@
+## 05:2x+ PT — no IN-PROGRESS work, so the run fixed a live crash loop instead: four units still pointed into the deleted `projectmanager07`
+
+Every claim below is from a command run in this session (05:36–05:45 PT).
+
+- **A0**: `origin/main` reset to `d0ef175c` (`git reset --hard`).
+  `GET /actions/runs?head_sha=d0ef175cda954a59fc6a532b7e1e2b2abdaa84fe` ⇒ `total_count: 0` (docs-only
+  commit, `paths-ignore` correct). Nothing red, nothing waited on.
+- **Queue**: 0.3.77 is published, archived and filed; no row `IN-PROGRESS`; only `256 | NEW`
+  (AWAITING-OWNER, venue question). Nothing to bundle — an empty 0.3.78 would be wrong.
+- **Found: `gpn-oracle.service` had been crash-looping every 30 s for ~11 h** (restart counter 1343).
+  Cause in the log, not guessed: `Changing to the requested working directory failed: No such file or
+  directory` / `status=200/CHDIR` — the unit's `WorkingDirectory` and its values path both named
+  `~/.openclaw/workspace/projectmanager07`, which the 2026-11-24 owner decision deleted. The feed had
+  gone stale with it: `gpn_effective_feed` ⇒ `updated at block = 357711` while the head was 362,061
+  (~6 × the 600-block post interval). `gpn-cadence-gate` and `gpn-deploy-drift` already had `10-repo-path.conf`
+  drop-ins from 2026-11-24 — the migration was done for two units and missed the rest.
+- **Fixed the class, not the instance** — every `projectmanager07` path under `~/.config/systemd/user`:
+  - `gpn-oracle.service.d/10-repo-path.conf` — `WorkingDirectory=/home/jeremyg/gpn-loop` +
+    `ExecStart` re-pointed at `%h/gpn-loop/oracle_values.toml`. **Verified live:** `active (running)`,
+    `🔁 Operating profitability oracle … (signer 0xf25b901a…, values /home/jeremyg/gpn-loop/oracle_values.toml)`,
+    `✅ update_feed dispatched successfully (iteration #1)`, and `gpn_effective_feed` ⇒
+    `updated at block = 362061` == head. Stale since 357,711 → fresh at head.
+  - `gpn-prune-ci-cache.service.d/10-repo-path.conf` — `ExecStart` to `~/gpn-loop/scripts/prune-ci-cache.sh`;
+    the timer had already failed once for this (`status=203/EXEC` at 2026-11-25 00:15). Re-run by hand:
+    `[prune-ci-cache] disk at 84% used (16% free, at/above the 15% floor) — nothing to reclaim`, rc 0.
+  - `gpn-finetune.service.d/20-repo-path.conf` + `gpn-diffusion.service.d/z-repo-path.conf` —
+    `GPN_FINETUNE_SCRIPT`/`GPN_SERVEMODEL_SCRIPT`/`GPN_DIFFUSE_SCRIPT`/`GPN_AUDIO_SCRIPT` re-pointed at
+    `~/gpn-loop/gpn-agent/` (all four files exist there). The diffusion drop-in is named `z-` because
+    `audio.conf` sorts after any numeric name and would otherwise have re-broken the audio path —
+    measured that exact flip-flop before renaming. Both units restarted; `/proc/<pid>/environ` now shows
+    only `gpn-loop` paths and all five providers read `healthy: true` in `/providers`.
+  - Repo side: `scripts/prune-ci-cache.sh` defaulted `GPN_TARGET_ROOTS` to the dead checkout, so its
+    checkout-tree scan measured nothing; default is now `$HOME/gpn-loop`.
+- **New row 263 (NEW)**: image/video jobs are unroutable to this host's pull-only provider —
+  `POST :8092/v1/images/generations` ⇒ `gpn_unavailable … no channel render endpoint at <unresolved>`
+  although the diffusion provider's channel is up on `:8095` and it is healthy. `hub_ap::channel_endpoint`
+  derives the channel from `status_url`, and this fleet publishes `pull://…` (PushOnly box behind NAT), so
+  the LLM path works over the pull transport and image cannot work at all. Zero `[channel] job` lines in the
+  diffusion journal since 2026-11-01 — pre-existing, not caused by this run.
+- Files: `GPN-LIST.md` (row 263), `docs/LOOP-LOG.md`, `scripts/prune-ci-cache.sh` — one commit. No version
+  bump (nothing to bundle), no release in flight, no [TRIAGE] decision raised by this run.
+
 ## [TRIAGE] 05:2x PT box1 PowerShell was back at 05:17 (no reboot) — the tool that misread it is fixed; lifecycle venue needs a machine decision, the old "default D" premise is dead
 
 Every claim below is from a command run in this session (05:16–05:35 PT).
