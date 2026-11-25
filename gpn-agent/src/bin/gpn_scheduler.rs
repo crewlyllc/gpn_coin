@@ -1054,6 +1054,13 @@ struct Provider {
     /// challenge. `false` includes "never checked" and "unreadable": the
     /// honest default is unverified, never a bare fact.
     gpu_verified: bool,
+    /// Row 263: the dialable render channel this provider's **process**
+    /// published with its poll (`http://host:port/channel/job`), when it serves
+    /// one. A `pull://` box has no `status_url` to derive a channel from, which
+    /// is why image routing used to answer `no channel render endpoint at
+    /// <unresolved>` for a box whose channel was up. Probed before use, so a
+    /// stale or unreachable value is skipped, never trusted.
+    channel_url: Option<String>,
 }
 
 fn opt(args: &[String], flag: &str) -> Option<String> {
@@ -1301,6 +1308,12 @@ fn provider_from_caps(addr: &str, v: &Value, status_url: String, latency_ms: u64
         // `apply_gpu_fingerprints` stamps both fields.
         gpu_info_hash: None,
         gpu_verified: false,
+        channel_url: v
+            .get("channel_url")
+            .and_then(|x| x.as_str())
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(String::from),
     }
 }
 
@@ -1356,7 +1369,20 @@ fn aggregate_snapshots(snaps: &[Value]) -> Value {
     let mut declared = false;
     let mut capacity = 0u64;
     let mut active = 0u64;
+    // Row 263: the address's render channel, from whichever process on it
+    // published one. Taking only the NEWEST snapshot would let a chat-only
+    // process's poll erase it, so the union rule used for caps/models applies
+    // here too.
+    let mut channel_url: Option<String> = None;
     for s in snaps {
+        if channel_url.is_none() {
+            channel_url = s
+                .get("channel_url")
+                .and_then(|x| x.as_str())
+                .map(str::trim)
+                .filter(|u| !u.is_empty())
+                .map(String::from);
+        }
         for c in arr_of(s, "capabilities") {
             if !caps.iter().any(|h| h.eq_ignore_ascii_case(&c)) {
                 caps.push(c);
@@ -1390,6 +1416,9 @@ fn aggregate_snapshots(snaps: &[Value]) -> Value {
             o.insert("capacity".into(), json!(capacity));
         }
         o.insert("active".into(), json!(active));
+        if let Some(u) = channel_url {
+            o.insert("channel_url".into(), Value::String(u));
+        }
     }
     out
 }
@@ -1561,6 +1590,9 @@ fn apply_push_heartbeats(
                     // Item 253: stamped from the chain afterwards.
                     gpu_info_hash: None,
                     gpu_verified: false,
+                    // A signed heartbeat carries no channel URL: it is
+                    // published on the poll snapshot (row 263).
+                    channel_url: None,
                 });
             }
         }
@@ -1615,6 +1647,13 @@ fn merge_poll_snapshot(
     // first attributed to stays (`apply_referrals` is the authority).
     if merged.referral.is_none() {
         merged.referral = existing.referral.clone();
+    }
+    // Same rule for the render channel: a poll from a co-located process that
+    // serves no render channel must not erase the one this address published
+    // (row 263) — the next diffusion poll would restore it, but the gap would
+    // refuse an image request that should have routed.
+    if merged.channel_url.is_none() {
+        merged.channel_url = existing.channel_url.clone();
     }
     merged
 }
@@ -1751,6 +1790,8 @@ fn unreachable_placeholder(status_url: String) -> Provider {
         // Item 253: nothing answered, so nothing is known about its GPU.
         gpu_info_hash: None,
         gpu_verified: false,
+        // No answer means no channel URL either.
+        channel_url: None,
     }
 }
 
@@ -1772,6 +1813,8 @@ fn provider_json(p: &Provider) -> serde_json::Value {
     "tasks": p.task_matrix.tasks,
     "task_models": p.task_matrix.models,
     "task_limits": p.task_matrix.limits,
+    // Row 263: the render channel this process published, when it serves one.
+    "channel_url": p.channel_url,
     // An endpoint that never answered has no identity and no
     // capability claim: `capabilities` is empty and this is
     // false, so no consumer can read it as a provider (#147).
@@ -3761,6 +3804,19 @@ fn image_channel_endpoint(status_url: &str) -> Option<String> {
     let hostport = rest.split('/').next()?;
     let (host, _) = hostport.rsplit_once(':')?;
     Some(format!("{scheme}://{host}:{port}/channel/job"))
+}
+
+/// The render endpoint for one candidate.
+///
+/// Precedence: the URL its own process **published with its poll**
+/// (`channel_url`, row 263) — the only source that works for a `pull://` box,
+/// which has no `status_url` to derive anything from — then the `status_url`
+/// derivation above. Both are probed before a request is accepted, so a stale
+/// or unreachable published value costs one failed probe, never a dead render.
+fn image_endpoint_for(p: &Provider) -> Option<String> {
+    p.channel_url
+        .clone()
+        .or_else(|| image_channel_endpoint(&p.status_url))
 }
 
 /// Fetch one finished artifact from the provider and store it locally.
@@ -7417,7 +7473,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     let mut skipped: Vec<String> = Vec::new();
                     let mut routes: Vec<ImageRoute> = Vec::new();
                     for cand in candidates.iter().take(MAX_ROUTE_ATTEMPTS) {
-                        let endpoint = image_channel_endpoint(&cand.provider.status_url);
+                        let endpoint = image_endpoint_for(&cand.provider);
                         let reachable = endpoint
                             .as_deref()
                             .map(gpn_agent::hub_ap::probe_channel_endpoint)
@@ -7840,7 +7896,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     let mut skipped: Vec<String> = Vec::new();
                     let mut routes: Vec<ImageRoute> = Vec::new();
                     for cand in candidates.iter().take(MAX_ROUTE_ATTEMPTS) {
-                        let endpoint = image_channel_endpoint(&cand.provider.status_url);
+                        let endpoint = image_endpoint_for(&cand.provider);
                         let reachable = endpoint
                             .as_deref()
                             .map(gpn_agent::hub_ap::probe_channel_endpoint)
@@ -10304,7 +10360,56 @@ mod tests {
             git_sha: None,
             gpu_info_hash: None,
             gpu_verified: false,
+            channel_url: None,
         }
+    }
+
+    /// Row 263: a `pull://` provider has no `status_url` to derive a render
+    /// channel from, so the URL it published with its poll is the only one that
+    /// can route an image job to it.
+    #[test]
+    fn a_published_channel_url_routes_a_render_where_the_derivation_cannot() {
+        let mut p = prov("5Fc", "pull://5Fc", 5, "llama3.2:1b");
+        assert_eq!(
+            image_endpoint_for(&p),
+            None,
+            "a pull-only status_url must not invent an endpoint"
+        );
+        p.channel_url = Some("http://127.0.0.1:8095/channel/job".to_string());
+        assert_eq!(
+            image_endpoint_for(&p).as_deref(),
+            Some("http://127.0.0.1:8095/channel/job")
+        );
+        // The published URL wins over the derivation for a dialable box too:
+        // the diffusion channel is not one port above `/status`.
+        let mut dialable = prov("5En", "http://127.0.0.1:8093", 5, "llama3.2:1b");
+        dialable.channel_url = Some("http://10.0.0.5:8095/channel/job".to_string());
+        assert_eq!(
+            image_endpoint_for(&dialable).as_deref(),
+            Some("http://10.0.0.5:8095/channel/job")
+        );
+    }
+
+    /// Row 263: the channel URL must survive aggregation across co-located
+    /// processes on one address — taking only the newest snapshot lets a
+    /// chat-only poll erase it.
+    #[test]
+    fn aggregation_keeps_the_channel_url_from_any_process_on_the_address() {
+        let older = json!({"capabilities":["ImageGeneration"],"active":0,
+            "channel_url":"http://127.0.0.1:8095/channel/job"});
+        let newer = json!({"capabilities":["LLMInference"],"active":1});
+        // `snaps` is newest-first; the newest says nothing about a channel.
+        let merged = aggregate_snapshots(&[newer, older]);
+        assert_eq!(
+            merged["channel_url"],
+            json!("http://127.0.0.1:8095/channel/job")
+        );
+        // And it lands on the registry row the image router reads.
+        let p = provider_from_caps("5En", &merged, "pull://5En".into(), 5);
+        assert_eq!(
+            image_endpoint_for(&p).as_deref(),
+            Some("http://127.0.0.1:8095/channel/job")
+        );
     }
 
     #[test]

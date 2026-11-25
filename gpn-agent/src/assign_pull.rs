@@ -269,6 +269,18 @@ pub struct PullConfig {
     /// and the AP registers an identity it will route work to that can never
     /// claim it. Empty = no filtering (legacy behaviour).
     pub capabilities: Vec<String>,
+    /// This process's **dialable render channel** (`http://host:port/channel/job`),
+    /// when it serves one (row 263).
+    ///
+    /// The AP derives a diffusion channel from the provider's `status_url`
+    /// (`host:port+1`), which is impossible for a `pull://` box: it publishes no
+    /// inbound address at all, so the derivation yields nothing and the image
+    /// path refuses the request with `no channel render endpoint at
+    /// <unresolved>`. The provider does have a channel — it just never told
+    /// anyone. Publishing it here rides the poll the AP already trusts; the AP
+    /// probes it before use, so an unreachable one is skipped honestly rather
+    /// than black-holing a render.
+    pub channel_url: Option<String>,
 }
 
 impl PullConfig {
@@ -320,7 +332,15 @@ impl PullConfig {
                 .unwrap_or(DEFAULT_WAIT_MS),
             max_backoff: Duration::from_secs(30),
             capabilities: Vec::new(),
+            channel_url: None,
         })
+    }
+
+    /// Declare the render channel this process serves, so the AP can route an
+    /// image/video job to a box that publishes no dialable `status_url` (#263).
+    pub fn with_channel_url(mut self, url: Option<String>) -> Self {
+        self.channel_url = url.map(|u| u.trim().to_string()).filter(|u| !u.is_empty());
+        self
     }
 
     /// Declare what this process can actually serve, so its poll advertises the
@@ -362,6 +382,22 @@ impl PullConfig {
     pub fn poll_url(&self, since: u64, caps: &str, take: bool) -> String {
         format!("{}{}", self.ap_url, self.poll_target(since, caps, take))
     }
+}
+
+/// Attach this process's render-channel URL to the poll snapshot (row 263).
+///
+/// Separate and value-only so the rule is testable without a running AP: a
+/// missing snapshot stays missing (silence ≠ "serves nothing"), and a snapshot
+/// without a configured channel is returned unchanged.
+pub fn attach_channel_url(snap: Option<Value>, channel_url: Option<&str>) -> Option<Value> {
+    let mut v = snap?;
+    let Some(url) = channel_url.map(str::trim).filter(|u| !u.is_empty()) else {
+        return Some(v);
+    };
+    if let Some(o) = v.as_object_mut() {
+        o.insert("channel_url".into(), Value::String(url.to_string()));
+    }
+    Some(v)
 }
 
 /// Snapshot this provider's capabilities for the poll.
@@ -862,7 +898,10 @@ pub fn run_loop(cfg: PullConfig, provider_label: String) {
         // box that keeps polling would be handed jobs it cannot run. The gate is
         // evaluated here, on the node, and its verdict travels in the poll
         // (`take=0`), so the AP learns our decision without having to guess.
-        let snap = snapshot(&cfg.provider, &cfg.capabilities);
+        let snap = attach_channel_url(
+            snapshot(&cfg.provider, &cfg.capabilities),
+            cfg.channel_url.as_deref(),
+        );
         let caps = snap.as_ref().map(|v| v.to_string()).unwrap_or_default();
         let field = |v: &Value, k: &str| v.get(k).and_then(|x| x.as_u64()).unwrap_or(0);
         let (active, capacity) = snap
@@ -1311,6 +1350,7 @@ mod tests {
             wait_ms: 25000,
             max_backoff: Duration::from_secs(30),
             capabilities: Vec::new(),
+            channel_url: None,
         };
         assert_eq!(
             cfg.poll_url(42, "", true),
@@ -1348,6 +1388,25 @@ mod tests {
 
     /// A blocked provider's poll says so (`take=0`), and an unblocked one does
     /// not — the flag is what removes it from the AP's waiting queue.
+    /// Row 263: the render channel rides the poll, and a process without one
+    /// never blanks the snapshot it did not publish.
+    #[test]
+    fn a_configured_channel_url_rides_the_poll_snapshot() {
+        let snap = Some(serde_json::json!({"capabilities":["ImageGeneration"]}));
+        let with =
+            attach_channel_url(snap.clone(), Some("http://127.0.0.1:8095/channel/job")).unwrap();
+        assert_eq!(with["channel_url"], "http://127.0.0.1:8095/channel/job");
+        // No channel configured (or a blank one): the snapshot is unchanged.
+        for none in [None, Some(""), Some("   ")] {
+            let out = attach_channel_url(snap.clone(), none).unwrap();
+            assert!(out.get("channel_url").is_none());
+            assert_eq!(out["capabilities"], serde_json::json!(["ImageGeneration"]));
+        }
+        // An unreadable heartbeat stays unreadable: silence is not "serves
+        // nothing" and it is not "here is my channel" either.
+        assert!(attach_channel_url(None, Some("http://x/channel/job")).is_none());
+    }
+
     #[test]
     fn the_poll_carries_whether_this_box_will_take_work() {
         let cfg = PullConfig {
@@ -1357,6 +1416,7 @@ mod tests {
             wait_ms: 1000,
             max_backoff: Duration::from_secs(30),
             capabilities: Vec::new(),
+            channel_url: None,
         };
         assert!(!cfg.poll_target(7, "", true).contains("take=0"));
         assert!(cfg.poll_target(7, "", false).contains("&take=0"));

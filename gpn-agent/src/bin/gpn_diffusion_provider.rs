@@ -1191,6 +1191,13 @@ async fn run_main() -> Result<(), Box<dyn std::error::Error>> {
     let channel_listen = opt_str(&args, "--channel-listen")
         .or_else(|| std::env::var("GPN_CHANNEL_LISTEN").ok())
         .unwrap_or_else(|| "127.0.0.1:8095".to_string());
+    // Row 263: the URL this process serves its render channel on, published to
+    // the AP with the poll. A wildcard bind (`0.0.0.0:8095`) is not dialable as
+    // written, so it is not advertised — the AP would only probe a dead address.
+    let channel_url = (channel_listen != "off")
+        .then(|| channel_listen.trim())
+        .filter(|l| !l.is_empty() && !l.starts_with("0.0.0.0") && !l.starts_with("[::]"))
+        .map(|l| format!("http://{l}/channel/job"));
     if channel_listen != "off" {
         let signer = Arc::new(gpn_agent::chain::signer::Sr25519Signer::from_uri(
             &signer_uri,
@@ -1234,7 +1241,10 @@ async fn run_main() -> Result<(), Box<dyn std::error::Error>> {
         if audio_enabled() {
             caps.push("AudioGeneration");
         }
-        gpn_agent::assign_pull::spawn(cfg.with_capabilities(&caps));
+        gpn_agent::assign_pull::spawn(
+            cfg.with_capabilities(&caps)
+                .with_channel_url(channel_url.clone()),
+        );
     }
 
     // Item #59: the claimable-job scan and the reconcile sweep are chain-heavy

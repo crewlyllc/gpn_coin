@@ -721,10 +721,35 @@ pub fn parse_advertisement(v: &Value) -> TaskMatrix {
     }
     // A flat `models[]` is the legacy spelling: it applies to every word the box
     // advertises unless the object form already itemised that word.
+    //
+    // A model only belongs to the word its **family** serves, though: a host
+    // that advertises image generation reports one flat `models[]` of ollama
+    // names (`qwen2.5:7b`, `llama3.2:1b`, …), and inheriting that list verbatim
+    // made the box advertise `generate-image` *with those names*. The AP then
+    // refused the real request (`sd-turbo`: "provider does not list model"),
+    // so no image job could be routed to a box whose render channel was live
+    // (row 263). Models of a known family are inherited only by the word that
+    // family owns; an unknown family keeps the old everywhere-behaviour.
     let flat = str_arr(v, "models");
     if !flat.is_empty() {
         for w in &words {
-            models.entry(*w).or_insert_with(|| flat.clone());
+            if models.contains_key(*w) {
+                continue;
+            }
+            let owned: Vec<String> = flat
+                .iter()
+                .filter(|m| match jobkind::model_kind(m) {
+                    Some(kind) => word_for_kind(kind).map(|owner| owner == *w).unwrap_or(true),
+                    // Unclassifiable names are text models — that is exactly the
+                    // rule `jobkind::admit` applies when a caller names no job
+                    // type. The old inheritance sent every ollama name to every
+                    // word, which is how `generate-image` came to advertise
+                    // `qwen2.5:7b` and refuse the real `sd-turbo` request.
+                    None => *w == "chat",
+                })
+                .cloned()
+                .collect();
+            models.insert(*w, owned);
         }
     }
 
@@ -990,11 +1015,15 @@ mod tests {
             m.capabilities,
             vec!["LLMInference".to_string(), "ImageGeneration".to_string()]
         );
-        // The flat list applies to every advertised word, as before.
-        assert_eq!(
-            m.models_for("chat"),
-            &["qwen2.5:0.5b".to_string(), "sd-turbo".to_string()]
-        );
+        // The flat list applies to every advertised word — but only for the
+        // models that word can actually run (row 263): `sd-turbo` is an image
+        // model, so it is published under `generate-image` and not under `chat`.
+        // Inheriting it verbatim is what made every box advertise
+        // `generate-image` with ollama names and refuse the real `sd-turbo`
+        // request ("provider does not list model").
+        assert_eq!(m.models_for("chat"), &["qwen2.5:0.5b".to_string()]);
+        assert_eq!(m.models_for("generate-image"), &["sd-turbo".to_string()]);
+        assert_eq!(m.serves("generate-image", Some("sd-turbo")), Ok(()));
         assert_eq!(m.serves("chat", Some("qwen2.5:0.5b")), Ok(()));
         // The cross-word refusal works on a legacy advertisement too (this is the
         // check `POST /v1/jobs` makes when the caller pins a model): `sd-turbo`
@@ -1007,6 +1036,42 @@ mod tests {
             .capabilities
             .iter()
             .any(|c| c == "MLInference"));
+    }
+
+    #[test]
+    fn a_host_wide_ollama_list_does_not_become_the_image_models() {
+        // The live shape on 2026-11-25: the heartbeat advertises the host's
+        // ollama models flat and lists `generate-image` among its words because
+        // a diffusion provider runs here. Before row 263 the matrix inherited
+        // that flat list for `generate-image`, so the AP refused the real
+        // request (`sd-turbo`) with "provider does not list model" and every
+        // image request died at routing, even to a box whose render channel was
+        // up on :8095.
+        let v: Value = serde_json::from_str(
+            r#"{"capabilities":["LLMInference","ImageGeneration"],
+                "tasks":["chat","generate-image"],
+                "models":["qwen2.5:7b","llama3.2:1b","tuned-6542:latest"]}"#,
+        )
+        .unwrap();
+        let m = parse_advertisement(&v);
+        assert_eq!(m.serves("generate-image", Some("sd-turbo")), Ok(()));
+        assert!(
+            !m.models_for("generate-image")
+                .iter()
+                .any(|x| x.starts_with("qwen")),
+            "an ollama name must never be published as an image model: {:?}",
+            m.models_for("generate-image")
+        );
+        // Chat is unchanged: every ollama name (including ones of unknown
+        // family) is still listed for it.
+        assert_eq!(
+            m.models_for("chat"),
+            &[
+                "qwen2.5:7b".to_string(),
+                "llama3.2:1b".to_string(),
+                "tuned-6542:latest".to_string()
+            ]
+        );
     }
 
     #[test]
