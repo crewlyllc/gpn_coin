@@ -1,3 +1,21 @@
+## 23:16 PT 0.3.77 release builds still queued behind a CI run — asked once, not waited
+
+- **A0**: HEAD `0be55b01` is docs-only ⇒ `actions/runs?head_sha=0be55b01…` = **total_count: 0**
+  (expected under `paths-ignore`). No conclusion to act on.
+- **Release handles checked once** (the dispatch-and-end contract): run **45565065260** (linux
+  self-hosted) and **45565071726** (windows) both `status=queued`, `conclusion=null`, job
+  `started_at=2026-11-25T07:02:3xZ`, no runner assigned yet. Cause is contention, not a fault:
+  `GET /actions/runners` ⇒ `openclawassist online busy=true`, `DESKTOP-USBUADL online busy=true`,
+  both held by CI run **45556346482** (main, sha `61ef7e4a`, jobs `Build + unit tests (linux)` /
+  `(windows, self-hosted)` `in_progress` since `06:51–06:53Z`). Queued 14 min — under the 90-min
+  rule, so nothing was cancelled or re-dispatched.
+- **Not parked**: the earlier CI run on the code sha, **45564082202** (`b884bc54`), reads
+  `status=completed, conclusion=cancelled` — a superseded concurrency group, not a failure, so it
+  is not this run's box. Nothing red to diagnose.
+- **No box ticked this run.** §3b row 262's proof requires the published 0.3.77 binary (§10 box-3
+  `r194-fork-test.ps1 -Expect refuse`); §5 boxes are the two runs above, still queued. Checklist at
+  17/53, unchanged. Run ended immediately rather than polling.
+
 ## 23:5x PT **0.3.77 CUT AND DISPATCHED** — row 262 rebundled on the fix, both release builds queued
 
 - **A0**: HEAD `4f2209f2` is a docs-only commit ⇒ `actions/runs?head_sha=4f2209f2…` = **0 runs**
