@@ -1,3 +1,19 @@
+## 19:36 PT 0.3.76 §4 pushed; both release builds dispatched and run ended (no polling)
+
+- **A0**: `origin/main` @ `b8e7b5ff` (docs(loop-log)) ⇒ `head_sha=b8e7b5ff…` `total_count: 0`
+  (paths-ignore, expected). Code sha `66b1982d…` has one run, **45539696287**, `pending` — noted,
+  not awaited. Older CI 45529156811 (`5c74bf2a`) `in_progress` with its box-1 windows job actively
+  building (step 7 since 02:57Z) ⇒ left running, not cancelled: progress, not a stall.
+- **Boxes ticked: §4 Push (4/4)** — docs-only sha ⇒ 0 runs (`b8e7b5ff`), code sha ⇒ 1 run
+  (`66b1982d`); one batched docs commit for this run; CI observed once and not waited on.
+- **§0e**: item 256 (which machine carries the stranger-lifecycle GPU steps 3-6) is a genuine
+  owner decision (hardware / which box) and is still untriaged — marked **AWAITING-OWNER** in the
+  checklist rather than BLOCKED. [TRIAGE] carried forward, unchanged since 2026-11-24 00:3x PT.
+- **§5 dispatched, then this run ended**: `Linux binaries (self-hosted)` **45540823500** and
+  `Windows binaries` **45540831428**, both `ref: main` ⇒ `head_sha b8e7b5ff45b7`, at 19:33 PT.
+  Windows is `queued` behind the in-flight CI run on the single-slot box-1 runner. Next run reads
+  both conclusions from the API; nothing here waits inside them.
+
 ## 19:24 PT 0.3.76 item 262 FIXED + pushed — sticky deep-fork pause; CI 45539696287 noted, not waited on
 
 - **A0**: `origin/main` HEAD `f0030664` (docs-only) ⇒ `GET /actions/runs?head_sha=f0030664…`
