@@ -1,3 +1,27 @@
+## 19:24 PT 0.3.76 item 262 FIXED + pushed — sticky deep-fork pause; CI 45539696287 noted, not waited on
+
+- **A0**: `origin/main` HEAD `f0030664` (docs-only) ⇒ `GET /actions/runs?head_sha=f0030664…`
+  `total_count: 0` — expected under `ci.yml` paths-ignore. Nothing red.
+- **Box worked: §3b row 262** — "a deep-fork refusal stops pausing sealing as soon as the peer's
+  next claim carries no tip-measured work". Cause, in code: `pending[peer]=deep-fork` was dropped by
+  the next `Keep(WorkUnavailable)` claim (row 194's rule makes that claim carry no work), so
+  `gpn-forked` vanished ~23 s after the 17:26:15 PT refusal on box 3.
+- **Fix**: new `fork_choice::next_pending` (fork_choice.rs:336) holds `deep-fork` across an
+  unmeasured claim; releases it on a claim whose tip we hold, a measured not-heavier/peer-ahead
+  claim, or link close. Caller `service.rs:2813`; only `deep-fork` is sticky, every other reason
+  keeps the old per-claim behaviour.
+- **Evidence**: failing-first `error[E0425]: cannot find function next_pending` ×5 (rc=101);
+  after: `-- fork_choice` ⇒ **15 passed**, whole bin ⇒ **305 passed / 0 failed / 2 ignored**;
+  `cargo fmt --check` rc=0; clippy `-p gpn-node --bin gpn-node --all-targets` with CI's
+  CLIPPY_ALLOWS + `-D warnings` ⇒ rc=0. §3: `lockstep: 15 manifest(s) and 14 lockfile entr(ies) agree`.
+- **Pushed once** `66b1982d` (code + checklist ticks §1/§2/§3). CI run **45539696287** `pending`
+  for that sha — noted in §4, not waited on.
+- **Still unticked, by design**: §3b 262's live half (`scripts/r194-fork-test.ps1 -Expect refuse`,
+  7-minute run, needs a binary containing the fix) belongs to §10 on the published 0.3.76 build;
+  §3's seed-parity box is observed live in §7b/§8 (`seeds.json` is served by the site, not tracked).
+- **Next run**: read run 45539696287's conclusion (failure ⇒ read the job log), then §5 — dispatch
+  the two build legs and END THE RUN with their run ids in the boxes.
+
 ## 18:55 PT 0.3.76 BUNDLED — row 262 (deep-fork refusal holds sealing), checklist generated
 
 - **0.3.75 confirmed closed before bundling**: `releases.json` ⇒ `0.3.75` (published 2026-11-25T01:50:09Z),
