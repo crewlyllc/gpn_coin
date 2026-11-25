@@ -1,3 +1,32 @@
+## 20:25 PT 0.3.76 windows build VERIFIED (cosign) + §5/§7-attestation ticked; cut refused on in-flight CI
+
+- **A0**: `origin/main` HEAD `5cdb0d11` is docs-only ⇒ no ci.yml run by design (`total_count: 0`
+  on the full sha). Code SHA run **45539696287** (`66b1982da820`) `in_progress` since 03:23:55Z
+  (57+ min, linux lane steps 8-27 and windows `build node` actively running) — noted, not awaited,
+  not cancelled: it is making progress, and it is the run the cut gate needs.
+- **§5 windows box ticked**: run **45540831428** `completed success` 03:33:44Z→04:04:59Z on
+  `b8e7b5ff45b7`; `windows-latest` `gpn-windows.zip` 253,252,404 B updated 04:04:52Z,
+  `sha256:af3bd49e1837dd22600f762a6826879c593ee7d633415758ba191c42efe153e4`.
+- **§5 attestation boxes ticked (private-repo path)**: repo `visibility: private`; job steps in
+  order — 19 availability, 20 public attest **skipped**, 21 `Sign release artifact keyless` ok,
+  22 `Provenance gate - refuse to publish an unsigned artifact` ok, 23 publish ok ⇒ gate precedes
+  publish with no `if:`. Downloaded the published zip by asset id: sha256 == API digest, and
+  `cosign verify-blob --bundle gpn-windows.zip.bundle …` ⇒ **Verified OK**.
+- **§6 windows scan** (same boxes, extra evidence): `gpn-node.exe` in the published zip —
+  `gpn-forked` ×2, `reorg=` ×1, `work ours=` ×1, `0.3.76` ×9.
+- **§7 cut ATTEMPTED and correctly REFUSED** at 3/6: both assets downloaded and digest-matched,
+  version `0.3.76` read from the bundle stamp, then
+  `ABORT: no CI run for b8e7b5f; its nearest verified ancestor 66b1982 is 'in_progress:None'
+  -- refusing to sign an unverified build`. `b8e7b5f` is docs-only, so the gate wants the code
+  SHA's run to conclude. Handle written into the box; next run checks 45539696287's conclusion
+  and re-runs the cut.
+- **Bug found, not fixed yet**: the failed cut left `~/.gpn/release-in-flight` naming a dead pid —
+  `release-cut.sh`'s cleanup net greps for `release-cut pid $$` but the holder line was
+  `jeremyg@openclawassist pid 3149839` (written by `release-lock.sh take`). Released by hand.
+  Deliberately not patched now: a `scripts/**` push is a code push and would supersede the CI run
+  the cut depends on. Fix queued for right after 0.3.76 publishes.
+- No [TRIAGE] item this run.
+
 ## 19:56 PT 0.3.76 §5 linux build VERIFIED + §6 both boxes ticked (artifact downloaded, hashed, strings scanned)
 
 - **A0**: `origin/main` HEAD `6b2b99f6` is docs-only ⇒ `head_sha=6b2b99f6…` `total_count: 0`
