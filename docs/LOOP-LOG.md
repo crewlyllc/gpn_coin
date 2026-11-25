@@ -1,3 +1,40 @@
+## 17:37 PT §5+§6 done on the published zip, row 262 filed, release-cut dispatched [TRIAGE: item 256 still unanswered]
+
+- **A0 CI**: `origin/main` HEAD `c73d88382c03252712881ebd5c7c81264a56eefd` ⇒
+  `GET /actions/runs?head_sha=<full 40>` `total_count: 0` (docs-only commit, paths-ignore).
+  Windows release run `45509380702` (`c9e10f45`) ⇒ **`completed success` 00:58:34Z**.
+- **§5 windows box ticked**: `windows-latest` now holds `gpn-windows.zip` 253,253,710 B
+  `sha256:31661cfe…5037` + `gpn-windows.zip.bundle` 8,705 B `de618a2a…087d`, both 00:58:27Z —
+  the digest moved off the previous build, which is what the box asked for.
+- **§5 attestation + verifier ticked**: downloaded both assets from the release API (ids
+  789505099 / 789506690), disk sha256 == API `digest` for both, and `cosign verify-blob` with the
+  release-windows identity regexp + GitHub OIDC issuer ⇒ `Verified OK`, exit 0.
+- **§5 per-item Windows evidence — collected over SSH, on the published binaries.** `scp` of the
+  zip to box 3 (a different LAN), two `schtasks /Run` dispatches (a bare `Start-Process` child dies
+  when the Windows OpenSSH session closes — that is why the first two attempts left 0-byte logs),
+  harness expands the zip itself:
+  - shallow `A` vs `S3`, spec `raw241.json` ⇒ 15 × `import: fork block #148…#162` then
+    `Reorg on #167 … to #162, common ancestor #147`; ours ended #183 w=1,738,137,622 — **PASS**.
+  - deep `E1` vs `B2`+`BW`, spec `raw244.json` ⇒ `fork-choice: work ours=1030915 theirs=2364454
+    peer=12D3KooWM7h…; reorg=refused:deep-fork depth=633`, 0 fork imports, no adoption —
+    refusal **PASS**, but `PASS=False` overall because `gpn-forked` was gone by the verdict.
+- **Row 262 filed (NEW, next bundle)**: the marker lived ~23 s. Cause read from the code:
+  `service.rs:2808-2815` inserts `pending[peer]=deep-fork` and writes the marker, then the peer's
+  next claim has `work: None` (row 194's own rule) ⇒ `Keep(WorkUnavailable)` ⇒ `pending.remove` +
+  `refresh_forked_marker` deletes the file — so the pause ends while the peer is still 150+ blocks
+  taller. Fix owed: hold a `DeepFork` verdict until the peer's claim is on our chain, its tip is a
+  block we hold, or the link closes; `-Expect refuse` must reach `PASS=True`.
+- **§6 ticked (2/2)**: the zip's own `gpn-node.exe` carries `reorg=` 1, `work ours=` 1,
+  `gpn-forked` 2, `User-Agent: gpn-node/0.3.75`; `--version` was **executed on box 3** ⇒
+  `gpn-node.exe 0.3.75`, and the build job's step-17 gate printed `gpn_node 0.3.75 (spec 55, c9e10f4)`.
+- **§7 dispatched, not waited on**: `release-cut.sh --dry-run` signed a 0.3.75 manifest with the
+  verified digests (linux 348,738,542 `f7f0e6e9…`, windows 253,253,710 `31661cfe…`); the real cut
+  started 17:37:46 PT, log `/tmp/cut075.log`, last seen at step 4/6 mirroring to `crewlyllc`.
+  §7 box 1 (attestation gate) ticked with that evidence; box 2 carries the handle.
+- **Checklist state: 28/53** (0b filing 0/2, 0e 0/3, §7 1/4, §7b/§8/§9/§10/§10b all 0).
+- **Unchanged**: §0e stranger-lifecycle box 1 still `AWAITING-OWNER` on item 256 (which machine
+  carries steps 3-6; recommend A, GPU-P from box 1's 5070 Ti). Still untriaged since 2026-11-24 00:3x.
+
 ## 16:57 PT §5: windows build was queue-bound, not stalled — 3 step-level boxes ticked from the API; zip still pending [no triage]
 
 - **A0 CI**: `origin/main` HEAD `0aaafa9366fcc88388d6a5dc38ce5c6099a34e70` ⇒
