@@ -8,6 +8,28 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 versions are [Semantic Versioning](https://semver.org/spec/v2.0.0.html), with
 the GPN-specific meaning of each level documented in `docs/updates.md`.
 
+## [0.3.77] - 2026-11-24
+
+Bumped from 0.3.76 (`scripts/bump-version.py patch`). One defect, found by the second live run of the
+box-3 deep-fork test on the published 0.3.76 build: the refusal survived the peer's work-less claim,
+then stopped pausing sealing 56 s later when the same peer announced a chain merely *ahead* by height.
+
+### Fixed
+- **A `DeepFork` refusal now also survives a peer that is only ahead by height** (row 262, second
+  measurement): `fork_choice::next_pending` held the refusal across `Keep(WorkUnavailable)` in 0.3.76,
+  and box 3 showed that hold working — the pause was inserted and outlived the work-less claim. It
+  then died on `22:15:10.770 WARN … chain-state: peer 12D3KooWNCT… is ahead at #769 (ours #692, same
+  genesis) -- syncing from it`, i.e. `Keep(PeerAhead)`, which the hold treated as ordinary forward
+  sync and released: `gpn-forked` was removed and sealing resumed underneath the heavier branch
+  (ours mined #692 → #779 while that branch grew past #854). A peer being ahead by height is normal
+  sync in general, but for a peer just refused as `DeepFork` it is the same heavier branch, taller.
+  The hold now persists across `PeerAhead` and releases only when the announced tip is a block we
+  hold — i.e. when that chain has actually landed here. Test
+  `a_deep_fork_refusal_outlives_a_work_less_claim` asserts the ahead case and failed on the pre-fix
+  function (`left: None, right: Some("deep-fork")`); `fork_choice` 15 passed, full bin suite 305
+  passed, `cargo fmt --check` and clippy `-D warnings` clean. Live proof on a published binary is
+  this release's §10.
+
 ## [0.3.76] - 2026-11-24
 
 Bumped from 0.3.75 (`scripts/bump-version.py patch`). One defect, found on the last step of the box-3
