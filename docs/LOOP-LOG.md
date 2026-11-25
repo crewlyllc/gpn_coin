@@ -1,3 +1,21 @@
+## 18:55 PT 0.3.76 BUNDLED — row 262 (deep-fork refusal holds sealing), checklist generated
+
+- **0.3.75 confirmed closed before bundling**: `releases.json` ⇒ `0.3.75` (published 2026-11-25T01:50:09Z),
+  running node `system_version` ⇒ `"0.3.75"`, checklist archived and INDEX row present.
+- **No CI to act on**: `GET /actions/runs?head_sha=8c7b7808f046…` ⇒ `total_count: 0` (the three
+  trailing commits are docs/checklist only — paths-ignore, as designed).
+- **Bundled the one actionable NEW row — 262** (a `DeepFork` refusal cleared `pending[peer]` on the
+  peer's next work-less announce, so `gpn-forked` vanished ~23 s after the refusal and box 3's
+  `-Expect refuse` run reported `PASS=False`).
+- **Row 256 left NEW/AWAITING-OWNER**, not re-bundled: its steps 3–6 need a GPU-attached guest, which
+  is an owner decision already filed in `docs/NEEDS-TRIAGE.md`; per the row's own SCOPE note the test
+  gate is §0e every release and only the script is code (already on main).
+- `scripts/bump-version.py patch` ⇒ 0.3.76 across 15 manifests + `network.json` + 14 lockfile entries;
+  CHANGELOG section written (no `_TODO_`); row 262 `NEW → IN-PROGRESS`; one commit `aaf1bf37` pushed.
+- `scripts/make-release-checklist.py 0.3.76` ⇒ `docs/releases/0.3.76.md` (1 in-progress, 5 blocked).
+- **Next run: work box 1 of `docs/releases/0.3.76.md`** — the §3b item (fix `fc::evaluate`/
+  `pauses_sealing` so a deep-fork refusal is sticky until the fork is over, plus the unit test).
+
 ## 18:40 PT 0.3.75 DEPLOYED + FILED — §9 all four, §10 peer box fixed at the cause, row 194 COMPLETE
 
 - **§9 self-update proven on two nodes, no hand-copying.** Box 3 updated on its own timer
