@@ -1,3 +1,21 @@
+## 16:40 PT §5 linux artifact landed and ticked; windows build still in flight; §0e box1 still AWAITING-OWNER [TRIAGE: item 256]
+
+- **A0 CI**: `origin/main` HEAD `2573c98810cd8f8384a50fe0c9a1622ee8575863` (docs commit) ⇒
+  `GET /actions/runs?head_sha=<full 40>` `total_count: 0`. Expected under `ci.yml` paths-ignore.
+- **Release 0.3.75, §5 box 2 ticked with the run + asset, not with the claim**: run `45509384325`
+  (`Linux binaries (self-hosted)`, head `c9e10f45b2eaef968192c88713dd9d2493bcd957`) ⇒
+  `completed success` at 23:51:17Z; `linux-latest`'s `gpn-linux.tar.gz` = 348,738,542 B,
+  `sha256:f7f0e6e9e9d8a…`, updated 23:51:12Z. The binary that run built here
+  (`~/.ci-cache/gpn-node-target/release/gpn-node`) prints `gpn-node 0.3.75`.
+- **Windows build not done yet, not waited on**: run `45509380702` on the same head, `in_progress`
+  since 23:22:12Z (78 min at this reading — under the 90-min stale threshold, so not cancelled).
+  `windows-latest`'s zip is still the 19:16:01Z upload, so that box stays unticked by design.
+- **§0e box 1 re-marked AWAITING-OWNER in 0.3.75** with the 0.3.73/0.3.74 evidence carried forward
+  (steps 1-2 PASS on GPN-209, step 3 FAIL `no OpenCL platforms: DLOPEN_RUNTIME_LOAD_FAILED`,
+  no GPU partition). **[TRIAGE] item 256 is still unanswered in `docs/NEEDS-TRIAGE.md` since
+  2026-11-24 00:3x PT** — question: which machine carries stranger-lifecycle steps 3-6;
+  recommend A (GPU-P from box 1's 5070 Ti). Without it this box cannot be ticked in any release.
+
 ## 16:28 PT row 194: fork test run for real on the 0.3.75 build — shallow accept PASS, deep refuse PASS [no triage]
 
 - **A0 CI**: `origin/main` HEAD `e852d572…` ⇒ `GET /actions/runs?head_sha=<full 40>` `total_count: 0`
