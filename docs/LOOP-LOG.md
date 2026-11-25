@@ -1,3 +1,28 @@
+## 06:3x PT — 0.3.78 box 1 (row 263): image/video jobs now reach a pull-only box's render channel
+
+- **A0**: `git reset --hard origin/main` → `d91272bb`. `GET /actions/runs?head_sha=d91272bb61409505c12087451230341ef1631603`
+  ⇒ 1 run, `status: pending`, conclusion `None` — noted, **not waited on**. Nothing red.
+- **Reproduced first**: `POST :8092/v1/images/generations` ⇒ `gpn_unavailable … 5FCwsMfV…: no channel render endpoint
+  at <unresolved>` while `curl :8095/channel/status` answered `{"channel":true,"kinds":["image","video","audio"]}`.
+  Two causes, both read off the code and the live registry, not guessed:
+  1. the diffusion process never published its channel URL, so for a `pull://` row the `status_url+1` derivation has
+     nothing to work from;
+  2. the task matrix inherited the heartbeat's flat `models[]` for EVERY word, so the box advertised `generate-image`
+     with ollama names (`qwen2.5:7b`…) and `serves("generate-image", "sd-turbo")` refused with "provider does not list
+     model" — unroutable even via the one dialable row.
+- **Fixed** in `8c507301`: `PullConfig::with_channel_url` publishes `channel_url` on the assign poll; the AP keeps it on
+  the registry row (union across co-located processes) and image/audio routing prefers it, still probing before
+  accepting; `tasks.rs` flat-list inheritance is now per model family (unclassifiable = text, the `jobkind::admit` rule).
+- **Proven live** (same box, 0.3.78 build, binaries installed to `~/.local/bin`, both units restarted):
+  `POST /v1/images/generations` → id `5db7423f…` → `status: completed`, `payment: channel`, `channel_id: 7`,
+  `job_id: 1795616877594`; `gpn-diffusion`: `[channel] job 1795616877594 on channel 7 served (125300 bytes)`;
+  `GET /v1/images/<id>` → PNG 256x256, 125300 B, sha256 `7463805c…49f6` matching the record.
+  Chat unaffected: `POST /v1/chat/completions` answered in 5.0 s on channel 7.
+- **Tests**: 2 fail-before/pass-after in `tasks::`, 3 new (assign_pull snapshot, scheduler endpoint choice, aggregation);
+  `cargo test --bin gpn_scheduler` = 110 passed, 0 failed. `cargo fmt --check` clean.
+- **§3b is now 1/2**; row 256 is still `AWAITING-OWNER` (the clean-Windows-guest venue question from the previous run —
+  [TRIAGE] option E: wipe box 4, preserve its keystore). Next run: §4 push/CI observation for this SHA, then §5 builds.
+
 ## 06:0x PT — bundled 0.3.78 (row 263 render-over-pull; 256 carried) and opened its checklist
 
 - **A0**: `git reset --hard origin/main` → `f11baecf`. `GET /actions/runs?head_sha=f11baecf29612671ee06a08e700cd49b2a085112`
