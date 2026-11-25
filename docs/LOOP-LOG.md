@@ -21,6 +21,12 @@
   *refuse* path, which a correct refusal can never produce — every refuse run sat out its full
   timeout. The `.sh` breaks on the verdict line and enforces `imports == 0` in the pass check.
   Same one-line fix is worth porting back into `r194-fork-test.ps1` when the Windows repeat runs.
+- **Wasted 3 minutes on the wrong binary first**: `~/.ci-cache/gpn-agent-target/release/gpn_node`
+  is the *consumer supervisor* ("miner + AI provider, one command"), not the chain node — it dialled
+  production `ws://127.0.0.1:9944` and GPU-benchmarked there. No signer, no wallet, no extrinsic in
+  its log (grep `wallet|extrinsic|submit|onboard` = 0). The substrate node is the hyphen form at
+  `~/.ci-cache/gpn-node-target/release/gpn-node`. Recorded in `TOOLS.md` so the next run does not
+  repeat it.
 - Not committed yet (deliberate): `scripts/r194-fork-test.{ps1,sh}` + the two verdict mds live in
   `~/.openclaw/workspace/scripts/`; they go in with a docs-only push or the release landing commit.
 
