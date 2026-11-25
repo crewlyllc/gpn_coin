@@ -1,3 +1,26 @@
+## 19:56 PT 0.3.76 §5 linux build VERIFIED + §6 both boxes ticked (artifact downloaded, hashed, strings scanned)
+
+- **A0**: `origin/main` HEAD `6b2b99f6` is docs-only ⇒ `head_sha=6b2b99f6…` `total_count: 0`
+  (paths-ignore, expected). Older CI 45529156811 (`5c74bf2a`) finished **success** at 03:37:58Z;
+  CI 45539696287 (code `66c1982d`) still `queued` — noted, not awaited.
+- **§5 linux box ticked**: run **45540823500** `completed success` 03:33:39Z→03:46:55Z on
+  `b8e7b5ff45b7`; `linux-latest` asset 348,762,753 B updated 03:46:50Z with
+  `sha256:028c5cfeb46fd5a20ace70bdb1b5261f40e5d50a8707cfef85f5640d615559f6`.
+- **§6 both boxes ticked — verified against the artifact itself, not the run status**: downloaded
+  that asset through the API (`200`, full 348,762,753 B), `sha256sum` ⇒ **028c5cfe…**, byte-identical
+  to the published digest. Untarred: `./gpn-node --version` ⇒ `gpn-node 0.3.76`;
+  `./gpn_node --version` ⇒ `gpn_node 0.3.76 (spec 55, b8e7b5f)`. Strings in `gpn-node`:
+  `gpn-forked` = 2, `reorg=` = 1, `work ours=` = 1 (all three literals row 262's change added).
+- **§5 same-SHA box ticked**: API `head_sha` for both build runs is
+  `b8e7b5ff45b7ba634bfc953657af705afde23caa`.
+- **§5 windows box still open, by design**: run **45540831428** `in_progress` since 03:39:05Z at
+  step 10 `build node` (1–9 green; 19–22 attest/sign/gate pending). `windows-latest` still serves
+  the 17:58 PT 0.3.75 zip (`31661cfe…`). Not awaited — this run ends and the next one reads it.
+- **§3b 262 still unticked**: its live 7-minute `scripts/r194-fork-test.ps1 -Expect refuse` half
+  needs the published 0.3.76 binary ⇒ belongs to §10 box 3.
+- **§0e item 256** remains AWAITING-OWNER (which machine carries the stranger-lifecycle GPU legs) —
+  [TRIAGE] carried forward unchanged, filed in `docs/NEEDS-TRIAGE.md`.
+
 ## 19:36 PT 0.3.76 §4 pushed; both release builds dispatched and run ended (no polling)
 
 - **A0**: `origin/main` @ `b8e7b5ff` (docs(loop-log)) ⇒ `head_sha=b8e7b5ff…` `total_count: 0`
