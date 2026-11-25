@@ -1,3 +1,27 @@
+## 16:57 PT §5: windows build was queue-bound, not stalled — 3 step-level boxes ticked from the API; zip still pending [no triage]
+
+- **A0 CI**: `origin/main` HEAD `0aaafa9366fcc88388d6a5dc38ce5c6099a34e70` ⇒
+  `GET /actions/runs?head_sha=<full 40>` `total_count: 1`: run `45519568662` (`CI`) `queued`,
+  created 00:37:54Z. Queued, so noted and not waited on — the boxes worked this run are docs-only.
+- **The 90-min stale question, answered with the job's step list rather than the clock.** Windows run
+  `45509380702` read `in_progress` 95 min after dispatch, but its job did not start until
+  **00:32:46Z** (`Set up job` 00:32:47, `checkout` 00:32:51) — ~70 min of that was box-1 runner
+  queue behind CI run `45505708367`. So it was contention, not a stall, and cancelling it would have
+  thrown away a good build. Steps 8/10/11/12/16/17/18/19 all `success` (build node done 00:38:53,
+  deploy + restart `C:\gpn\bin` 00:54:45, launcher verify 00:55:14, zip packaged 00:55:15);
+  step 20 `skipped`, step 21 cosign keyless running since 00:55:39.
+- **Tick 1 — §5 "Same SHA on both runs"**: `45509384325` `c9e10f45b2ea` and `45509380702`
+  `c9e10f45b2ea`, both read from the runs API, both `c9e10f45b2eaef968192c88713dd9d2493bcd957`.
+- **Tick 2 — §5 "attestation step runs BEFORE publish"**: repo is `"private":true`, so the mechanism
+  is cosign keyless, not `actions/attest-build-provenance`. `release-windows.yml` order 678 → 692
+  (skipped) → 698 sign → **720 provenance gate, no `if:`** → 748 publish; the gate throws on missing
+  bundle, bundle <200 B, or `cosign verify-blob` non-zero. The live run's steps 19-23 match.
+- **Not ticked**: the `gpn-windows.zip` box (asset digest has not moved yet) and the §5 per-item SSH
+  box. Next run: ask the runs API once; on `success` push the zip to box 3 and run
+  `r194-fork-test.ps1 -Expect accept` then `-Expect refuse` (paths in the 194 note), which is what
+  closes the per-item SSH box too.
+- **Unchanged**: §0e stranger-lifecycle box 1 still AWAITING-OWNER on item 256.
+
 ## 16:40 PT §5 linux artifact landed and ticked; windows build still in flight; §0e box1 still AWAITING-OWNER [TRIAGE: item 256]
 
 - **A0 CI**: `origin/main` HEAD `2573c98810cd8f8384a50fe0c9a1622ee8575863` (docs commit) ⇒
