@@ -195,8 +195,21 @@ cleanup() {
   # `holder: release-cut pid <dead>` behind and every later docs commit refused.
   # On success the publish step has already released it; this is the safety net
   # for dry-run, "already released", and failures.
+  #
+  # Track the take explicitly (LOCK_TAKEN / LOCK_TAKEN_VERSION) and release by
+  # VERSION. The old test grepped for `release-cut pid $$`, which only matched
+  # once `release_lock_step` had rewritten the file -- so an abort between
+  # `release-lock.sh take` and the first `step` (2026-11-25 12:19: the built
+  # version was not newer than the published one) left a lock naming
+  # release-lock.sh's own dead pid, and the pre-commit hook refused every
+  # commit afterwards (#277).
   inflight_l="${GPN_RELEASE_LOCK:-$HOME/.gpn/release-in-flight}"
-  if [ -f "$inflight_l" ] && grep -q "release-cut pid $$\b" "$inflight_l" 2>/dev/null; then
+  if [ "${LOCK_TAKEN:-0}" = 1 ]; then
+    held_v="${LOCK_TAKEN_VERSION:-$(head -n1 "$inflight_l" 2>/dev/null || true)}"
+    "$SCRIPT_DIR/release-lock.sh" release "$held_v" >/dev/null 2>&1 \
+      || rm -f "$inflight_l"
+    printf 'release-cut: released the commit lock (%s) on exit %d\n' "${held_v:-?}" "$rc" >&2
+  elif [ -f "$inflight_l" ] && grep -q "release-cut pid $$\b" "$inflight_l" 2>/dev/null; then
     held_v="$(head -n1 "$inflight_l" 2>/dev/null || true)"
     "$SCRIPT_DIR/release-lock.sh" release "$held_v" >/dev/null 2>&1 \
       || rm -f "$inflight_l"
@@ -770,6 +783,8 @@ elif [ "$DRY" = 1 ]; then
   say "repo lock not taken: --dry-run writes nothing (no upload, no commit, no push)"
 else
   if $SCRIPT_DIR/release-lock.sh take "$VER"; then
+    LOCK_TAKEN=1
+    LOCK_TAKEN_VERSION="$VER"
     say "repo locked for $VER (\$HOME/.gpn/release-in-flight) — no commits may land"
   else
     rc=$?
@@ -1091,8 +1106,11 @@ stranger_check "$RELEASES_URL" "$VER" 0 || {
 # longer owns the tree. Failure to release is loud but not fatal — the release did
 # publish, and a stale lock must be visible rather than silently kept.
 if [ -x "$RELEASE_LOCK_TOOL" ]; then
-  $SCRIPT_DIR/release-lock.sh release "$VER" || \
+  if $SCRIPT_DIR/release-lock.sh release "$VER"; then
+    LOCK_TAKEN=0   # released here; cleanup must not report a second release
+  else
     echo "WARNING: the repo lock is still held — run scripts/release-lock.sh status" >&2
+  fi
 fi
 
 echo

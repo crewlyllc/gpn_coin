@@ -527,10 +527,38 @@ t14_filename_exact() {
   teardown
 }
 
+t15_lock_released_on_early_abort() {
+  CURRENT="t15 an abort between take and the first step releases the lock (#277)"
+  # The 2026-11-25 12:19 shape: the cut takes ~/.gpn/release-in-flight, then
+  # refuses before its first `step` (here: the built version is older than the
+  # published one). release-lock.sh wrote `holder: user@host pid <its own pid>`,
+  # and cleanup() only recognised `release-cut pid <$$>` -- so the lock survived
+  # with a dead pid and the pre-commit hook refused every commit afterwards.
+  setup 0.3.9 0.3.5
+  local lockf="$TEST_HOME/.gpn/release-in-flight"
+  cut
+  check '[ "$RC" != 0 ]' "the cut refuses (0.3.5 is not newer than 0.3.9)"
+  check 'grep -q "not newer than the published" <<< "$OUT"' "refused for the version reason, not something else"
+  check '[ ! -f "$lockf" ]' "the commit lock is gone after the abort"
+  OUT="$(HOME="$TEST_HOME" "$R/scripts/release-lock.sh" status 2>&1)"
+  check 'grep -q "no release in flight" <<< "$OUT"' "release-lock.sh status agrees the repo is free"
+  teardown
+
+  # And the ordinary case must not regress: a cut that takes the lock and aborts
+  # mid-step (wrong tree, after `step 3b/6`) also leaves nothing behind.
+  setup 0.3.4 0.3.5
+  make_wrongtree_bundle "$T/src-linux.tar.gz" 0.3.5
+  make_wrongtree_bundle "$T/src-windows.zip" 0.3.5
+  cut
+  check '[ "$RC" != 0 ]' "second cut aborts on the artifact-content gate"
+  check '[ ! -f "$TEST_HOME/.gpn/release-in-flight" ]' "no lock left after a mid-step abort either"
+  teardown
+}
+
 ALL=(t1_nothing_to_do t2_detection_and_dry_run t2b_lock_messages t3_digest_mismatch t4_mirror_failure
      t5_dirty_manifest t6_full_publish t7_version_assertion t8_skip_mirror
      t9_ci_gate t10_wrong_tree_aborts t11_docs_only_gap t12_gap_with_code
-     t13_upload_before_rename t14_filename_exact)
+     t13_upload_before_rename t14_filename_exact t15_lock_released_on_early_abort)
 
 want=("$@")
 printf '\nrelease-cut.sh — %d scenario(s)\n' "${#ALL[@]}"
