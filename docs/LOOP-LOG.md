@@ -1,3 +1,28 @@
+## 12:30 PT — 0.3.79 Windows build landed + attestation verified (§5/§7 evidence); cut refused on CI still in progress
+
+- **A0**: `fetch + reset --hard origin/main` ⇒ HEAD `7332fa35` (docs commit — `total_count: 0`, expected).
+  The release code sha `669203161527f92351f71b0e1ef329d20fe4cb76` has CI run **45685415856**, still
+  `in_progress` at 20:11:52Z (windows node build + linux test lane live) — noted, not waited on.
+- **§5 Windows box ticked**: run **45687695024** ⇒ **completed success 20:11:49Z**, 23 steps green incl.
+  `18 package release artifact (windows zip)`, `22 Provenance gate`, `23 publish (rolling windows-latest)`.
+  `gpn-windows.zip` 253,276,071 B `sha256:e46aab5d…038f68` + `gpn-windows.zip.bundle` (9,033 B).
+  Both release runs read back the **same** `head_sha` (`669203161527…`) — §5 same-SHA box ticked with that.
+- **Attestation path is cosign, because the repo is private** (`visibility: private`): step 20 (public-only
+  attest) `skipped`, step 21 keyless sign `success`, step 22 gate `success`, step 23 publish — so the gate
+  provably precedes publish. `cosign verify-blob` on the re-downloaded zip with the released bundle ⇒
+  **`Verified OK`, EXIT=0**. Ticked §5 attestation-ordering / digest / verify boxes and §7 "refuse to cut".
+- **§7 cut refused, correctly**: `release-cut --version 0.3.79` did steps 1-2 green (both assets downloaded,
+  sha256 matched API digests, `version 0.3.79 inferred from the linux bundle's gpn-build-v1 stamp`) then
+  aborted at 3/6: `ABORT: CI for 6692031 is 'in_progress:None' -- refusing to sign an unverified build`.
+  Not a fault — a precondition (CI 55 min old, step live). Re-run the same command when it concludes; it
+  is idempotent and re-detects.
+- **New row 277 filed (bug found by this run)**: that abort left `~/.gpn/release-in-flight` naming dead
+  pid 3872365 and every commit refused. Cause: `cleanup()`'s `grep "release-cut pid $$"` can never match
+  `release-lock.sh take`'s `holder: <user>@<host> pid <pid>` line. Lock released by hand after `ps -p`
+  confirmed the pid dead. Not fixed in-tree this run — a code commit while a checklist is open is what §0
+  forbids; row 277 carries the diagnosis and the test to write.
+- Nothing needed from Jeremy. No [TRIAGE].
+
 ## 11:58 PT — 0.3.79 linux build landed and verified; §5(linux) + §6 ticked; Windows build still in flight
 
 - **A0**: `fetch + reset --hard origin/main` ⇒ HEAD `ae99a8176a437faafdf414373f6a3d1d8dc3d55e`
