@@ -1,3 +1,21 @@
+## 07:44 PT — §5 box 3 ticked (windows build published, hash-verified)
+
+- **A0**: reset to `origin/main` HEAD `7687ca34` (docs-only), `GET /actions/runs?head_sha=7687ca34…`
+  ⇒ `total_count: 0` — expected under `ci.yml` paths-ignore. Nothing red.
+- **Box worked: §5 "`release-windows.yml` → `gpn-windows.zip` on `windows-latest`" — DONE.**
+  Run **45636841344** `completed / success` (job 15:00:54Z → 15:27:44Z), `head_sha` `50688dc5…`,
+  all 23 steps green incl. deploy-to-`C:\gpn\bin`, package, keyless cosign sign, provenance gate, publish.
+  Asset `gpn-windows.zip` **253,264,039 B**, `updated_at` 15:27:36Z, published digest
+  `sha256:d3024bc0…6e81`; `.bundle` 9,049 B beside it. Re-downloaded via
+  `GET /releases/assets/792078282` ⇒ 253,264,039 B, `sha256sum` **d3024bc0…6e81** — identical.
+  Zip's `gpn-node.exe` version string `0.3.78`; new literals present in the shipped binaries
+  (`gpn_scheduler.exe` `channel_url`×1 `/channel/job`×5, diffusion provider `/channel/job`×4).
+  Queue time 14:41→15:00 was single-slot contention behind CI 45625934746, dispatched not waited on.
+- **Section now 5/7.** Remaining §5: box 6 (attestation for the digest `releases.json` serves) and
+  box 7 (`cosign verify-blob` against the published zip + bundle). Both are earned from the
+  published assets; next run takes box 6.
+- Row 256 (§3b) unchanged — AWAITING-OWNER, triage already answered.
+- Next run: §5 box 6, then 7; then §7 cut.
 ## 07:26 PT — §5 box 4 ticked (attestation ordering, verified in the workflow and in the live job)
 
 - **A0**: `origin/main` HEAD `4a90c5fc53563e40d96201d484f68f24f7841341` == local HEAD after
