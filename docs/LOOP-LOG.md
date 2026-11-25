@@ -1,4 +1,4 @@
-## 03:19 PT 0.3.77 §9 deploy+confirm ticked 4/4 — this host self-updated to 0.3.77 at 02:57:44, rollback exercised
+## [TRIAGE] 03:19 PT 0.3.77 §9 deploy+confirm ticked 4/4 — this host self-updated to 0.3.77 at 02:57:44, rollback exercised
 
 - **A0**: HEAD `101fd9c5` docs-only ⇒ `total_count: 0` (expected under `paths-ignore`). Nothing red on main.
 - **Box worked: §9 deploy and confirm (4 boxes, one deployment observation + one rollback exercise).**
