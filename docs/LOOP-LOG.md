@@ -1,3 +1,32 @@
+## 06:4x PT — 0.3.78 §4 closed, both release builds dispatched (not waited on)
+
+- **A0**: `git reset --hard origin/main` → `50688dc5`. `GET /actions/runs?head_sha=50688dc5fc3a908a3a9e91b49f37f541e93559cc`
+  ⇒ 1 run `pending`, **0 jobs** (docs-only, `paths-ignore` intact). Not waited on. Nothing red.
+- **Boxes worked: §4 "Push (once)" — 4/4, DONE.** Evidence: the docs commit produced a 0-job run (no runner
+  second spent on prose, `.github/workflows/ci.yml:27-36`); this run's docs edits are one commit; CI queried
+  once per SHA with full 40-char shas.
+- **Defect found (recorded, not fixed — release in flight):** the 0-job docs run **45634997014** entered the
+  `ci-refs/heads/main` concurrency group and the queued run for the release commit `d91272bb`
+  (**45630064670**) went `completed / cancelled` at **14:31:31Z, the same second** the docs run was created,
+  with 0 jobs and no log. Same thing happened to `b06ec7e2` (run 45592358005, also `cancelled`).
+  Consequence: `8c507301` (the row-263 fix) has `total_count: 0` runs of its own and its push-mate's run
+  never executed a job — **a code commit can end up with no CI conclusion at all when the next push is
+  docs-only.** Mechanism is a hypothesis (GitHub cancels a *pending* run when a new one is queued in the same
+  group); the cancelled-at-same-second fact is measured. Candidate fixes for after the cut: give the push
+  trigger its own concurrency group per SHA, or make the docs-only case not create a run entry at all.
+- **§5 dispatched and ENDED THE RUN** (`scripts/dispatch-release.sh 50688dc5…`, tag `build/50688dc5fc3a`):
+  linux **45636833040** `in_progress` · windows **45636841344** `queued` (box 1 runner `busy=True` with CI
+  job 45625934746 step 7/14 — contention, not a fault) · unix/macOS **45636836890** `failure` in 3 s with
+  **0 steps** = the known hosted-runner billing block (row 69), environment, not code; macOS not in manifest.
+- **Left alone deliberately:** run 45625934746 (`f11baecf`, code) — linux `success`, fmt+clippy `success`,
+  secret-scan `success`; its Windows job was 27 min into a ~60 min `Build + test gpn-agent (release)` step at
+  65 min total, i.e. live work. The >90 min stale-cancel rule did not apply; killing it would have burned
+  the build. It is also the last green linux evidence for trunk.
+- **§0e box 1 / item 256 stays AWAITING-OWNER** — needs a GPU-attached Windows guest (option E = box 4, which
+  is off the tailnet and needs a hand on the machine to power on). Unchanged from the 05:2x run; no new
+  information this run, nothing re-litigated.
+- **Next run**: read the two handles, tick §5, then §6 (verify assets before publish) → §7 cut.
+
 ## 06:3x PT — 0.3.78 box 1 (row 263): image/video jobs now reach a pull-only box's render channel
 
 - **A0**: `git reset --hard origin/main` → `d91272bb`. `GET /actions/runs?head_sha=d91272bb61409505c12087451230341ef1631603`
