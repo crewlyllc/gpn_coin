@@ -1,4 +1,4 @@
-## 12:30 PT — 0.3.79 Windows build landed + attestation verified (§5/§7 evidence); cut refused on CI still in progress
+## 12:20 PT — 0.3.79 Windows build landed + attestation verified (§5/§7 evidence); cut refused on CI still in progress
 
 - **A0**: `fetch + reset --hard origin/main` ⇒ HEAD `7332fa35` (docs commit — `total_count: 0`, expected).
   The release code sha `669203161527f92351f71b0e1ef329d20fe4cb76` has CI run **45685415856**, still
