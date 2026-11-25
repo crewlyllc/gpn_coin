@@ -1,4 +1,4 @@
-## 09:55 PT — 0.3.78 CUT AND PUBLISHED, self-updated, §7/§7b/§8/§9/§10 all ticked with evidence
+## 09:18 PT — 0.3.78 CUT AND PUBLISHED, self-updated, §7/§7b/§8/§9/§10 all ticked with evidence
 
 - **A0**: `git fetch && reset --hard origin/main` moved HEAD `0cd2f8d7` → **`8fca94fc`** (docs-only; the
   full-sha API query `?head_sha=8fca94fc7a2c539b2bb3eca6b453e8217d7bb4ba` ⇒ `total_count: 0`, expected
@@ -40,12 +40,31 @@
   **[TRIAGE]** the guard's *message* says "would swap newer code for older code" even when the installed
   sha is an ancestor of the release's — the behaviour (refuse, demand `--force`) is correct, the wording
   tells an operator the opposite of the truth. Non-urgent fix, worth its own row.
-- **§10**: on the new binary — chat `200` in **0.193 s** (`payment: channel`, channel 7), image job
+- **§10**: on the new binary (node restarted 09:13:39 PT) — chat `200` in **0.193 s** (`payment: channel`, channel 7), image job
   `edfe5aad…` ⇒ PNG 256x256 **125,300 B** sha256 `7463805c…449f6` (byte-identical to row 263's 0.3.77
   proof), AP `[images] … settled on channel 7 (job 1795626961567)`; node producing (`Imported #362892`,
   `Prepared block for proposing at 362893`); peers 2→3, **0** `Reason:`/ban lines and **0**
-  `gpn-isolated`/`gpn-forked` in 30 min. Row **263** flipped to `COMPLETE 0.3.78 (2026-11-25)`; row 256
+  `gpn-isolated`/`gpn-forked` over the 7 min 18 s measured (68 blocks imported, 3 peers unbroken). Row **263** flipped to `COMPLETE 0.3.78 (2026-11-25)`; row 256
   stays `AWAITING-OWNER` (venue decision + the structural two-version window).
+- **§10b + §0b**: `release-timing.py 0.3.78` ⇒ `37 of 54` boxes, `total 3h14m`; slowest step
+  **56m07s** = the cut, and it was slow because it *waited on box 1's single-slot runner*, not because
+  it was redone. Checklist **filed**: `git mv` → `docs/releases/archive/0.3.78.md`, `INDEX.md` row
+  added with the item ids. Only two boxes left unticked, the same two every release leaves: the §0e
+  stranger lifecycle (AWAITING-OWNER, venue + the script's own two-version requirement).
+- **§1/§2/§0e** ticked with real evidence rather than left blank: CI run 45634997014's `fmt + clippy`
+  job (rustfmt ×2 + clippy ×2, all success on `50688dc`) and its linux `Test gpn-agent (non-GPU)`
+  step, plus `grep -rn channel_url` giving both ends (publisher `gpn_diffusion_provider.rs:1197/1246`,
+  consumer `gpn_scheduler.rs:1311/1376-1420`) and `strings ~/.local/bin/gpn_scheduler | grep -c
+  channel_url` ⇒ 1 on the deployed 0.3.78 binary (`gpn-build-v1 version=0.3.78 sha=50688dc spec=55`).
+- **Discoverability box earned by running the page's own example** at
+  `https://gpncoin.ai/api/v1`: `sd-turbo`, 512x512, steps 8 ⇒ `completed` at poll 5, `channel_id: 7`,
+  PNG 512x512 **556,115 B** sha256 `4048e639…c692`. **The first attempt of the same call failed** —
+  a real defect, filed as row **270**: provider `5HVtpo…` is on another host (`/ip6/2603:8002:e400:204f::1940`)
+  but publishes `channel_url: http://127.0.0.1:8095/channel/job`, so the AP dialled its own loopback
+  listener and got `409 {"error":"assignment names a different provider"}` instead of falling through.
+  Also filed: **271** (update guard's message claims "swap newer for older" even when the installed sha
+  is an ancestor — the wording, not the behaviour) and **272** (first chat jobs after a restart time out
+  at 10 s while the provider warms; third call 0.193 s).
 - **Cold-start note**: the first two chat calls after the restart timed out at 10 s while the local
   provider warmed; the third answered in 0.193 s. Worth a row — a stranger's very first job can hit that
   window.

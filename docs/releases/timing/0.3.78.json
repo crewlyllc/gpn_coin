@@ -1,7 +1,7 @@
 {
   "version": "0.3.78",
   "start": "2026-11-25T06:04:11-08:00",
-  "total_s": 8281,
+  "total_s": 11648,
   "rows": [
     {
       "box": "`scripts/bump-version.py patch`",
@@ -162,6 +162,142 @@
       "since_start_s": 8281,
       "step_s": 1118,
       "sha": "0cd2f8d72e19fb858805d18d011c3ee9d53c9ba6"
+    },
+    {
+      "box": "`scripts/release-cut.sh --timeout 300`",
+      "section": "7. Cut and publish",
+      "ticked_at": "2026-11-25T09:18:19-08:00",
+      "since_start_s": 11648,
+      "step_s": 3367,
+      "sha": "c721229dc318f57ed5086a3e44b88c0c63a51d00"
+    },
+    {
+      "box": "`network.json` `latest_version` equals the published version.",
+      "section": "7. Cut and publish",
+      "ticked_at": "2026-11-25T09:18:19-08:00",
+      "since_start_s": 11648,
+      "step_s": 0,
+      "sha": "c721229dc318f57ed5086a3e44b88c0c63a51d00"
+    },
+    {
+      "box": "`releases.json` serves the new version twice, ten seconds apart.",
+      "section": "7. Cut and publish",
+      "ticked_at": "2026-11-25T09:18:19-08:00",
+      "since_start_s": 11648,
+      "step_s": 0,
+      "sha": "c721229dc318f57ed5086a3e44b88c0c63a51d00"
+    },
+    {
+      "box": "gpncoin.ai serves the new version",
+      "section": "7b. Every surface that names a version must be updated",
+      "ticked_at": "2026-11-25T09:18:19-08:00",
+      "since_start_s": 11648,
+      "step_s": 0,
+      "sha": "c721229dc318f57ed5086a3e44b88c0c63a51d00"
+    },
+    {
+      "box": "GitHub carries the same version",
+      "section": "7b. Every surface that names a version must be updated",
+      "ticked_at": "2026-11-25T09:18:19-08:00",
+      "since_start_s": 11648,
+      "step_s": 0,
+      "sha": "c721229dc318f57ed5086a3e44b88c0c63a51d00"
+    },
+    {
+      "box": "Both surfaces agree with each other and with the binaries",
+      "section": "7b. Every surface that names a version must be updated",
+      "ticked_at": "2026-11-25T09:18:19-08:00",
+      "since_start_s": 11648,
+      "step_s": 0,
+      "sha": "c721229dc318f57ed5086a3e44b88c0c63a51d00"
+    },
+    {
+      "box": "`--verify-published` exits 0 for this version; paste its three l",
+      "section": "8. Verify as a stranger would",
+      "ticked_at": "2026-11-25T09:18:19-08:00",
+      "since_start_s": 11648,
+      "step_s": 0,
+      "sha": "c721229dc318f57ed5086a3e44b88c0c63a51d00"
+    },
+    {
+      "box": "Anonymous download of both assets from `gpncoin.ai` succeeds.",
+      "section": "8. Verify as a stranger would",
+      "ticked_at": "2026-11-25T09:18:19-08:00",
+      "since_start_s": 11648,
+      "step_s": 0,
+      "sha": "c721229dc318f57ed5086a3e44b88c0c63a51d00"
+    },
+    {
+      "box": "sha256 and size match the manifest for both.",
+      "section": "8. Verify as a stranger would",
+      "ticked_at": "2026-11-25T09:18:19-08:00",
+      "since_start_s": 11648,
+      "step_s": 0,
+      "sha": "c721229dc318f57ed5086a3e44b88c0c63a51d00"
+    },
+    {
+      "box": "Docs stamp and `downloads.md` show the same version; the live UR",
+      "section": "8. Verify as a stranger would",
+      "ticked_at": "2026-11-25T09:18:19-08:00",
+      "since_start_s": 11648,
+      "step_s": 0,
+      "sha": "c721229dc318f57ed5086a3e44b88c0c63a51d00"
+    },
+    {
+      "box": "One node updates itself",
+      "section": "9. Deploy and confirm",
+      "ticked_at": "2026-11-25T09:18:19-08:00",
+      "since_start_s": 11648,
+      "step_s": 0,
+      "sha": "c721229dc318f57ed5086a3e44b88c0c63a51d00"
+    },
+    {
+      "box": "The running process reports the new version (check `(Get-Process",
+      "section": "9. Deploy and confirm",
+      "ticked_at": "2026-11-25T09:18:19-08:00",
+      "since_start_s": 11648,
+      "step_s": 0,
+      "sha": "c721229dc318f57ed5086a3e44b88c0c63a51d00"
+    },
+    {
+      "box": "Log shows `check \u2192 stop \u2192 download \u2192 swap \u2192 start \u2192 CONFIRMED <v",
+      "section": "9. Deploy and confirm",
+      "ticked_at": "2026-11-25T09:18:19-08:00",
+      "since_start_s": 11648,
+      "step_s": 0,
+      "sha": "c721229dc318f57ed5086a3e44b88c0c63a51d00"
+    },
+    {
+      "box": "Previous version retained for rollback; a failed update leaves t",
+      "section": "9. Deploy and confirm",
+      "ticked_at": "2026-11-25T09:18:19-08:00",
+      "since_start_s": 11648,
+      "step_s": 0,
+      "sha": "c721229dc318f57ed5086a3e44b88c0c63a51d00"
+    },
+    {
+      "box": "The change observed on a real machine, with timestamps and the a",
+      "section": "10. Prove the behaviour",
+      "ticked_at": "2026-11-25T09:18:19-08:00",
+      "since_start_s": 11648,
+      "step_s": 0,
+      "sha": "c721229dc318f57ed5086a3e44b88c0c63a51d00"
+    },
+    {
+      "box": "Peers hold >5 minutes; no new `Reason:` bans; no unexpected `gpn",
+      "section": "10. Prove the behaviour",
+      "ticked_at": "2026-11-25T09:18:19-08:00",
+      "since_start_s": 11648,
+      "step_s": 0,
+      "sha": "c721229dc318f57ed5086a3e44b88c0c63a51d00"
+    },
+    {
+      "box": "Mark the task row `DONE (date)` with version, commit sha and the",
+      "section": "10. Prove the behaviour",
+      "ticked_at": "2026-11-25T09:18:19-08:00",
+      "since_start_s": 11648,
+      "step_s": 0,
+      "sha": "c721229dc318f57ed5086a3e44b88c0c63a51d00"
     }
   ]
 }

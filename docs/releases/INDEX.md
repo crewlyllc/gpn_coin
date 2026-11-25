@@ -5,6 +5,7 @@ the checklist's last box is ticked and the version is published.
 
 | version | published | items | checklist |
 |---|---|---|---|
+| 0.3.78 | 2026-11-25 | 263 (image/video jobs reach a pull-only provider over the published channel URL — live proof on the new binary: PNG 256x256 125,300 B); 256 (AWAITING-OWNER — venue decision + the structural two-version window) | archive/0.3.78.md |
 | 0.3.77 | 2026-11-25 | 262 (deep-fork refusal held across a peer merely ahead — live proof box 3, PASS=True); 256 (AWAITING-OWNER — carried in §0e, GPU guest needed) | archive/0.3.77.md |
 | 0.3.76 | 2026-11-24 | 262 (fix `b884bc54` shipped here; its live proof needed a binary containing it, so it was earned and recorded on 0.3.77) | archive/0.3.76.md |
 | 0.3.75 | 2026-11-24 | 194 (both halves proven live on the published binaries); 256 (AWAITING-OWNER — carried in §0e, GPU guest needed) | archive/0.3.75.md |
