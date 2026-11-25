@@ -1,3 +1,34 @@
+## 08:41 PT — §7 cut still CI-gated (same run, still advancing); no other box is advanceable; checks re-run, nothing pushed but this log
+
+- **A0**: synced — `git fetch && reset --hard origin/main` moved HEAD `ee95f00f` → **`0cd2f8d7`** (force-update).
+  `GET /actions/runs?head_sha=0cd2f8d72e19fb858805d18d011c3ee9d53c9ba6` ⇒ **`total_count: 0`** — expected,
+  the commit touches only `docs/LOOP-LOG.md`, `docs/NEEDS-TRIAGE.md`, `docs/releases/0.3.78.md` (462
+  insertions, all `.md`), so `paths-ignore` applies. Nothing red at HEAD.
+- **First unticked box is still §7 `scripts/release-cut.sh --timeout 300`**, and its gate is unchanged:
+  it refuses to sign while CI for the stamp commit `50688dc` has no conclusion (measured again this run —
+  `scripts/release-cut.sh:480` `ABORT: CI for … is '$verdict' -- refusing to sign an unverified build`,
+  with no `--dry-run`/`--force` bypass in the script; `--dry-run` still passes through the same step 3).
+- **The blocking run is alive and progressing**: run **45634997014** (`50688dc5…`) `in_progress`,
+  created 14:31:30Z. Windows self-hosted job **139296187708** started 15:27:46Z; step 6
+  `Build + test gpn-node (release)` `completed / success`; step 7 `Build + test gpn-agent (release)`
+  `in_progress` since 16:07:11Z (**~34 min**, inside the normal 25-40 min build). Linux (139297887030),
+  fmt+clippy and secret-scan already `success`; macOS/GPU/audit `skipped` by design. Runner
+  `DESKTOP-USBUADL online busy=True`, `openclawassist online busy=False`. ⇒ contention on live work,
+  not a stale run: the >90-min cancel rule measures the job (73 min) and it is advancing. Not waited on.
+- **Re-ran the previous tick's evidence (rule 0e)** instead of trusting it: `GET /releases/tags/windows-latest`
+  ⇒ `gpn-windows.zip` id 792078282, **253,264,039 B**, `sha256:d3024bc0…6e81` — identical to the digest
+  §5 verified; `gpn-windows.zip.bundle` id 792080832, 9,049 B, `sha256:75eae771…ca5a`; linux tarball in
+  `/tmp/gpn-linux-0.3.78.tar.gz` still 348,762,697 B. Ticks hold.
+- **Refused to repeat the identical cut attempt**: last run's abort was `in_progress:None`, and the state is
+  still `in_progress` — a second identical try with no new information is the thing the checklist forbids.
+- **Nothing else is advanceable this run**: §7b/§8/§9/§10/§10b all read the published manifest, which
+  moves only in §7. The two known unlanded defects stay unlanded **by rule** — `publish-release-asset.py`
+  not setting `body` on the update path (release body still `commit 310214250bd3… (0.3.77)`) and the
+  docs-commit/cancelled-queued-run interaction in the `ci-refs/heads/main` concurrency group. Both are
+  non-`.md` changes; pushing either now would open a second run in the same group and risk cancelling the
+  very run §7 is waiting on. They are queued for the first run after 0.3.78 is cut.
+- No commit beyond this docs entry; no code pushed; release-in-flight untouched.
+
 ## 08:21 PT [TRIAGE] — 256 box worked and closed honest (venue narrowed to one owner question); §7 still CI-gated, nothing cut
 
 - **A0**: **no reset needed** — HEAD already == `origin/main` `ee95f00f` (docs-only); `GET
