@@ -1,3 +1,39 @@
+## 13:59 PT — 0.3.79 cut, published and self-updated; §7/§7b/§8/§9/§10/§10b ticked [TRIAGE]
+
+- **A0**: `fetch + reset --hard origin/main` ⇒ HEAD `0edcb20f` (docs commit; `head_sha=` ⇒ `total_count: 0`,
+  the expected `paths-ignore` behaviour). Release code sha `66920316` had CI run **45685415856**
+  `in_progress` since 19:27:41Z — **not cancelled**, because box 1's process table at 13:14/13:30 PT showed
+  `cargo` pid 49944 and `rustc` 35604/58412/59076 with start times minutes old: the Windows
+  `Build + test gpn-agent (release)` step was compiling, not hung. It concluded **completed success at
+  21:34:24Z** and the cut ran immediately after — the judgement call was right both ways.
+- **Released 0.3.79** (`release-cut.sh --version 0.3.79 --timeout 300`, exit 0, commit `c236aaa0`):
+  mirrored linux 348,803,388 B sha256 `9622c0d4e6…` and windows 253,276,071 B sha256 `e46aab5d3e…` into
+  `crewlyllc/gpn_coin` (previous build kept as `.old-*`), signed `website/releases.json`, served 0.3.79,
+  anonymous re-download matched. `network.json` `latest_version` ⇒ 0.3.79. Polled twice 10 s apart: 0.3.79.
+- **Site surfaces stamped** (commit `e09f8ecf`): `download.html` no-JS fallback, `docs/run-a-node`,
+  `docs/downloads` and their `website/docs/*.html` twins were still 0.3.78; now 0.3.79, verified live
+  after Cloudflare rebuilt (13:46 PT). Live chain for the stamp: `state_getRuntimeVersion` ⇒ specVersion 55,
+  head block 363,940.
+- **§8 stranger check**: `release-cut.sh --verify-published --version 0.3.79` ⇒ exit 0, `PASS: both manifest
+  assets are publicly downloadable by exact filename and match their sha256/size` (both full downloads,
+  no token, no cookie jar).
+- **§9 self-update**: `systemctl --user start gpn-update.service` ⇒ `confirm: process=up rpc=yes 22s
+  version=0.3.79`, `confirmed 0.3.79 is running`; running process exe `/home/jeremyg/.local/bin/gpn-node`,
+  RPC `system_version` ⇒ `0.3.79`, `versions/` keeps `0.3.78` for rollback.
+- **§10 behaviour**: first post-restart chat `200` in **3.384 s** with a charged channel (job
+  `1795643510864`) — row 272's 10 s wall is gone; peers held **3** for 7.5 min after the swap with **0**
+  `Reason:` bans and no isolated/forked marker.
+- **Rows**: 271 COMPLETE 0.3.79, 272 COMPLETE 0.3.79. **270 stays IN-PROGRESS** — its live half needs an
+  image job that lands a PNG with a loopback impostor present; today's attempt returned
+  `HTTP 425 {"cold":true,"error":"model stabilityai/sdxl-turbo is unloadable on this host (recorded …)",
+  "retry_after_s":900,"warming":true}` — a named retryable state, but not a PNG, so no tick.
+- **[TRIAGE] 256 — venue still unanswered** (6th carry). Re-measured this run, not carried: box 4 is still
+  off the tailnet (`tailscale status` lists only `desktop-usbuadl`, `desktop-dpjr60m`, `openclawassist`),
+  and `Get-VMHostPartitionableGpu` on box 1 lists the RTX 5070 Ti (`VEN_10DE&DEV_2C05`, 32 partitions,
+  TotalCompute 1000000000), so option A (attach a partition to GPN-209) is open and costs no money — it
+  changes the GPU config of the box running the live mining node, which is Jeremy's call. Item 256's
+  §3b box and §0e boxes 1-2 remain unticked for that reason; everything else in 0.3.79 is ticked.
+
 ## 13:00 PT — CI proven alive by the runner's own processes, not by the API's word; §0e box 3 ticked
 
 - **A0**: `fetch + reset --hard origin/main` ⇒ HEAD `1183eade` (docs commit — `head_sha=` gives
