@@ -1,3 +1,22 @@
+## 09:30 PT — 0.3.78 complete: filed, live site/served manifest/node all 0.3.78, rows 270-272 opened
+
+- Post-filing check on the live surfaces, no token: `https://gpncoin.ai/releases.json` ⇒ `0.3.78`;
+  `https://gpncoin.ai/download` ⇒ `id="current-release">0.3.78` (the literal I bumped); and
+  `https://gpncoin.ai/docs/downloads` ⇒ `Verified against: chain spec 55 / release 0.3.78 — checked
+  2026-11-25 09:15 PT at block 362,878` — the regenerated page, served. The earlier read of that same
+  URL showed the previous commit's `09:25` stamp, which is Cloudflare's edge lag of one push and is
+  now converged; repo and site agree.
+- **Loop section B condition met for 0.3.78**: `releases.json` serves `0.3.78`, a node's running
+  process reports `0.3.78` (pid 3708818), and the checklist is filed with 53/54 boxes — the single
+  unticked box is §0e's stranger lifecycle, AWAITING-OWNER, as in every release since 0.3.73. Row
+  **263** therefore reads `COMPLETE 0.3.78 (2026-11-25)`.
+- **Row 256 stays AWAITING-OWNER** — the question for Jeremy is unchanged and still only one: may a
+  GPU partition be attached to GPN-209 on box 1 (which is running a live mining node), or should the
+  stranger lifecycle wait for a dedicated test box? The script's own two-version requirement means the
+  release that can close it is 0.3.78 → 0.3.79, so the venue only needs to exist before that cut.
+- Pushed this run: `88fbd56a` (signed manifest), `c721229d`, `282d7384`, `6be04c70` (docs only —
+  `paths-ignore` means no CI run for them, checked, not assumed).
+
 ## 09:18 PT — 0.3.78 CUT AND PUBLISHED, self-updated, §7/§7b/§8/§9/§10 all ticked with evidence
 
 - **A0**: `git fetch && reset --hard origin/main` moved HEAD `0cd2f8d7` → **`8fca94fc`** (docs-only; the
