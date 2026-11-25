@@ -162,3 +162,22 @@ It needs box 4 powered on first: box 4 is **not in the tailnet at all** — box 
       `box1.sh`/`box3.sh`/`box4.sh` now route through `scripts/winps.sh` (exit 3 unreachable /
       4 powershell unusable / 5 no output, one named reason on stderr, one retry after 15 s). If it
       recurs, the tool says so instead of going quiet.
+
+- [ ] **256 (venue, narrowed 2026-11-25 08:2x PT by the loop's own measurements)** — the open part is
+      no longer "which machine / buy hardware"; it is one question: **may the loop attach a GPU
+      partition of box 1's RTX 5070 Ti to the Hyper-V guest GPN-209?** Evidence measured this run,
+      not carried: (a) box 4 is still off the tailnet (`box4.sh` ⇒ `ssh rc=255`, `SOCKSv5 … General
+      SOCKS server failure`) so option E is unavailable until someone powers it on; (b) GPN-209's only
+      partition is `…VEN_8086&DEV_9BC5…` (Intel UHD 630) with `CurrentPartitionCompute : 0` — the
+      cause of the 2026-11-24 `no OpenCL platforms` refusal; (c) **the 5070 Ti is host-partitionable**
+      — `Get-VMHostPartitionableGpu` on box 1 lists `…VEN_10DE&DEV_2C05…`, `ValidPartitionCounts {32}`,
+      `TotalCompute 1000000000`. So option A costs nothing new and needs no purchase; the only cost is
+      touching the GPU config of the box that runs a live mining node (host driver exposure, minutes of
+      risk to box 1's node). | options: A attach the partition now (unblocks the lifecycle venue this
+      release, no spend, small risk to box 1's live node) · B do it during a quiet window you name ·
+      C leave box 1 alone and power box 4 back on when convenient | recommend: **A**, sequenced right
+      after the current release cut (box 1's build queue is idle then), with the adapter removed again
+      if the guest driver install fails. **Also fixed in the record:** step 5 of
+      `scripts/stranger-lifecycle.ps1` cannot pass during release N at all (`:362` — "step 5 needs two
+      published versions"), so the 256 gate is now scoped to validate 0.3.78 → 0.3.79 and the venue
+      must be ready before 0.3.79 publishes, not before this cut.

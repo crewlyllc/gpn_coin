@@ -1,3 +1,35 @@
+## 08:21 PT [TRIAGE] — 256 box worked and closed honest (venue narrowed to one owner question); §7 still CI-gated, nothing cut
+
+- **A0**: **no reset needed** — HEAD already == `origin/main` `ee95f00f` (docs-only); `GET
+  /actions/runs?head_sha=ee95f00f68202b69264df1a75b71786e860ab621` ⇒ `total_count: 0`, expected under
+  `ci.yml` paths-ignore. Nothing red at HEAD.
+- **The one live CI run is still in flight and is progressing, not stale**: run **45634997014** on
+  `50688dc5fc3a908a3a9e91b49f37f541e93559cc` is `in_progress`, but the windows self-hosted job
+  **139296187708** started **15:27:46Z** and its step 6 `Build + test gpn-node (release)` **completed
+  success at 16:07:11Z** (39 min, normal); step 7 `Build + test gpn-agent (release)` has been running
+  since **16:07:11Z** (14 min). Linux (139297887030), fmt+clippy and secret-scan are all `success`.
+  ⇒ not cancelled: the >90-min stale rule measures the job in progress and this one is 54 min in and
+  advancing. `release-cut.sh` keeps refusing the cut for the right reason and there is nothing to cut
+  until it concludes.
+- **Box §3b-256 worked (first unticked box) and closed as `blocked — venue, AWAITING-OWNER`**, with
+  this run's own measurements rather than the carried story:
+  - box 4 (the triage's recommended venue) **still off the tailnet** — `box4.sh` ⇒
+    `unreachable over the tailnet (ssh rc=255) after 2 attempt(s)`, `SOCKSv5 … General SOCKS server failure`;
+  - `Get-VMGpuPartitionAdapter -VMName GPN-209` ⇒ one adapter, `…VEN_8086&DEV_9BC5…` (Intel UHD 630),
+    `CurrentPartitionCompute : 0` — the exact shape of the 2026-11-24 `no OpenCL platforms` refusal;
+  - **new**: `Get-VMHostPartitionableGpu` on box 1 ⇒ the **RTX 5070 Ti is partitionable**
+    (`…VEN_10DE&DEV_2C05…`, `ValidPartitionCounts {32}`, `TotalCompute 1000000000`) and GPN-209 has no
+    partition on it. So the venue needs no new hardware — it needs permission to touch box 1's GPU.
+- **Structural defect in the gate itself, found in the script and now recorded**: step 5 fails by
+  construction in the release that publishes the version it installs —
+  `scripts/stranger-lifecycle.ps1:362` → `"nothing newer is published than {0}; step 5 needs two
+  published versions"`. So 256 can never be green inside release N; the gate validates N-1→N. Scoped it
+  accordingly: the run that closes 256 is **0.3.78 → 0.3.79**, venue ready before 0.3.79 publishes.
+- **NEEDS-TRIAGE 256 entry rewritten and narrowed** to one question (attach the 5070 Ti partition to
+  GPN-209 now / in a window you name / leave box 1 alone and power box 4 back on), recommend attach
+  right after this cut. No [TRIAGE] marker beyond that one item — nothing else needs a decision.
+- Stopped after one box per the loop rule; §7-§10 all sit behind the same CI conclusion.
+
 ## 08:03 PT — §5 closed 7/7 (attestation + cosign proven on published bytes); §7 cut refused by its CI gate, handle recorded
 
 - **A0**: reset to `origin/main` HEAD `fa3d8145` (docs-only), `GET /actions/runs?head_sha=fa3d8145…`
