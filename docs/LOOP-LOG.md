@@ -1,3 +1,24 @@
+## 03:19 PT 0.3.77 §9 deploy+confirm ticked 4/4 — this host self-updated to 0.3.77 at 02:57:44, rollback exercised
+
+- **A0**: HEAD `101fd9c5` docs-only ⇒ `total_count: 0` (expected under `paths-ignore`). Nothing red on main.
+- **Box worked: §9 deploy and confirm (4 boxes, one deployment observation + one rollback exercise).**
+  - Self-update: `gpn-update.timer`'s own run 02:55:59→02:57:44 printed `confirmed 0.3.77 is running`;
+    `update-attempts.json` ⇒ `{"version":"0.3.77","outcome":"confirmed","release_id":"77765c64…"}`
+    (`at` 10:57:44Z), i.e. the manifest's own tarball sha256. No hand copy.
+  - Process: pid 3461458 started 03:18:48, `/proc/…/exe` ⇒ `~/.local/bin/gpn-node`, RPC
+    `system_version` ⇒ `0.3.77`, `specVersion 55`.
+  - Full sequence re-printed (timer passes `--quiet`) after a real `--rollback`: staged→installed→
+    `current -> versions/0.3.77 previous: 0.3.76`→`copied 59 binaries`→`restart`→`confirm rpc=yes 2s
+    version=0.3.77`→`confirmed 0.3.77 is running`, exit 0.
+  - Rollback: `--rollback` ⇒ `restored 59 binaries`, `rolled back to 0.3.76`, `gpn-fleet.service`
+    `active` throughout, RPC kept answering 0.3.77 (tree flip; takes effect next restart), then
+    `--apply --force` returned `current` to 0.3.77. `versions/` holds 0.3.76 (66 files) + 0.3.77.
+- Checklist now **43/53**.
+- **Still open**: §10 behaviour (3), §10b timing (2), §0b filing (2, after §10), §0e (3,
+  AWAITING-OWNER item 256 — now carried a 4th release without a triage decision).
+- **[TRIAGE]** item 256 (stranger-lifecycle GPU steps: which machine) is still open in
+  `docs/NEEDS-TRIAGE.md`; it has now blocked §0e on 0.3.73/74/75/77. Recommend deciding A/B/C.
+
 ## 03:05 PT 0.3.77 §8 stranger verify ticked 4/4 — one `--verify-published` run plus three live polls
 
 - **A0**: HEAD `a8cee9eb` docs-only ⇒ `actions/runs?head_sha=a8cee9eb2af668087f2c1797acaa58b35ff8d980`
