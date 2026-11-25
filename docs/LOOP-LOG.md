@@ -1,3 +1,41 @@
+## 18:12 PT 0.3.75 PUBLISHED — §7/§7b/§8/§10b ticked, §9 self-update recorded as a handle [TRIAGE: item 256 still unanswered]
+
+- **Published**: `release-cut.sh --timeout 300` ⇒ `released 0.3.75` at 17:52:33 PT; manifest commit
+  `0b99d25f`; `https://gpncoin.ai/releases.json` serves `version 0.3.75`, `published_at
+  2026-11-25T01:50:09Z`, linux 348,738,542 `f7f0e6e9…aee4`, windows 253,253,710 `31661cfe…5037`
+  — polled twice, 10 s apart, identical.
+- **First cut attempt failed and was fixed, not reported**: `REFUSED: the index contains paths you
+  did not name: docs/LOOP-LOG.md docs/releases/0.3.75.md` — my own `git add -A` on a hook-refused
+  commit left two docs paths staged and release-cut will not sweep another session's index.
+  `git reset` → commit docs → re-run → success. Cost ~7 min.
+- **§7b surfaces**: `download.html` 0.3.74 → 0.3.75 (commit `5c74bf2a`); `docs/run-a-node.md` and
+  `docs/downloads.md` restamped `chain spec 55 / release 0.3.75 — checked 2026-11-24 17:55 PT at
+  block 359,290` (block + specVersion read live from `:9944`) and regenerated with
+  `build-site-docs.py` (a no-op apart from those two pages). Live polls: `/download` ⇒
+  `current-release">0.3.75`, `/docs/run-a-node` and `/docs/downloads` ⇒ `release 0.3.75`.
+  `seeds.json` carries no version field at all → recorded n/a rather than claimed.
+- **Mirror + GitHub agree**: `crewlyllc/gpn_coin@linux-latest` 348,738,542 `f7f0e6e9…` 01:47:05Z;
+  `@windows-latest` 253,253,710 `31661cfe…` + `.bundle` 8,705 B 01:48:46Z; `jeremyzguo/gpn_coin`
+  holds the same digests; `network.json latest_version` = 0.3.75.
+- **§8 stranger checks**: `--verify-published --version 0.3.75` exits 0, both assets downloaded
+  anonymously by exact filename with matching sha256/size; cut step 6 saw `anonymous GET 206` both.
+- **§10b timing**: `docs/releases/timing/0.3.75.{json,md}` committed — `39 of 53` boxes,
+  `total 2h58m`. Slowest single step **1h04m = §3b box 194**, and it is a machine wait (Windows
+  build queued behind CI on the single box-1 runner), not rework; two concrete shortenings recorded
+  in the box (dispatch both release builds when the checklist opens; run rig fixtures on the Linux
+  build while the zip builds).
+- **§10 box 1 ticked** on the box-3 timestamps; **§10 box 2 NOT ticked**: `system_health` peers 3,
+  not syncing, 0 `gpn-isolated`/`gpn-forked` in 70 min — but two `Reason: Genesis mismatch` bans of
+  a foreign peer (16:55:22, 17:34:55), which the box's wording does not distinguish from our own.
+- **§9 handle**: manifest live 01:50:09Z, cadence hourly ⇒ self-update due by ~18:55 PT. This host
+  is still `system_version 0.3.74` / `gpn-node 0.3.74` (the honest before-state). Next run: read the
+  fleet log for `CONFIRMED: 0.3.75 is running`, re-ask `system_version`, then tick §9's four boxes.
+- **Checklist: 42/53.** Left: §0b filing 0/2 (waits on §10), §0e 0/3 (AWAITING-OWNER, item 256),
+  §9 0/4, §10 2/3.
+- **Row 262 (NEW)** filed earlier this run: the deep-fork `gpn-forked` pause is cleared by the
+  peer's next work-less claim (~23 s), so `-Expect refuse` scores False even though the refusal and
+  non-adoption are correct. Next bundle's fix.
+
 ## 17:37 PT §5+§6 done on the published zip, row 262 filed, release-cut dispatched [TRIAGE: item 256 still unanswered]
 
 - **A0 CI**: `origin/main` HEAD `c73d88382c03252712881ebd5c7c81264a56eefd` ⇒
