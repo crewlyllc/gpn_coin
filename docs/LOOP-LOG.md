@@ -1,3 +1,41 @@
+## [TRIAGE] 04:1x PT 0.3.76 filed + both checklists closed to 52/53 — only the stranger-lifecycle venue is open
+
+- **A0**: main HEAD `14d45a624a57873447ef8cbfa872fa52857dc4f4` is a docs commit ⇒
+  `actions/runs?head_sha=14d45a62…` `total_count: 0` (expected under `paths-ignore`). Nothing red.
+- **No row was IN-PROGRESS** (only `256 | NEW`), and the previous run had flagged `0.3.76` as
+  published-but-unfiled. That filing was this run's box.
+- **0.3.76 filed**: `git mv docs/releases/0.3.76.md docs/releases/archive/0.3.76.md`, INDEX row
+  `| 0.3.76 | 2026-11-24 | 262 (fix b884bc54 shipped here; live proof earned on 0.3.77) |`.
+  §10 box 1 ticked **on 0.3.77's build, said so explicitly** — evidence re-read from box 3 this run,
+  verbatim from `C:\gpn\r194\R194-TEST-e177-vs-b2.md`:
+  `- expect: refuse | observed: refused='deep-fork' reorg=False forkImports=0`,
+  `- before: ours #692 work=1030915 ; theirs #53 work=1404448`,
+  `- after: ours #692 work=1030915 hash=0x3eaa1858…27b9`, `gpn-forked marker present: True`,
+  `Verdict: PASS`; box binary `C:\gpn\r194\bin-0.3.77\gpn-node.exe --version` ⇒ `0.3.77`,
+  sha256 `7F177BDC…93D0E`. (Do not repeat the earlier note that this exe's hash equals the published
+  zip digest — the zip digest is `51fbbab8…` for different bytes; the exe hash above is what I measured.)
+- **0.3.76 → 52/53**: §0b 2/2 (archive + INDEX, verified by `ls`), §10 peers box ticked on a
+  **40-minute** sample — 479 consecutive `💤 Idle (3 peers)` 03:38:40→04:18:38 PT, `best` #361620 →
+  #361769, `grep -ciE 'Reason:|gpn-isolated|gpn-forked|isolated or forked'` ⇒ **0**, no markers on
+  disk — **labelled as measured on the running 0.3.77 build**, since 0.3.76's binary is not deployed;
+  §10 task-row box ticked on row 262 `COMPLETE 0.3.77`; §10b both boxes (timing files committed).
+- **0.3.77 → 52/53**: §10b both boxes — `release-timing.py 0.3.77 --archive` ⇒ `wrote …json`,
+  `total: 5h16m`, slowest step 52m50s (§7 `release-cut.sh`, real work: mirror+sign+publish+anonymous
+  re-download). §0e box 2 ticked on evidence that the unactionable-message class is fixed **in the
+  shipped binary**: `strings -a ~/.local/bin/gpn_node | grep -c 'no usable OpenCL runtime'` ⇒ **1**
+  (`gpn_node --version` ⇒ `0.3.77`), the advice text from `gpu/mod.rs::gpu_error_advice`.
+- **Both checklists now have exactly one unticked box each**, the same one: §0e box 1, the
+  stranger-lifecycle run, which needs a GPU-attached clean Windows guest. Box 3 is ticked `blocked`-
+  style in neither file — it is AWAITING-OWNER, not blocked.
+- **[TRIAGE] item 256, 5th carry.** New **option D**, measured this run: build the clean guest on
+  **box 3** (already granted as the test venue 2026-11-24) — RTX 4060, `MSI MS-7971` physical desktop,
+  Hyper-V feature `Disabled` ⇒ costs one enable + reboot of the test box plus a Windows guest install
+  (2-4 runs). It needs no new machine and no build-box GPU. Recommendation revised to **D first**,
+  A only if GPU-P will not work there. **Default if no answer by the next run: the loop starts D**,
+  since box 3 is already a granted venue. If that is wrong, say so before then.
+- Commits: `8ff1b810` (0.3.76 filing) + the batch commit carrying §10b, §0e boxes, NEEDS-TRIAGE and
+  this entry. Docs-only ⇒ no CI run by design.
+
 ## 03:57 PT 0.3.77 filed (archive + INDEX row) — §0b 2/2, first release of the batch formally closed
 
 - **A0**: main HEAD `0736eacc924a4f517d0275e0b4a5b6320edf7659` is a docs commit ⇒

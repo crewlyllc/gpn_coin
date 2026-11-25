@@ -94,3 +94,17 @@ Format: `- [ ] <item id> — <question> | options: A … B … | recommend: … 
       in flight). Recommendation unchanged: **A** — GPU-P a partition of box 1's 5070 Ti into the
       existing GPN-209 Hyper-V guest; it costs nothing that already works, and if the guest's GPU
       fingerprint collides with box 1's node that collision is itself worth finding.
+      **RE-ANNOUNCED 2026-11-25 04:1x PT** (5th run carrying it; 0.3.73/74/75/77 all shipped with
+      this box open and 0.3.76 is now filed the same way): still unanswered. New **option D**, which
+      this loop can do without a new machine: build the clean guest on **box 3**, which the owner
+      already handed over as the test venue on 2026-11-24 (a real GPU, no live node, no wallet), with
+      a GPU partition from box 3's own card — no build-box contention, nothing of box 1's or box 4's
+      touched. Measured on box 3 this run: `Win32_VideoController` ⇒ `NVIDIA GeForce RTX 4060`,
+      `Win32_ComputerSystem` ⇒ `MSI MS-7971` (physical desktop, not a VM),
+      `Get-WindowsOptionalFeature Microsoft-Hyper-V-All` ⇒ `Disabled` (so D costs one enable +
+      reboot of the test box and a Windows guest install: realistically 2-4 runs, not one).
+      Recommendation, revised: **D first** (inside the existing venue grant, so the loop can start it
+      without a new permission), **A** only if the GPU partition cannot be made to work there.
+      **DEFAULT IF NO ANSWER BY THE NEXT RUN**: the loop proceeds with D, because box 3 is already
+      granted as a test venue and creating a guest on it is not a new machine decision. If that is
+      wrong, say so before then.
