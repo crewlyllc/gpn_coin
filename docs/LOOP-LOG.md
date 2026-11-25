@@ -1,3 +1,28 @@
+## 23:30 PT 0.3.76 §10 row-262 — CAUSE FOUND IN THE BOX-3 LOG, FIXED IN TREE (`b884bc54`); item carried to 0.3.77
+
+- **A0**: HEAD `ed36ad98` docs-only ⇒ 0 runs for that sha (expected, `paths-ignore`). No CI acted on.
+- **Box worked: §3b / §10 row 262.** No trace build was needed — the previous run's own node log
+  already named the claim that killed the pause:
+  `22:15:10.770 WARN … chain-state: peer 12D3KooWNCT… is ahead at #769 (ours #692, same genesis) -- syncing from it`,
+  and the last `isolated or forked: not submitting this CPU seal` line is that same second.
+  So the hold survived the work-less claim (the 0.3.76 fix works) and then died on
+  **`Keep(PeerAhead)`**, which `next_pending` released because ahead-by-height is normally ordinary
+  forward sync. For a peer just refused as `DeepFork` it is the same heavier branch, taller.
+- **Fix `b884bc54`:** `next_pending` now holds a `deep-fork` across `Keep(PeerAhead)` while the
+  announced tip is not a block we hold, and releases the moment it is. Failing-first evidence: the
+  unit test asserted `None` for that case and failed on the pre-fix function
+  (`left: None, right: Some("deep-fork")`). After: `fork_choice` **15 passed**, bin suite
+  **305 passed**, `cargo fmt --check` rc=0, clippy `-D warnings` rc=0.
+- **CI**: run **45564082202** dispatched by the push at 23:2x PT (`pending` on `b884bc54`) — noted,
+  not awaited.
+- **Not ticked:** §10 box 1 still cannot pass — 0.3.76 is published and its binary cannot hold the
+  pause. Item 262 **carries to 0.3.77** (`GPN-LIST.md` row and `docs/releases/0.3.76.md` §3b/§10
+  updated with the mechanism and the failing-first output). §10 box 3 left unticked for the same reason.
+- **Rig hazard noted for the next run:** `ours-e176n.err.log` also shows two production peers
+  (genesis `0xb8e4636a`, #360,3xx) peering into the test node — the rig's node dials production
+  bootnodes. Harmless to the verdict (different genesis ⇒ not a fork) but it costs bandwidth and
+  noise; build the next rig with `--no-default-bootnodes`-equivalent or a `/ip4/`-only listen set.
+
 ## 22:25 PT 0.3.76 §10 row-262 live proof — 3 runs, still FAIL; the sticky DeepFork fix does not hold live (code, not rig)
 
 - **A0**: HEAD `781a4bbe` docs-only ⇒ 0 runs for that sha (expected, `paths-ignore`). No CI acted on.
