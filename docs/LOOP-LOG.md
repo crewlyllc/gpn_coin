@@ -1,3 +1,75 @@
+## 07:1x PT AUDIT — fixed 1 (disk), needs-attention (release-unix red 10/10)
+
+**What I checked, and the numbers.**
+- Units: `systemctl --user list-units 'gpn*' --all` ⇒ 23 units; every **enabled** service is `active
+  running` (accesspoint, diffusion, explorer, faucet, finetune, fleet-directive, fleet, oracle,
+  provider-heartbeat, provider). `gpn-node.service` is `disabled/dead` **by design** — the node runs
+  under `gpn-fleet` (pid 3461458, `/home/jeremyg/.local/bin/gpn-node --chain testnet`, up since
+  03:18:49 PST). No enabled-but-dead unit found. `NRestarts=0` on fleet/accesspoint/provider/diffusion.
+- Ports: 9944 OPEN, 8092 OPEN, 8093 OPEN (200 /health), 8099 OPEN (200), 11434 OPEN.
+- Chain: `chain_getHeader` 362417@07:05:26 → 362418@07:05:41 → 362419 in the log; **134 `🏆 Imported #`
+  lines in 30 min (~13.4 s/block)**. `system_health` ⇒ `{"peers":3,"isSyncing":false}`. `system_version`
+  ⇒ `0.3.77`. `system_peers` ⇒ 3 AUTHORITY peers, `bestNumber` 362412 vs ours 362411 (in step).
+- Logs: `journalctl --user -u gpn-fleet -n 300` ⇒ **300 lines, 0 matching**
+  `panic|Reason:|Incompatible pruning|update fail|taskkill|error`. 30-min grep for
+  `warn|error|panic|ban` ⇒ **0 lines**.
+- `~/.gpn/update/update-attempts.json`: last entry `0.3.77 … "outcome":"confirmed"`, `"attempts":5`,
+  `next_retry_at:0` — settled, no pending retry (5 attempts is high-ish but it confirmed).
+- Release loop `feff1358…`: last run `status: ok`, 187 s, summary = 0.3.78 §5 linux published
+  (`gpn-linux.tar.gz` 348,762,697 B, sha256 `37b8d6d5…`) + §6 2/2 on the linux binaries.
+- Box 1 (`scripts/box1.sh`, exit 0): `Get-Process gpn-node` ⇒
+  `C:\gpn\data\update\versions\0.3.77\gpn-node.exe`, started **2026-11-25 2:57:54 AM** — box 1 is on
+  the same published version as this host.
+- Release records: **0.3.71 … 0.3.77 each have an INDEX row, an `archive/<v>.md` file, and GPN-LIST
+  refs** (grep counts 17/35/16/27/12/6/8). No published version missing any of the three.
+  Consistency: site `gpncoin.ai/releases.json` = **0.3.77** (sha `77765c64…`, equal to the 0.3.77
+  `release_id` in the updater ledger) = running node `system_version` 0.3.77 = box 1 `0.3.77`.
+  `~/gpn-loop` tree Cargo.toml is `0.3.78` — that is the in-flight cut, not a drift.
+  `gpn-deploy-drift` state: `{"checked_at":"2026-11-25T15:01:23Z","exit":0,"message":""}` — no drift.
+
+**Disk — fixed.** Before: `df -h /` ⇒ 439G, used 357G, avail **60G (86%, 13.7% free)**.
+- Confirmed the in-flight build does **not** use the dirs I removed: `/proc/3627175/environ` ⇒
+  `CARGO_TARGET_DIR=/home/jeremyg/.ci-cache/gpn-node-target`, cwd
+  `~/actions-runner/_work/gpn_coin/gpn_coin/gpn-node`; live node runs from `~/.local/bin/gpn-node`.
+- `lsof +D` on both dirs ⇒ **0 open refs** each.
+- Deleted `~/gpn-loop/gpn-agent/target/debug` (**25 G**) and `~/gpn-loop/gpn-node/target/debug` (**14 G**).
+- After: used 320G, avail **98G (77%, 22.3% free)** ⇒ above the 20% target, so I **stopped** there.
+- Left deliberately: `/tmp` scratch is now **27 G** of duplicated release-verification tarballs
+  (`v074` 2.1G, `b70assets` 2.1G, `v68` 1.6G, `gpn-2n` 1.5G, `art-0376` 1.3G, `v077x`/`gpn-ver`/`rel71`
+  ~1G each — eight copies of `gpn-linux.tar.gz` at 340–350 MB). All **younger than the 3-day rule**
+  and the release loop may still be reading `art-0376` while its windows job runs; not deleted. That
+  is the next 25–27 G lever. `/tmp` dirs truly >3 d total only **~700 M**.
+- Memory: 31Gi total, **24Gi available**, swap 2.0/2.0 G used. Load 4.21/3.07/3.29. GPU: RTX 4060,
+  **2047/8188 MiB, 100% util** (a provider job is running — expected).
+
+**Hidden space (measured this run, top consumers):**
+`~/.ci-cache` **70 G** · `~/.cache/huggingface` **53 G** · `/tmp` **27 G** ·
+`~/.openclaw/workspace` **15 G** (of which `shared/` 15 G) · `~/ollama` **8.1 G** · `~/gpn-loop` **5.6 G**
+(release targets only now: 1.6 G + 3.9 G). `~/.openclaw/agents/main/sessions` **370 M**, with
+**176 `.jsonl` older than 30 d** — counted, **not** deleted (owner decision required).
+`.ci-cache` and huggingface are on the never-delete list; their growth is the thing to watch.
+
+**Wrong / escalated.**
+- **`release-unix.yml` is red on every run — 10/10 of the last 10 runs `completed / failure`**
+  (45636836890, 45565068306, 45208107351, 45113572025, 44856007475, 44223634816, 44184880240,
+  44127442135, 44104795070, 44075855044). Job detail for today's: only job `build (macos-latest)`,
+  `status completed, conclusion failure, started 14:41:42Z`, **`steps: []`** and empty `runner` — it
+  died ~3 s after dispatch before any step, i.e. no runner was ever assigned. Cause is in the file
+  itself: `.github/workflows/release-unix.yml:28-31` documents that linux left this workflow (moved to
+  `release-linux.yml`, which succeeded today as 45636833040) and that "macOS has no self-hosted
+  runner, so it stays on the hosted matrix" — hosted macOS is billing-blocked on this account.
+  Net effect: a permanently red workflow on every release, which trains the eye to ignore a red X.
+  **Not fixed by me**: it is release-path code and a windows release build is in flight
+  (`DESKTOP-USBUADL busy=True`, run 45636841344 `in_progress`, `openclawassist` runner also busy with
+  the 0.3.78 linux rebuild). Filed to NEEDS-TRIAGE.
+- Provider/diffusion `[assign] pull failed (attempt 1)` lines at **06:27:25** only — that is the exact
+  second `gpn-accesspoint` was cleanly Stopped/Started (no `NRestarts`, so a deliberate restart, most
+  likely the loop's §0e work). Both providers reconnected in the same second. Transient, not a fault.
+- Finality: fleet log shows `finalized #0` — expected for this PoW chain without GRANDPA; best-block
+  import is advancing normally, so not a fault.
+
+**Remains / waiting on a decision:** release-unix macOS job (retire it, or add a runner).
+
 ## 07:0x PT — 0.3.78 §5 linux DONE + artifact verified (§6); windows build still queued
 
 - **A0**: `git reset --hard origin/main` → `90148413`. `GET /actions/runs?head_sha=90148413dc333a11d8a564ff1aae12d33499da1e`
