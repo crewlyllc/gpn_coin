@@ -8,6 +8,46 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 versions are [Semantic Versioning](https://semver.org/spec/v2.0.0.html), with
 the GPN-specific meaning of each level documented in `docs/updates.md`.
 
+## [0.3.80] - 2026-11-25
+
+Bumped from 0.3.79 (`scripts/bump-version.py patch`). Batch release (owner policy 2026-11-25: five
+fixes, or one critical): rows 273-277 were the five waiting items, so they ride one version and one
+fleet restart instead of five.
+
+### Added
+- **Per-node telemetry the audit can trend** (row 274): the audit now writes one small JSON per node
+  per day (`~/.gpn/telemetry/<date>.json` — height, peers, block-interval p50/p95, restarts, job
+  counts, update result, disk free), and with 7 consecutive files it prints a trend line and flags any
+  metric moving more than 25% week over week. A slow drift is no longer invisible until it is an
+  incident.
+- **Three incident alarms** (row 276): the audit raises an alarm (Discord + `docs/NEEDS-TRIAGE.md`)
+  when peers < 2 for 10 minutes, when no block arrives for more than 2 minutes, or when job success
+  falls below 90% over an hour — each alarm carrying the measurement that triggered it, and each
+  proven by injecting the condition once.
+- **Canary rollout** (row 275): one node updates and proves itself (version `CONFIRMED` plus a served
+  job) before the rest of the fleet moves; other nodes hold while the canary is in flight, and a failed
+  canary leaves them on the old version.
+
+### Changed
+- **The seven-day soak gate is measured, not just defined** (row 273): `docs/STABILITY-GATE.md`
+  specifies six tests that had never been executed with numbers beside them. A soak record
+  (`docs/soak-<date>.md`) now carries a day-by-day line for this host and box 1 — uptime, peers,
+  block-interval p50/p95, restarts, update outcomes, jobs attempted/succeeded, and any
+  `Reason:`/ban line — plus a verdict per gate test, and names drift as drift instead of reporting it
+  as healthy.
+
+### Fixed
+- **An aborted `release-cut` no longer leaves the repo locked** (row 277): `scripts/release-cut.sh`
+  released `~/.gpn/release-in-flight` only when the holder line matched a pid format that
+  `release-lock.sh take` does not write, so the safety net could never fire on the abort path — found
+  2026-11-25 12:19 PT when a cut correctly refused to sign an unverified build and then left
+  `holder: jeremyg@openclawassist pid 3872365` behind with no such process, refusing every subsequent
+  `git commit`. The lock is now tracked by version/`LOCK_TAKEN` and released by version in `cleanup()`.
+
+### Carried
+- **Stranger lifecycle proof** (row 256): still `AWAITING-OWNER` for a venue — the open question is in
+  `docs/NEEDS-TRIAGE.md` (attach a GPU partition of box 1's 5070 Ti to GPN-209, or power box 4 back on).
+
 ## [0.3.79] - 2026-11-25
 
 Bumped from 0.3.78 (`scripts/bump-version.py patch`). Three defects found on 0.3.78 by running the
