@@ -1,3 +1,24 @@
+## 23:45 PT 0.3.77 — LINUX BUILD SUCCESS, asset verified; release body had a stale commit and was corrected
+
+- **A0**: HEAD `284ddfa1` docs-only ⇒ `actions/runs?head_sha=284ddfa16…` = **0 runs** (expected).
+- **Linux release run 45565065260 = `completed / success`** (07:02:33→07:36:02Z, head `31021425`,
+  all 8 steps green). `linux-latest/gpn-linux.tar.gz` replaced: 348,762,313 bytes,
+  `sha256:77765c64…`. Re-downloaded the asset through `GET /releases/assets/790551932` this run —
+  same size, same sha256 — and `./gpn-node --version` from the tarball prints **`gpn-node 0.3.77`**.
+  String scan of that binary: `reorg=`, `work ours=`, `gpn-forked`, `deep-fork` (×3) and
+  `is ahead at` all PRESENT. §6's two boxes and §5's linux-asset box ticked on that evidence.
+- **Defect found and fixed in published output**: `linux-latest`'s release **body** still read
+  `commit 1f980e58… (first-run wizard …)` from an older build, because
+  `scripts/ci/publish-release-asset.py` only writes `--body` in the *create* branch and never on
+  the rolling update. Corrected the live release via `PATCH /releases/418873465` to
+  `commit 310214250bd38a7eaba6e8121bf077b4c9ee69f3 (0.3.77)`. Script fix **queued** (set body on
+  update too) — deliberately not pushed while the release is in flight.
+- **Windows run 45565071726 still `queued`** (asked once at 23:36Z; no conclusion). CI run
+  45565029747 `pending`. Not awaited, nothing cancelled (well under 90 min).
+- **Row 262's §3b box is still the one open thing that matters** and it needs the **published
+  Windows** build: `scripts/r194-fork-test.ps1 -Expect refuse` on box 3. Checklist now 21/53.
+- **Next run**: ask once for 45565071726; on success do §5 attestation + §7 cut, then the box-3 run.
+
 ## 23:16 PT 0.3.77 release builds still queued behind a CI run — asked once, not waited
 
 - **A0**: HEAD `0be55b01` is docs-only ⇒ `actions/runs?head_sha=0be55b01…` = **total_count: 0**
