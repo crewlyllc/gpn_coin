@@ -1,3 +1,23 @@
+## 02:36 PT 0.3.77 §7b capability-discoverability ticked — site now names the held deep-fork refusal
+
+- **A0**: HEAD `a09ef01e` docs-only ⇒ `actions/runs?head_sha=a09ef01e…` `total_count: 0` (expected
+  under `paths-ignore`). Nothing red on main. Version `0.3.77`, checklist present ⇒ no regeneration.
+- **Box worked: §7b capability discoverability.** The bundle is **one item, 262** — a consensus
+  behaviour fix, no new chat/image/video/audio/fine-tuning/ML capability, so the "example request
+  actually works" clause has nothing to exercise (`awk '/^## 3b\./,/^## 3\. Bump/'` ⇒ 1 item).
+  What was missing was the *site* naming the behaviour, so it was added rather than ticked vacuous:
+  `website/docs/technical-overview.html` §Consensus gains "**Deep-fork refusal is held:** … keeps
+  sealing paused and never reorgs onto that branch … A peer that is merely ahead on *our* own chain
+  is not treated as a fork", next to the existing "Fork tolerance" bullet.
+- **Proof**: `curl -sL https://gpncoin.ai/docs/technical-overview.html` ⇒ 200, 24,676 B before /
+  **25,075 B** after the Cloudflare rebuild, added sentence present verbatim (polled at 10:5xZ, ~90 s
+  after push `483f68e7`).
+- Checklist now **35/53**. §0e boxes stay AWAITING-OWNER (which machine carries the stranger-lifecycle
+  GPU legs, item 256).
+- **Still open**: §8 stranger verify (4), §9 self-update (4), §10 behaviour (3), §10b timing (2),
+  §0b filing (2, only after §10 closes), §0e (3, owner).
+- No new [TRIAGE] items.
+
 ## 02:26 PT 0.3.77 §3b row 262 LIVE PROOF — box-3 deep-fork test PASS=True on the published 0.3.77 binary
 
 - **A0**: HEAD `21cdc562` docs-only ⇒ `actions/runs?head_sha=21cdc5625dd2…` `total_count: 0` (expected
