@@ -1332,9 +1332,10 @@ pub fn install_guard(
     match (&installed.sha, &candidate.sha) {
         (Some(a), Some(b)) if !a.eq_ignore_ascii_case(b) => InstallVerdict::Refuse(format!(
             "refusing to replace {} with a different build of the same version: the install \
-             dir runs sha {}, the release was built from sha {}. Installing it would swap \
-             newer code for older code and no version comparison could see it. \
-             Re-run with --force if this is deliberate.",
+             dir runs sha {}, the release was built from sha {}. The two builds differ, and \
+             this guard cannot tell which is newer — no version comparison can see it and \
+             neither sha's ancestry is recorded at runtime. Re-run with --force if this is \
+             deliberate.",
             installed.version, a, b
         )),
         _ => InstallVerdict::Allow,
@@ -4947,6 +4948,19 @@ mod tests {
                 assert!(msg.contains("e188444"), "names the installed build: {msg}");
                 assert!(msg.contains("0787c8b"), "names the release build: {msg}");
                 assert!(msg.contains("--force"), "names the escape hatch: {msg}");
+                // Item 271: the guard cannot know which tree is newer. It sees
+                // two shas and no ancestry, so the message must not assert a
+                // direction — measured 2026-11-25 09:2x PT, the installed sha
+                // was an *ancestor* of the release sha and the text said the
+                // opposite.
+                assert!(
+                    !msg.contains("newer code for older code"),
+                    "must not claim a direction it cannot verify at runtime: {msg}"
+                );
+                assert!(
+                    msg.contains("cannot tell which is newer"),
+                    "must say plainly that the direction is unknowable here: {msg}"
+                );
             }
             other => panic!("same version + different sha must be refused, got {other:?}"),
         }

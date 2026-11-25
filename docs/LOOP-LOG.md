@@ -1,3 +1,26 @@
+## 11:05 PT — 0.3.79 §3b box 3 (item 271) ticked — the update guard stopped claiming a direction it cannot see
+
+- **A0**: `fetch + reset --hard origin/main` ⇒ HEAD `c83ae390` (list/stability track, docs-only —
+  full-sha query returns `total_count: 0`, expected under `ci.yml` paths-ignore). Two runs noted,
+  not waited on: `45660996072` (`88fbd56a`) and `45671136218` (`35e94b1b`) — single-slot runner.
+- **Box worked**: §3b item **271** (item 256's venue question is still AWAITING-OWNER; §0e).
+  Message rewrite in `install_guard`, same-version/different-sha arm: "Installing it would swap
+  newer code for older code…" ⇒ "The two builds differ, and this guard cannot tell which is newer
+  — no version comparison can see it and neither sha's ancestry is recorded at runtime". Both
+  shas and `--force` still named; the refusal behaviour is untouched.
+- **Test first**: added the assertion before changing the string; it failed on the old text
+  (`must not claim a direction it cannot verify at runtime: … Installing it would swap newer code
+  for older code …`), passes after — `cargo test --lib update::` ⇒ **114 passed; 0 failed; 2 ignored**.
+  `cargo fmt --all -- --check` clean; clippy with CI's allow-list ⇒ **EXIT=0** (only the upstream
+  subxt future-incompat note).
+- **Live refusal line**: `gpn_update` built from this tree, `current`→0.3.77 with a stamped
+  `0.3.78 sha=deadbee` in the target dir, `--apply` ⇒ `gpn_node: refusing to replace 0.3.78 with a
+  different build of the same version: the install dir runs sha deadbee, the release was built from
+  sha 50688dc. The two builds differ, and this guard cannot tell which is newer … Re-run with
+  --force if this is deliberate.` `EXIT=3`, nothing installed.
+- **Next run**: §3b item 272 (first chat jobs time out at 10 s while the local provider warms).
+- No blocker, no [TRIAGE].
+
 ## 10:25 PT — 0.3.79 §3b box 1 (item 270) ticked — a remote provider's loopback channel_url is no longer dialable
 
 - **A0**: `fetch + reset --hard origin/main` ⇒ HEAD `3ac533b0` (docs-only, `total_count: 0` for the
