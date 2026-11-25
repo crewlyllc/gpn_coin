@@ -26,8 +26,10 @@
   (`C:\gpn\r194\r194-nokey.ps1 … -TheirsNoKey`), read which claim cleared the hold, make the hold
   survive it, add a unit test with that exact claim. §10, §10b and §0b stay unticked; row 262 stays
   IN-PROGRESS.
-- **Box 3 left**: production node running (pid 12372, untouched); r194 scratch nodes stopped by the
-  harness; `E1`/`B2` frozen rigs unchanged on disk.
+- **Box 3 left**: production node was found stopped after the runs (pid 12372 gone, no reboot since
+  2026-11-05) — restarted via `Start-ScheduledTask GPN-Node`, now `pid=4680` from
+  `C:\gpn\data\update\current\gpn-node.exe`; r194 scratch nodes stopped by the harness; `E1`/`B2`
+  frozen rigs unchanged on disk.
 
 ## 21:41 PT 0.3.76 **PUBLISHED + DEPLOYED** — §7/§7b/§8/§9 all ticked; two dead watchdog units repaired
 
