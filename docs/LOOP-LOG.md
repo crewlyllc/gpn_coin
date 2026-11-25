@@ -1,3 +1,26 @@
+## 11:4x PT — 0.3.79 §3/§4 ticked, both release builds dispatched (linux + windows) and the run ended
+
+- **A0**: `fetch + reset --hard origin/main` ⇒ HEAD `669203161527f92351f71b0e1ef329d20fe4cb76`
+  (item 272's commit). CI for that full sha: run **45685415856**, `pending`, `conclusion: None`
+  (created 19:27Z) — noted, **not waited on**. Measured cause: the single-slot Windows runner is
+  `online busy=True` with CI run **45671136218** (`35e94b1b`) whose windows job is live in step 7/14
+  `Build + test gpn-agent (release)` (started 19:04:37Z); Linux runner `busy=False`. Contention, not a fault.
+- **No new box of code could be worked**: §3b 270/271/272 are ticked (evidence already in the file), and
+  §0e / row 256 is AWAITING-OWNER for a GPU-attached clean Windows guest (no venue: GPN-209 has only the
+  Intel iGPU at `CurrentPartitionCompute 0`; box 3 is live 0.3.77; box 4 off the tailnet).
+- **Ticked §3** with evidence: bump `b4648fbd` (15 manifests + network.json `latest_version 0.3.79` +
+  14 lockfile entries), 0.3.79 CHANGELOG section (no `_TODO_`), `bump-version.py --check` ⇒
+  `lockstep: 15 manifest(s) and 14 lockfile entr(ies) agree`, and the seed-parity suites
+  `shipped_bootnodes` + `launcher_bootnodes` ⇒ **4 + 4 passed, 0 failed**.
+- **Ticked §4** with evidence: docs-only commits `3ac533b0…`, `a3b0e992…`, `a220b404…` each
+  `total_count: 0` (paths-ignore intact); CI observed once per the rule above; full 40-char sha used.
+- **§5 dispatched, not waited on**: tag `build/669203161527` pushed; `release-linux-selfhosted.yml` ⇒
+  run **45687692671** (`in_progress`, 19:41Z), `release-windows.yml` ⇒ run **45687695024** (`queued`,
+  19:41Z). `release-unix.yml` (macOS) deliberately **not** dispatched — permanently red, hosted-runner
+  billing block, AUDIT-2026-11-25a, macOS not in the manifest.
+- **Next run**: read those two run ids; if `success`, tick §5/§6 (artifact scan + `--version`) and go to §7 cut.
+- **[TRIAGE]** nothing new; item 256 remains the only open question for the assistant.
+
 ## 11:2x PT — 0.3.79 §3b box 4 (item 272) ticked — an AP whose provider is still loading its model says "not ready" instead of timing out
 
 - **A0**: `fetch + reset --hard origin/main` ⇒ HEAD `6427d5c5` (item 271's commit). One CI run exists for the
