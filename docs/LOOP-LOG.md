@@ -41,7 +41,9 @@ Every claim below is from a command run in this session (05:16–05:35 PT).
   which machine, given that a guest on box 1/box 3 still has to borrow a GeForce through GPU-P, which
   NVIDIA documents only for its vGPU (data-centre) driver. New **option E** is the cheap honest one:
   preserve box 4's keystore/state, wipe the rest, run the lifecycle there, restore the keystore — real
-  GPU, real network path, no purchase; it needs box 4 back on the tailnet first (it is not today).
+  GPU, real network path, no purchase; it needs box 4 powered on first — box 1's `tailscale status`
+  at 05:35 PT lists only `desktop-usbuadl`, `desktop-dpjr60m` and `openclawassist`, so box 4 is not
+  merely unreachable, it is absent from the tailnet.
 - Files: `docs/LOOP-LOG.md`, `docs/NEEDS-TRIAGE.md`. No code commit, no version bump (nothing to
   bundle), no release in flight.
 

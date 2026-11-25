@@ -119,8 +119,10 @@ Format: `- [ ] <item id> — <question> | options: A … B … | recommend: … 
       run `scripts/stranger-lifecycle.ps1` there, restore the keystore — a real discrete GPU on a real
       network path, no purchase, no build-box contention; its costs are box 4's node being down for the
       run and the per-GPU entry mark (row 251) being exercised for real, which is itself worth knowing.
-      It needs box 4 back on the tailnet first: `scripts/box4.sh` exits 3
-      (`SOCKSv5 error: General SOCKS server failure`, 05:20 PT today). Still on the table: C (dedicated
+It needs box 4 powered on first: box 4 is **not in the tailnet at all** — box 1's
+      `tailscale status` (05:35 PT) lists exactly three nodes, `desktop-usbuadl`,
+      `desktop-dpjr60m`, `openclawassist`, and `scripts/box4.sh` exits 3
+      (`SOCKSv5 error: General SOCKS server failure`). Bringing it back is a hand on the machine. Still on the table: C (dedicated
       test box — the only option with no compromise, costs hardware), A (GPU-P of the 5070 Ti —
       unproven on GeForce), B/E (box 4, keystore preserved). Until this is answered the loop will not
       spend further runs on 256; it will work CI failures and other defects instead.
