@@ -1,3 +1,24 @@
+## 07:26 PT — §5 box 4 ticked (attestation ordering, verified in the workflow and in the live job)
+
+- **A0**: `origin/main` HEAD `4a90c5fc53563e40d96201d484f68f24f7841341` == local HEAD after
+  `git reset --hard`. `GET /actions/runs?head_sha=4a90c5fc…` ⇒ `total_count: 0` — docs-only commit,
+  expected under `ci.yml` paths-ignore. Nothing red.
+- **Box worked: §5 "attestation step runs BEFORE publish, failure blocks the release" — DONE 07:25 PT.**
+  Repo visibility measured: `GET /repos/jeremyzguo/gpn_coin` ⇒ `private: true` ⇒ cosign path applies.
+  Workflow step order (`.github/workflows/release-windows.yml`): availability 678 → keyless sign 699 →
+  provenance gate 720 → publish 748. The gate has no `if:` and `throw`s on no attestations (735),
+  no bundle (737), bundle < 200 B (738), `cosign verify-blob` non-zero (743). Live job steps for run
+  45636841344: 19 availability → 21 sign → 22 gate → 23 publish.
+- **§5 box 3** (`release-windows.yml` → `gpn-windows.zip`): run **45636841344** was *queued* at 07:00 PT
+  and is now `in_progress` (runner DESKTOP-USBUADL freed at 15:00:54Z); step 10 `build node` in flight.
+  Not waited on, per the dispatch rule — handle stays in the box, next run reads its conclusion.
+- **Row 256** (§3b) stays AWAITING-OWNER: triage line for it is already in NEEDS-TRIAGE.md and the
+  assistant's answer was "spend no further runs on 256". Not touched.
+- Next run: if 45636841344 is `success`, tick §5 box 3 with the asset bytes/digest, then §5 box 5
+  (attestation exists for the digest `releases.json` serves) after the cut, or box 6 (`cosign
+  verify-blob` on the downloaded zip) — the bundle ships with the release, so box 6 can be earned
+  directly from the published assets.
+
 ## 07:1x PT AUDIT — fixed 1 (disk), needs-attention (release-unix red 10/10)
 
 **What I checked, and the numbers.**
