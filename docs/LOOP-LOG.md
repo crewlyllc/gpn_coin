@@ -1,3 +1,22 @@
+## 03:05 PT 0.3.77 §8 stranger verify ticked 4/4 — one `--verify-published` run plus three live polls
+
+- **A0**: HEAD `a8cee9eb` docs-only ⇒ `actions/runs?head_sha=a8cee9eb2af668087f2c1797acaa58b35ff8d980`
+  `total_count: 0` (expected under `paths-ignore`). Nothing red on main. Version `0.3.77`, checklist
+  present ⇒ no regeneration.
+- **Box worked: §8 verify as a stranger (4 boxes, one observation).**
+  `scripts/release-cut.sh --verify-published --version 0.3.77` ⇒ **exit 0**:
+  linux 348,762,313 B `77765c64…2a2`, windows 253,251,369 B `51fbbab8…f4d4b`, both
+  `matches the manifest`, `PASS: both manifest assets are publicly downloadable by exact filename`.
+  No token, no cookie jar — the tool authenticates nothing, so this is the stranger's view.
+- **Live stamp polls** (repo copy deliberately not trusted): `/docs/downloads` ⇒ `0.3.77`,
+  `/download.html` ⇒ `id="current-release">0.3.77`, `/docs/run-a-node` ⇒ `0.3.77`. The single
+  `0.3.70` on download.html is inside a JS comment about the page's own stale-stamp history, not a
+  displayed value.
+- Checklist now **39/53**.
+- **Still open**: §9 self-update (4), §10 behaviour (3), §10b timing (2), §0b filing (2, after §10),
+  §0e (3, AWAITING-OWNER item 256).
+- No new [TRIAGE] items.
+
 ## 02:36 PT 0.3.77 §7b capability-discoverability ticked — site now names the held deep-fork refusal
 
 - **A0**: HEAD `a09ef01e` docs-only ⇒ `actions/runs?head_sha=a09ef01e…` `total_count: 0` (expected
