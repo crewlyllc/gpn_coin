@@ -1,3 +1,34 @@
+## 14:40 PT — row 270's live half earned: a PNG landed on 0.3.79 while a bad loopback candidate was refused
+
+**A0 (CI):** HEAD `530815c37365ed5fff8ee2445adc8c53cfe9fbb2` (`docs(0.3.79): file the release …`) ⇒
+`GET /actions/runs?head_sha=` **total_count: 0** — docs-only commit, `paths-ignore` intact, expected.
+
+**Box ticked this run (one item):**
+- **270 → COMPLETE 0.3.79** — the live half that 0.3.79 shipped without. `POST :8092/v1/images/generations`
+  `{"model":"sd-turbo","prompt":"a red apple on a wooden table","size":"256x256"}` ⇒ `202` id
+  `9bbfb21c5fe5a48fe3b15e4b6b5e8735` → polled to `completed`, `data[0] {256x256,
+  sha256:0c088cce…b3f81e}`; fetched artifact `PNG image data, 256 x 256, 8-bit/color RGB`, **137,649 B**,
+  digest matches. Bad candidate present in the same list at the same moment: `14:37:33 [route] handing job
+  to 5FCwsMfVbPzv… — next in line (4 provider(s) waiting)` then `[images] provider 5HVtpozGCNDM… published a
+  loopback/private channel_url http://127.0.0.1:8095/channel/job but is not on this host (same-egress check)
+  — ignoring that URL`, and the job still settled (`[hub] job 1795646253950 served off-chain on channel 7`,
+  `[images] 9bbfb21c… settled on channel 7 — 1 image(s) on 5ENqSp5Q65bx…`).
+
+**Why the previous attempt "failed" (diagnosed, not parked):** 13:54 used `sdxl-turbo`, refused
+`HTTP 425 … unloadable on this host (recorded)`. That verdict is a real model fact — the mark dates from
+2026-10-23 (13 GB pull, OOM at 7.2 GB RSS on this 8 GB card) and lives in `~/.gpn/diffusion_unloadable.json`.
+It is not a routing fault, so the retry used the loadable sibling `sd-turbo` (cached,
+`models--stabilityai--sd-turbo`). Note for the record: the refusal message says "the repo cannot be loaded
+here" while the actual cause is VRAM — row 258's class, worth a follow-up row if it bites an operator.
+
+**Still open:** 256 (AWAITING-OWNER, venue — `docs/NEEDS-TRIAGE.md` item 256). §0e box 1 stays unticked by
+its own instruction.
+
+**Next run:** no actionable IN-PROGRESS row remains ⇒ §C applies: five NEW rows are queued (273 soak, 274
+telemetry, 275 canary, 276 alarms, 277 release-cut lock leak) — bundle them into 0.3.80 and generate the
+checklist. Row 277 (aborted `release-cut` leaves `~/.gpn/release-in-flight` behind) should be box 1: it can
+block the very cut that opens the release.
+
 ## 14:21 PT — 0.3.79 filed (§0b): checklist archived + INDEX row; release is complete bar the AWAITING-OWNER lifecycle
 
 **A0 (CI):** HEAD `5fcecdd7a5601f0b538ad9c054f5327398a93453` (`release(0.3.79): cut + publish …`) ⇒
