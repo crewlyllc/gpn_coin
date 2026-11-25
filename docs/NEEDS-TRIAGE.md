@@ -108,6 +108,22 @@ Format: `- [ ] <item id> — <question> | options: A … B … | recommend: … 
       **DEFAULT IF NO ANSWER BY THE NEXT RUN**: the loop proceeds with D, because box 3 is already
       granted as a test venue and creating a guest on it is not a new machine decision. If that is
       wrong, say so before then.
+      **2026-11-25 05:2x PT — the default's premise is dead, do not act on it.** Measured this run:
+      box 3 IS a live node (`gpn_node` pid 15644, `0.3.77`, left booted since 2026-11-05 14:30) so it is
+      not wipeable, and a Hyper-V guest on it would still need a GPU-P partition — which NVIDIA
+      documents only for its vGPU (data-centre) driver, so A and D both rest on an unsupported path on
+      GeForce. The "reuse GPN-209's existing partition" shortcut is closed by our own code, not config:
+      `gpu/mod.rs::classify_gpu_name` classes `Intel(R) UHD Graphics 630` as `integrated`, and
+      `tflops_estimates_are_ordered_and_igpus_stay_low` asserts integrated parts never clear the
+      ~3 TFLOPS floor. **New option E (recommended):** preserve box 4's keystore/state, wipe the rest,
+      run `scripts/stranger-lifecycle.ps1` there, restore the keystore — a real discrete GPU on a real
+      network path, no purchase, no build-box contention; its costs are box 4's node being down for the
+      run and the per-GPU entry mark (row 251) being exercised for real, which is itself worth knowing.
+      It needs box 4 back on the tailnet first: `scripts/box4.sh` exits 3
+      (`SOCKSv5 error: General SOCKS server failure`, 05:20 PT today). Still on the table: C (dedicated
+      test box — the only option with no compromise, costs hardware), A (GPU-P of the 5070 Ti —
+      unproven on GeForce), B/E (box 4, keystore preserved). Until this is answered the loop will not
+      spend further runs on 256; it will work CI failures and other defects instead.
 
 - [ ] **box1 PowerShell outage (blocks box1.sh, the Windows runner's PS steps, and any lifecycle
       venue work)** — every `powershell.exe` on box 1 exits `Access is denied.` with no other output
@@ -127,3 +143,17 @@ Format: `- [ ] <item id> — <question> | options: A … B … | recommend: … 
       (so not wipeable), box 4 is off the tailnet, and GPN-209's existing GPU partition is attached to
       the **Intel iGPU with `CurrentPartitionCompute 0`**, which is the wrong GPU and has no compute
       share | raised 2026-11-25 05:0x PT (loop run, stranger-lifecycle venue attempt)
+      **2026-11-25 05:2x PT — SELF-RESOLVED, no reboot needed and no owner answer required.**
+      PowerShell came back on its own: `scripts/box1.sh '…Write-Output PSONE'` ⇒ `PSONE` at 05:17:18,
+      `LastBootUpTime` still 2026-11-10 12:01:54 (no reboot), `nested_ok=10` for ten consecutive
+      launches, same `gpn-node` pid 56724 answering `0.3.77`. Outage window ≈ 04:32→05:15 PT. Root
+      cause NOT established: the Bitdefender-AMSI/Code-Integrity idea is weakened — only 4 event-3033
+      records inside the window (00:32 x78, 00:33 x84, 04:28 x1, 04:46 x3, none after 04:46) and every
+      one attributed to `SecurityHealthService.exe`/`svchost.exe`, never to `powershell.exe`; both
+      `antimalware_provider64.dll` copies verify `Valid` with 2022 mtimes; `BDESVC` is `Stopped/Manual`
+      before and after. Options A (reboot) and B (convert GPN-Node to SYSTEM) are therefore **not
+      being taken** — recovery happened without either. What WAS fixed: `scripts/box1.sh` returned
+      exit 0 with an empty string in that state, so a dead interpreter looked like a silent success;
+      `box1.sh`/`box3.sh`/`box4.sh` now route through `scripts/winps.sh` (exit 3 unreachable /
+      4 powershell unusable / 5 no output, one named reason on stderr, one retry after 15 s). If it
+      recurs, the tool says so instead of going quiet.

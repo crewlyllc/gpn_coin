@@ -1,3 +1,50 @@
+## [TRIAGE] 05:2x PT box1 PowerShell was back at 05:17 (no reboot) — the tool that misread it is fixed; lifecycle venue needs a machine decision, the old "default D" premise is dead
+
+Every claim below is from a command run in this session (05:16–05:35 PT).
+
+- **A0**: `origin/main` reset to `c49302b2` (`git reset --hard`).
+  `GET /actions/runs?head_sha=c49302b21eb51fa5cd74e2ec655ee29100affa45` ⇒ `total_count: 0` (docs-only
+  commit, `paths-ignore` correct). Nothing red, nothing waited on. Both runners present and **idle**:
+  `DESKTOP-USBUADL` (Windows) `online busy=False`, `openclawassist` (Linux) `online busy=False`.
+- **Queue**: the only non-terminal row is `256 | NEW` (AWAITING-OWNER); rows 12/13/17/26/153 remain
+  BLOCKED (owner-deferred or days-scale). 0.3.77 is published, archived and filed, so there is no
+  IN-PROGRESS work and nothing to bundle — bundling an empty version would be the wrong move.
+- **box1 PowerShell RECOVERED BY ITSELF.** `scripts/box1.sh '…Write-Output PSONE'` ⇒ `PSONE` at
+  05:17:18 PT; `(Get-CimInstance Win32_OperatingSystem).LastBootUpTime` ⇒ **2026-11-10 12:01:54**,
+  i.e. **no reboot** — the ~45-minute outage (04:32→05:15 PT) ended with no action on our side.
+  10 consecutive nested `powershell.exe` launches ⇒ `nested_ok=10`. The `gpn-node` process is the
+  same pid 56724, started 02:57:54, answering `0.3.77` — unchanged by the outage.
+- **The AMSI hypothesis is now WEAKER, not confirmed.** Code Integrity 3033 events in the last 6 h:
+  `00:32 x78`, `00:33 x84`, `04:28 x1`, `04:46 x3` — **none after 04:46** and **none from
+  powershell.exe** (all are `SecurityHealthService.exe`/`svchost.exe` loading Bitdefender's
+  `antimalware_provider64.dll`). Both `antimalware_provider64.dll` files now test `Valid`
+  (`Get-AuthenticodeSignature`) with 2022 mtimes, so nothing was re-signed at recovery. `BDESVC` is
+  `Stopped/Manual` both before and after. Root cause remains **unknown**; what is now known is that
+  it self-clears in under an hour and needs no reboot.
+- **Fixed the class, not the instance** (the real work this run): `scripts/box1.sh`, `box3.sh`,
+  `box4.sh` returned **an empty string with exit 0** in exactly that failure state — indistinguishable
+  from "the command printed nothing", which is how a dead interpreter passed for a healthy answer.
+  They now go through `scripts/winps.sh`, which retries once (15 s) and then exits **3** unreachable /
+  **4** `powershell.exe` unusable ("Access is denied.", no CLIXML `<Objs>` payload) / **5** no output,
+  each with a one-line reason on stderr. Tested three ways with a stub `ssh` on PATH: denial ⇒ exit 4 +
+  the outage-class message, refused connection ⇒ exit 3, silent exit 0 ⇒ exit 5; and once for real per
+  box (`box1` ⇒ `PSONE`, `box3` ⇒ `DESKTOP-DPJR60M` booted 2026-11-05, `box4` ⇒ exit 3,
+  `SOCKSv5 error: General SOCKS server failure` — box 4 is still off the tailnet).
+- **Why 256 did not move**: the venue needs a *clean Windows image with a real discrete GPU*. The gate
+  is code, not configuration — `gpn-agent/src/gpu/mod.rs::classify_gpu_name` puts `Intel(R) UHD
+  Graphics 630` in `integrated` and `tflops_estimates_are_ordered_and_igpus_stay_low` asserts
+  integrated parts never clear the ~3 TFLOPS floor — so GPN-209's existing **Intel iGPU** partition
+  cannot register no matter how the partition is attached. Every machine with a discrete GPU (box 1
+  5070 Ti, box 3 4060, box 4) is also a **live node**: box 3 was measured at 05:0x serving `0.3.77`
+  with 4 providers, which voids option D's premise ("box 3 has no live node, no wallet").
+- **[TRIAGE]** one question in `docs/NEEDS-TRIAGE.md` (256, 7th carry) with the premise corrected:
+  which machine, given that a guest on box 1/box 3 still has to borrow a GeForce through GPU-P, which
+  NVIDIA documents only for its vGPU (data-centre) driver. New **option E** is the cheap honest one:
+  preserve box 4's keystore/state, wipe the rest, run the lifecycle there, restore the keystore — real
+  GPU, real network path, no purchase; it needs box 4 back on the tailnet first (it is not today).
+- Files: `docs/LOOP-LOG.md`, `docs/NEEDS-TRIAGE.md`. No code commit, no version bump (nothing to
+  bundle), no release in flight.
+
 ## [TRIAGE] 05:0x PT box1's PowerShell is dead machine-wide — the lifecycle-venue attempt stopped on it
 
 Every claim below is from a command run in this session (04:36–05:00 PT).
