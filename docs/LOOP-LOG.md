@@ -1,3 +1,41 @@
+## 08:03 PT — §5 closed 7/7 (attestation + cosign proven on published bytes); §7 cut refused by its CI gate, handle recorded
+
+- **A0**: reset to `origin/main` HEAD `fa3d8145` (docs-only), `GET /actions/runs?head_sha=fa3d8145…`
+  ⇒ `total_count: 0` — expected under `ci.yml` paths-ignore. Nothing red at HEAD.
+- **Box §5-6 ticked** — mechanism branch read from the API, not assumed: repo `private=true`
+  ⇒ cosign path, so the `/attestations/sha256:` **404 is the documented non-failure**. Release
+  `windows-latest` carries asset **792078282** `gpn-windows.zip` 253,264,039 B digest `d3024bc0…`
+  and **792080832** `gpn-windows.zip.bundle` 9,049 B. Bundle's cert SAN is
+  `…/release-windows.yml@refs/tags/build/50688dc5fc3a` (the release commit), issuer
+  `token.actions.githubusercontent.com`, Rekor `logIndex 4105538020`, `integratedTime
+  1795620410` = **2026-11-25T15:26:50Z** — inside the job window (15:00:54→15:27:44Z), i.e. the
+  real sign step, not a backfill.
+- **Box §5-7 ticked** — `cosign verify-blob --bundle … --certificate-identity-regexp
+  '…release-windows\.yml@.*' --certificate-oidc-issuer https://token.actions.githubusercontent.com
+  gpn-windows.zip` ⇒ **`Verified OK`**, exit **0**, against re-downloaded bytes whose `sha256sum`
+  equals GitHub's published digest byte-for-byte. `gh` is absent on this host and irrelevant on the
+  private/cosign path.
+- **§6 windows scan repeated** (it was the only open note there): published zip's
+  `gpn_scheduler.exe` `channel_url`×1 `/channel/job`×5; `gpn_diffusion_provider.exe` `/channel/job`×4,
+  `/channel/artifact`×3, `GPN_CHANNEL_LISTEN`×3; `gpn-node.exe` `0.3.78`. `channel_url`×0 in the
+  diffusion exe is a symbol-vs-literal difference (Linux build was unstripped), not a missing feature —
+  in `gpn_diffusion_provider.rs` it is only an identifier; the JSON key lives in the scheduler.
+- **§7 gate ticked**: verified by hand, before any cut, the exact asset `release-cut.sh` step 2 fetches.
+- **§7 `release-cut` ATTEMPTED and REFUSED — by design, not a failure.** Steps 0-2 green (detect:
+  built pair differs from published manifest; both digests re-verified on download; stamp ⇒ 0.3.78,
+  `50688dc` → `50688dc5fc3a908a3a9e91b49f37f541e93559cc`). Then
+  `ABORT: CI for 50688dc is 'in_progress:None' -- refusing to sign an unverified build`.
+  **Cause, measured**: CI run **45634997014** on `50688dc5` is `in_progress`; its windows
+  self-hosted job 139296187708 only started **15:27:46Z** (it queued behind the release build from
+  14:31) and step 6 `Build + test gpn-node (release)` has run since 15:28:05Z ⇒ ~35 min, inside the
+  normal 25-40 min. **Not cancelled** — the >90-min stale rule measures the job in progress, and
+  this one is progressing. Handle written into the box.
+- **Housekeeping**: the aborted cut left `~/.gpn/release-in-flight` naming a dead pid (which blocks
+  every commit); released it (`release-lock.sh release 0.3.78` ⇒ `no release in flight`) so this
+  run's checklist commit could land. Not waited on inside the run, per the dispatch-and-end rule.
+- Row 256 unchanged (AWAITING-OWNER, triage answered).
+- Next run: re-run `scripts/release-cut.sh --version 0.3.78 --timeout 300` once CI 45634997014
+  concludes; then §7 boxes 3-4, §7b, §8, §9, §10.
 ## 07:44 PT — §5 box 3 ticked (windows build published, hash-verified)
 
 - **A0**: reset to `origin/main` HEAD `7687ca34` (docs-only), `GET /actions/runs?head_sha=7687ca34…`
