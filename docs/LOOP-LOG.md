@@ -1,3 +1,31 @@
+## 13:00 PT — CI proven alive by the runner's own processes, not by the API's word; §0e box 3 ticked
+
+- **A0**: `fetch + reset --hard origin/main` ⇒ HEAD `1183eade` (docs commit — `head_sha=` gives
+  `total_count: 0`, the expected `paths-ignore` behaviour). Release code sha `66920316` still has CI run
+  **45685415856**, `in_progress` since 19:27:41Z (**90 min**).
+- **Stale-cancel rule deliberately NOT fired, and the reason is measurement not opinion.** The API only
+  shows step names, so I asked the machine doing the work (box 1, `scripts/box1.sh`, 12:58 PT):
+  `Get-Process cargo,rustc` ⇒ `cargo` pid 57488 started **12:51:25 PM**, `rustc` pids 18652 / 41004 started
+  **12:57:52** and **12:58:33 PM** — i.e. fresh compiler processes seconds old. Job detail: windows job
+  139466876418 step 6 `Build + test gpn-node (release)` **success**, step 7 `Build + test gpn-agent
+  (release)` in progress. That is a 40–75 min release compile actively progressing, so cancelling would
+  throw away a healthy build and cost another hour on a single-slot runner; "in progress 90 min" alone is
+  not the test, "stale" is. Live job logs are not retrievable before completion (`/jobs/<id>/logs` ⇒ 404
+  `BlobNotFound`), which is why the runner's process table was used instead.
+- **Box ticked: §0e box 3** ("if the lifecycle cannot be run this release, say so and why; do not tick it").
+  The saying-so was already in the checklist; this run re-derived the venue instead of inheriting it:
+  box 1 `Get-VM GPN-209` ⇒ `State: Running`, `Uptime 08:01:24`; `Get-VMGpuPartitionAdapter -VMName
+  GPN-209` ⇒ one adapter, `VEN_8086&DEV_9BC5` = **Intel UHD 630 iGPU** (not the 5070 Ti), `MinPartitionVRAM
+  10000000 / MaxPartitionVRAM 100000000`. A stranger-lifecycle-capable guest still does not exist, so §0e
+  box 1 stays unticked per its own instruction and item 256 stays AWAITING-OWNER in NEEDS-TRIAGE.
+- **§7 `release-cut` still not attempted**: its 3/6 precondition refuses while CI for the release sha is
+  `in_progress`, and a second identical abort would re-leave the stale `release-in-flight` lock (row 277).
+  The lock is currently **absent**, so the tree is committable.
+- One docs commit (this tick + this entry). Docs-only ⇒ no CI run expected. No [TRIAGE] this run.
+- **Next run**: ask once for run 45685415856. `success` ⇒ `scripts/release-cut.sh --version 0.3.79 --timeout
+  300`. `failure` ⇒ read the failing job log and quote the line. Still running ⇒ re-check box 1's process
+  table before considering a cancel; cancel only if no compiler process is alive.
+
 ## 12:38 PT — 0.3.79 cut still gated on a live CI run; nothing else actionable without waiting (run ended, not blocked)
 
 - **A0**: `fetch + reset --hard origin/main` ⇒ HEAD `547aad33` (docs commit — `head_sha=` gives
