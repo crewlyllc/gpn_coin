@@ -1,3 +1,28 @@
+## 12:38 PT — 0.3.79 cut still gated on a live CI run; nothing else actionable without waiting (run ended, not blocked)
+
+- **A0**: `fetch + reset --hard origin/main` ⇒ HEAD `547aad33` (docs commit — `head_sha=` gives
+  `total_count: 0`, the expected `paths-ignore` behaviour). Release code sha `66920316` still has CI
+  run **45685415856**, `in_progress` since 19:27:41Z (**71 min** at this run; windows job restarted
+  20:11:51Z after queueing behind the two release builds).
+- **CI measured, not guessed** (`/actions/runs/45685415856/jobs`): `fmt + clippy` **success**
+  (11 steps incl. clippy `-D warnings` both crates), `secret-scan` **success**,
+  `Build + unit tests (linux)` **success** (steps 4–27, i.e. the whole 24-test lane green).
+  Only remaining job: `Build + unit tests (windows, self-hosted)` — step 6
+  `Build + test gpn-node (release)` **in_progress** since 20:11:51Z, step 7 `gpn-agent` pending.
+  A release build on that box is 40–70 min, so this is progress, not a hang.
+- **§7 `release-cut` NOT attempted**: the 3/6 precondition (`refuse while CI is in_progress`) would
+  abort identically to 12:19 PT and re-leave the stale `release-in-flight` lock (row 277). 71 min
+  < the 90-min stale threshold, so cancelling and re-dispatching would be strictly worse — it would
+  throw away ~25 min of live Rust compilation on the single-slot Windows runner.
+- **First unticked boxes are §0e / item 256** (stranger lifecycle venue) — already sitting in
+  `NEEDS-TRIAGE.md` with the 08:2x PT narrowing (attach box 1's 5070 Ti partition to GPN-209, no
+  spend). Untouched on purpose; the box itself instructs not to tick it. No new message to Jeremy,
+  no [TRIAGE] this run — the decision is already filed and the loop owes it nothing new.
+- **Lock state clean**: `~/.gpn/release-in-flight` absent, so the repo is committable.
+- **Next run**: ask once for run 45685415856. `success` ⇒ `scripts/release-cut.sh --version 0.3.79
+  --timeout 300` (idempotent; re-detects). `failure` ⇒ read the failing job log and fix. Still
+  `in_progress` past 90 min ⇒ cancel that stale run and dispatch fresh.
+
 ## 12:20 PT — 0.3.79 Windows build landed + attestation verified (§5/§7 evidence); cut refused on CI still in progress
 
 - **A0**: `fetch + reset --hard origin/main` ⇒ HEAD `7332fa35` (docs commit — `total_count: 0`, expected).
