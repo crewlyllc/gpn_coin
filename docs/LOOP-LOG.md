@@ -1,3 +1,23 @@
+## 01:05 PT 0.3.77 — §5 artifact-verification box ticked (cosign re-derived); cut still gated on CI 45565029747's Windows job
+
+- **A0**: HEAD `fa7619ed` is docs-only ⇒ no build expected. The release sha `310214250bd3…` still has
+  run **45565029747** `in_progress` — but the reason is legible now: fmt+clippy, secret-scan and
+  **Build + unit tests (linux)** are all `success` (linux job finished 08:44:30Z); the only in-flight
+  job is **Build + unit tests (windows, self-hosted)** on `DESKTOP-USBUADL`, started 08:36:55Z and
+  sitting in step 6 `Build + test gpn-node (release)`. That is single-slot runner contention behind
+  the release build (which landed 08:35:49Z), not a hang — started ~25 min ago, far under the 90-min
+  stale threshold, so no cancel/re-dispatch.
+- **Box ticked**: §5 *verify the downloaded artifact* (`- [x]`, was the only unticked box in §5 while
+  the header already claimed 7/7). Evidence re-derived this run, not copied: `/tmp/win077/gpn-windows.zip`
+  253,251,369 B `sha256:51fbbab8…`, `cosign verify-blob --bundle … --certificate-identity-regexp
+  '^https://github\.com/jeremyzguo/gpn_coin/\.github/workflows/release-windows\.yml@.*$'
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com` ⇒ `Verified OK`, exit 0;
+  asset 790736756's API `digest` is the same `sha256:51fbbab8…`.
+- **Still open in 0.3.77**: §7 cut (waits on the Windows CI job concluding `success` — next run polls
+  it once and runs `scripts/release-cut.sh --timeout 300`), §7b surfaces, §8 stranger verify, §9
+  self-update, §10 behaviour, §3b row 262 proof, §0b filing (archive + INDEX row).
+- No [TRIAGE] items.
+
 ## 00:50 PT 0.3.77 — Windows build landed + cosign-verified; cut blocked only on CI 45565029747
 
 - **A0**: HEAD `0672af94` docs-only ⇒ 0 runs (expected). Release sha `31021425…` has 4 runs.
