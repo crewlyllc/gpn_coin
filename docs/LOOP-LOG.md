@@ -1,3 +1,34 @@
+## 22:25 PT 0.3.76 §10 row-262 live proof — 3 runs, still FAIL; the sticky DeepFork fix does not hold live (code, not rig)
+
+- **A0**: HEAD `781a4bbe` docs-only ⇒ 0 runs for that sha (expected, `paths-ignore`). No CI acted on.
+- **Box worked: §10 box 1 (row 262 live proof), not ticked.** Published binary `gpn-node 0.3.76`
+  on box 3 (`C:\gpn\r194\bin-0.3.76`), spec `raw244.json`, ours `E1` #692 work 1,030,915,
+  theirs `B2` #53 work 1,404,448 (depth 633, theirs heavier).
+- **Run `e176n` (22:14:14→22:21:17 PT)** — refusal correct, pause not held:
+  `fork-choice: work ours=1030915 theirs=2364454 … reorg=refused:deep-fork depth=633` at 22:14:14,
+  **last** `isolated or forked: not submitting this CPU seal` at **22:15:10** (pause lived 56 s),
+  verdict `refused='deep-fork' reorg=False forkImports=0`, **marker present: False**; ours resumed
+  sealing and mined itself to #779 with work still ~1.03M, so it never adopted the branch —
+  the failure is the *marker/pause*, exactly row 262's symptom, on a binary that contains the fix.
+  Evidence `C:\gpn\r194\R194-TEST-e176n-vs-b2.md`.
+- **Two rig failures recorded so they are not repeated**: `e176f` (theirs started without
+  `--force-authoring`, no witness — it seals anyway as soon as ours is a peer) and `e176c`
+  (theirs CPU-only) both had the branch out-mine ours inside the window (`best=#739…#860`);
+  in `e176c` the branch also became our chain (`canonical/anchor-match=true`). A branch that
+  grows faster than ours cannot test a refusal — the only stable rig is ours-taller-theirs-heavier,
+  which the fresh-from-genesis branch cannot provide once it starts mining.
+- **Classification: our code.** `fork_choice::next_pending` holds `DeepFork` only across
+  `Keep(WorkUnavailable)`; the live peer's claim is evidently something else and clears `pending`
+  within a minute. Unit test `a_deep_fork_refusal_outlives_a_work_less_claim` passes, so the test
+  models the wrong claim.
+- **Next run starts here**: add a log line at every `fc::evaluate` return in
+  `service.rs` (~2800-2820) — reason, work, height, tip-match — re-run the `e176n` command
+  (`C:\gpn\r194\r194-nokey.ps1 … -TheirsNoKey`), read which claim cleared the hold, make the hold
+  survive it, add a unit test with that exact claim. §10, §10b and §0b stay unticked; row 262 stays
+  IN-PROGRESS.
+- **Box 3 left**: production node running (pid 12372, untouched); r194 scratch nodes stopped by the
+  harness; `E1`/`B2` frozen rigs unchanged on disk.
+
 ## 21:41 PT 0.3.76 **PUBLISHED + DEPLOYED** — §7/§7b/§8/§9 all ticked; two dead watchdog units repaired
 
 - **A0**: HEAD `d060333d` docs-only ⇒ 0 runs (expected). The blocker was CI **45539696287**
