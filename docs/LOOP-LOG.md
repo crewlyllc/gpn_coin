@@ -1,3 +1,22 @@
+## 06:0x PT — bundled 0.3.78 (row 263 render-over-pull; 256 carried) and opened its checklist
+
+- **A0**: `git reset --hard origin/main` → `f11baecf`. `GET /actions/runs?head_sha=f11baecf29612671ee06a08e700cd49b2a085112`
+  ⇒ `total_count: 1`, `CI in_progress`, conclusion `None` — noted, **not waited on** per the A0 rule. Nothing red.
+- **Queue read from `GPN-LIST.md` (not the stale `GPN-TASKS.md`)**: 0 `IN-PROGRESS`, 2 `NEW` (256, 263),
+  5 `BLOCKED`. 0.3.77 is published (`releases.json` `0.3.77`, `published_at 2026-11-25T10:05:21Z`) and this
+  host's running node answers RPC `system_version` = **"0.3.77"** (pid live, `pgrep -x gpn-node` hit).
+- **C applied**: both `NEW` rows marked `IN-PROGRESS`; `bump-version.py patch` 0.3.77 → **0.3.78** (15
+  manifests, `network.json`, 14 lockfile entries); CHANGELOG 0.3.78 section written (0 `_TODO_`);
+  `docs/releases/0.3.78.md` generated from the template (2 in-progress, 5 blocked).
+- **§3 ticked with evidence, not assumed**: `bump-version.py --check` ⇒ `lockstep: 15 manifest(s) and 14
+  lockfile entr(ies) agree` rc=0; `cargo test --test shipped_bootnodes` ⇒ **4 passed; 0 failed** at 06:05 PT.
+- **Next run**: box 1 of `docs/releases/0.3.78.md` — §3b row 263 (route an image/video job to a pull-only
+  provider over the job transport; the failure is reproducible on this host with `POST
+  :8092/v1/images/generations`). Row 256 stays `AWAITING-OWNER`.
+- **[TRIAGE]** item 256 venue question is unchanged and still the only thing waiting on a human: box 3 is a
+  live 0.3.77 node (not wipeable), box 4 is off the tailnet (hand on the machine), GPN-209's partition is
+  the Intel iGPU with 0 compute share. Loop's recommendation is option E (wipe box 4, preserve its keystore).
+
 ## 05:2x+ PT — no IN-PROGRESS work, so the run fixed a live crash loop instead: four units still pointed into the deleted `projectmanager07`
 
 Every claim below is from a command run in this session (05:36–05:45 PT).

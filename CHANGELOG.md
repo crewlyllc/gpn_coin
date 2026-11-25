@@ -8,6 +8,29 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 versions are [Semantic Versioning](https://semver.org/spec/v2.0.0.html), with
 the GPN-specific meaning of each level documented in `docs/updates.md`.
 
+## [0.3.78] - 2026-11-25
+
+Bumped from 0.3.77 (`scripts/bump-version.py patch`). One defect and one carried proof: an image or
+video job cannot reach a provider that only pulls work, and the stranger-lifecycle proof still has no
+clean Windows guest to run on.
+
+### Fixed
+- **Image/video jobs can reach a pull-only provider** (row 263): the access point resolved a render
+  channel from the provider's published `status_url` alone, so a box that advertises
+  `pull://<provider>` — which is every NATed box whose heartbeat is push-only — was classified
+  `ChannelEndpointFailure::PullOnly` and an image request answered `gpn_unavailable: no diffusion
+  provider serves the channel render endpoint`. LLM chat worked over the job transport the whole
+  time; only the render lane had no pull path, and the diffusion provider's journal has never
+  carried a `[channel] job` line. The AP now routes a render job to a pull-only provider over the
+  job transport, so no inbound port is needed. Live proof: `POST /v1/images/generations` returns an
+  image with 200 and one `[channel] job` (or job-transport) line names the provider.
+
+### Carried
+- **Stranger lifecycle proof** (row 256): still `AWAITING-OWNER` for a venue. Steps 1-2 pass on
+  GPN-209; step 3 fails there on a guest with no GPU partition, box 3 is a live node and cannot be
+  wiped, box 4 is off the tailnet. Option E (wipe box 4, keep its keystore) is the loop's
+  recommendation and is in `docs/NEEDS-TRIAGE.md`.
+
 ## [0.3.77] - 2026-11-24
 
 Bumped from 0.3.76 (`scripts/bump-version.py patch`). One defect, found by the second live run of the
