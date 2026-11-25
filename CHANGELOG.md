@@ -8,6 +8,34 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 versions are [Semantic Versioning](https://semver.org/spec/v2.0.0.html), with
 the GPN-specific meaning of each level documented in `docs/updates.md`.
 
+## [0.3.79] - 2026-11-25
+
+Bumped from 0.3.78 (`scripts/bump-version.py patch`). Three defects found on 0.3.78 by running the
+documented examples as a stranger would: a routing rule that could only fail, a refusal message that
+said the opposite of the truth, and a warm-up window that told the first caller the service was down.
+
+### Fixed
+- **A 409 or unreachable candidate no longer fails the call** (row 270): the access point treated a
+  loopback/private `channel_url` as dialable for a remote provider, POSTed to its own listener, got
+  `409 {"error":"assignment names a different provider"}`, and ended the job `failed` /
+  `not_charged` with "image generation is temporarily unavailable" — while a second identical
+  attempt succeeded. A candidate that refuses now advances to the next candidate within the same
+  attempt, and a loopback/private channel URL from a non-same-egress provider is not dialable.
+- **The update guard's refusal names what it can know** (row 271): `gpn-agent/src/update.rs:1332`
+  printed "Installing it would swap newer code for older code" for every same-version/different-sha
+  case, including when the installed build was an ancestor of the release (measured during 0.3.78's
+  self-update). The behaviour (refuse, require `--force`) is unchanged; the message no longer asserts
+  a direction it cannot verify at runtime.
+- **First jobs after a restart get a retryable answer, not a timeout** (row 272): the first two chat
+  requests after an update restart died at the caller's 10 s budget while the local provider warmed,
+  then the third answered in 0.193 s. The access point now answers `not ready` (distinct, retryable)
+  inside the warm-up window instead of routing into it.
+
+### Carried
+- **Stranger lifecycle proof** (row 256): still `AWAITING-OWNER` for a venue — the open question is
+  in `docs/NEEDS-TRIAGE.md` (attach a GPU partition of box 1's 5070 Ti to GPN-209, or power box 4
+  back on). The gate validates 0.3.78 -> 0.3.79, so the venue must exist before this release publishes.
+
 ## [0.3.78] - 2026-11-25
 
 Bumped from 0.3.77 (`scripts/bump-version.py patch`). One defect and one carried proof: an image or
