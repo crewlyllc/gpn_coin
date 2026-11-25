@@ -1,3 +1,49 @@
+## 21:41 PT 0.3.76 **PUBLISHED + DEPLOYED** — §7/§7b/§8/§9 all ticked; two dead watchdog units repaired
+
+- **A0**: HEAD `d060333d` docs-only ⇒ 0 runs (expected). The blocker was CI **45539696287**
+  (`66b1982d`, the row-262 code commit): it went `in_progress` → **`completed success`** at 05:25Z.
+  Verified before waiting that it was *not* stale — linux/fmt/clippy/secret-scan green, windows job
+  started 04:05Z, and box 1 showed live `cargo` + two `rustc` children compiling gpn-agent. 76 min
+  total = within the 40–75 min cold-build budget, so no cancel.
+- **§7 cut — PASSED** (`release-cut.sh --timeout 300 --version 0.3.76`, exit 0, 21:30 PT).
+  Mirror linux `028c5cfeb46fd5a2…`, windows `af3bd49e1837dd22…`, bundle `0ed1fb06525c3f17…` all
+  verified; manifest signed key `78015fab541c9a62…`; published commit **`c2ee132f`**; live
+  `live manifest is 0.3.76`; anonymous re-download matched. `network.json latest_version=0.3.76`;
+  `releases.json` polled twice (05:32:47Z, 05:32:57Z) both `0.3.76`.
+- **§7b**: mirror assets byte-identical to the cut digests; four surfaces agree — site 0.3.76 =
+  GitHub asset digests = manifest = `gpn-node --version` = running node `system_version`. Static
+  version surfaces bumped in this commit (download.html no-JS fallback 0.3.75→0.3.76; `run-a-node`
+  + `downloads` stamps → 0.3.76 / spec 55 / block 360,166; site pages regenerated). Capability box
+  n/a — 0.3.76 ships no capability.
+- **§8**: `--verify-published --version 0.3.76` ⇒ exit 0 with `linux:`/`windows:`/`PASS:` lines,
+  348762753 B / 253252404 B and both sha256 matching the signed manifest, no token, no cookie jar.
+- **§9 — node updated itself**: `systemctl --user start gpn-update.service` (the timer's own unit)
+  21:36:19→21:38:03 PT ⇒ `confirm: process=up rpc=no 0s` → `rpc=yes 28s version=0.3.76` →
+  `confirmed 0.3.76 is running`; `current → versions/0.3.76`, `current.previous → 0.3.75` retained;
+  RPC `system_version` ⇒ `"0.3.76"`.
+- **Two failing user units fixed (environment class, not parked).**
+  `gpn-deploy-drift.service` had been red every 30 min since the clone move — `check-deploy-drift.sh`
+  hardcoded `$repo/projectmanager07`, which no longer exists, so `main=''` ⇒ exit 1 forever. It now
+  resolves `GPN_REPO`/`~/gpn-loop`; drop-in pins `WorkingDirectory` + `GPN_REPO`; result
+  `{"exit":0,...}` in sync at 0.3.76. `gpn-cadence-gate.service` was failing with
+  `status=200/CHDIR` (WorkingDirectory = deleted `projectmanager07`); drop-in repointed to
+  `~/gpn-loop` ⇒ `exit 0, violations 0`, `RESULT: PASS` over blocks 360060..360159 (max gap 69.33 s,
+  4 suspect gaps all explained by `sealer: still searching template`).
+- **Next**: §10 live fork proof — see the next bullet (run, failed, diagnosed). Then §10b timing +
+  §0b filing, which stay unticked until §10 passes. §0e stays AWAITING-OWNER (item 256).
+
+
+- **§10 live fork proof — RUN, FAILED, diagnosed (rig, not code).** `r194-fork-test.ps1 -Expect
+  refuse` on box 3 with the published 0.3.76 binary (zip sha256 verified on the box) ⇒
+  `observed: refused='deep-fork' reorg=False forkImports=0`, `before ours #692 work=1030915 /
+  theirs #53 work=1404448`, `after ours #752`, **`gpn-forked marker present: False`** ⇒ FAIL.
+  Mechanism: ours is 74 blocks BEHIND theirs, so it legitimately synced the branch
+  (`using as sync source`, #692→#752) and `next_pending` releases a `deep-fork` hold on a claim
+  whose tip we hold ⇒ `refresh_forked_marker` removed the file. Row 262's refusal itself held for
+  every sampled step (zero `import: fork block`, CPU miner repeating `isolated or forked: not
+  submitting this CPU seal`). Next run: rebuild the ours-side rig so ours is not the shallower
+  side, then re-run. Row 262 stays IN-PROGRESS; §10 not ticked.
+
 ## 20:36 PT 0.3.76 §3 seed-parity box ticked (local test 4/4 + live seeds.json match); cut still gated on CI 45539696287
 
 - **A0**: `origin/main` HEAD `6eeb62bf` is docs-only ⇒ `head_sha=6eeb62bf…` `total_count: 0`
