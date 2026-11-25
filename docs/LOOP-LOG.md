@@ -1,3 +1,39 @@
+## 16:10 PT row 194: shallow rig was stale, rebuilt and the accept half observed on 0.3.74 [no triage]
+
+- **A0 CI**: `origin/main` HEAD `58c9c23f67ba1e9f32c9a3ea92f93b05700a9d16` =>
+  `GET /actions/runs?head_sha=58c9c23f…` `total_count: 0` — docs commit, expected under
+  `ci.yml` paths-ignore. Nothing red, nothing waited on.
+- **The two release builds, polled once each**: Linux `45509384325` (`c9e10f45`) **completed
+  success**; Windows `45509380702` still **queued** (48 min) behind CI `45505708367`, whose
+  `Build + unit tests (windows, self-hosted)` job was still inside `Build + test gpn-agent
+  (release)` on `DESKTOP-USBUADL` (`busy=True`). Contention, not a fault. Nothing waited on.
+- **Found a stale claim in the checklist**: the "shallow pair is already on disk" note was wrong.
+  `A` kept mining after stage A — `A` #167 work 1,648,549,690 vs `S` #118 work 719,423,696, so A is
+  2.3x heavier and S can never win. Lesson: re-measure `chain-work.json` on a rig someone called
+  "frozen"; leaving the miner running keeps changing it.
+- **Built `C:\gpn\r194\S3`** (`scripts/r194-build-shallow.ps1`: copy of A, `revert 20` to #147,
+  fresh witness `SW`, GPU re-mine). It came out **heavier but 9 blocks taller** (#176, work
+  1,658,409,593 vs A #167 / 1,648,549,690) — INCOMPLETE for a *shorter* heavier branch. Measured
+  cause: S3 blocks are worth ~13.0M against A's ~18.7M over the same range, so per-block work is
+  fixed by the inherited retarget window and does not rise within 20 blocks.
+- **Wrote and validated `scripts/r194-fork-test.ps1`** (one scenario per run: copy both rigs, drop
+  the copied `secret_ed25519`, peer them reserved-only, watch the receiving node's log, write a
+  verdict md). PS 5.1 parse-checked on the box, sha256-verified upload, and exercised for real:
+  ours `A` vs theirs `S3` on the 0.3.74 binary gave `import: fork block #148..#162` (15 lines) and
+  `Reorg on #167,0x1156..177f to #162,0xc4b4..e7bf, common ancestor #147,0x72e3..6e57`. That is an
+  accepted shallow reorg — the half stage B failed on 0.3.74 at depth 41-49.
+- **Not ticked**: the box requires the same run on a build containing `87d77b3b`; this was the
+  0.3.74 binary. Also flagged for the 0.3.75 run: 0.3.74 reorged at #162 while the last logged
+  `branch_work=1,489,702,425` was still below `chain_work=1,648,549,690` — check whether the new
+  code still adopts before the branch is measured heavier.
+- **Next run, no rig work needed**: poll `45509380702`, `scp` the zip to box 3 (plain scp through
+  the SOCKS proxy works — no base64 chunker), run `r194-fork-test.ps1` twice (accept on A vs S3,
+  refuse on E1 vs B2+BW), paste the two verdicts. The two new scripts are on box 3 and copied to
+  `~/.openclaw/workspace/scripts/`, **deliberately uncommitted**: `scripts/**` is not in
+  `ci.yml` paths-ignore and a push now would start a CI run while the release build is queued.
+- Box 3 left clean: only the production node and the other session's `scratch194\fork\D` are
+  running; every rig node from this run is stopped. No box ticked, nothing needs Jeremy.
+
 ## 15:41 PT row 194: deep-fork branch pre-built on box 3 while the release builds queue (no revert, no healing) [no triage]
 
 - **A0 CI**: `origin/main` HEAD `6eb5fbb332a6…` ⇒ `GET /actions/runs?head_sha=6eb5fbb3…` `total_count: 0`
