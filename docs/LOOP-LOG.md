@@ -1,3 +1,29 @@
+## 16:28 PT row 194: fork test run for real on the 0.3.75 build — shallow accept PASS, deep refuse PASS [no triage]
+
+- **A0 CI**: `origin/main` HEAD `e852d572…` ⇒ `GET /actions/runs?head_sha=<full 40>` `total_count: 0`
+  — docs commit, expected under `ci.yml` paths-ignore. Nothing red, nothing waited on.
+- **Windows 0.3.75 build still `queued`** (run `45509380702`, dispatched 15:22, 66 min; box-1 runner
+  `busy=True`, linux runner idle). Polled once, not waited on.
+- **Boxed item 194 completed and ticked** with both halves observed on `gpn-node 0.3.75`
+  (commit `c9e10f45`, the CI build the release ships). Rigs exported from box 3 (7.4 MB zip, sha
+  `4dfdb6ed…`) and driven locally by a new `scripts/r194-fork-test.sh` (Linux port of the PS 5.1
+  harness).
+  - shallow: `A` #167 w=1,648,549,690 vs `S3` #176 w=1,658,409,593 → `import: fork block #148…#162`
+    (15) + `Reorg on #167 to #162, common ancestor #147`; ours ended #181 w=1,724,755,108.
+  - deep: `E1` #692 w=1,030,915 vs `B2` #53 w=1,404,448 (+`BW`) →
+    `reorg=refused:deep-fork depth=633`, 0 imports, ours unchanged at #692,
+    `gpn-forked` = `block sealing paused: a heavier canonical chain is known … reason=deep-fork`.
+- **Answered the 16:10 caveat**: "reorg while `branch_work` < `chain_work`" is not premature
+  adoption — the decision is `evaluate()` on the announced tip work, and `branch_work` is a
+  512-block window (`WORK_WINDOW`, `service.rs:146`) that only repairs the SDK's inverse-target
+  best-block comparison; on a 167-block chain it is smaller by construction.
+- **Harness bug found and fixed in the port**: the PS 5.1 loop waited for `forkImports > 0` on the
+  *refuse* path, which a correct refusal can never produce — every refuse run sat out its full
+  timeout. The `.sh` breaks on the verdict line and enforces `imports == 0` in the pass check.
+  Same one-line fix is worth porting back into `r194-fork-test.ps1` when the Windows repeat runs.
+- Not committed yet (deliberate): `scripts/r194-fork-test.{ps1,sh}` + the two verdict mds live in
+  `~/.openclaw/workspace/scripts/`; they go in with a docs-only push or the release landing commit.
+
 ## 16:10 PT row 194: shallow rig was stale, rebuilt and the accept half observed on 0.3.74 [no triage]
 
 - **A0 CI**: `origin/main` HEAD `58c9c23f67ba1e9f32c9a3ea92f93b05700a9d16` =>
