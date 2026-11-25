@@ -1,3 +1,24 @@
+## 00:50 PT 0.3.77 — Windows build landed + cosign-verified; cut blocked only on CI 45565029747
+
+- **A0**: HEAD `0672af94` docs-only ⇒ 0 runs (expected). Release sha `31021425…` has 4 runs.
+- **§5 Windows build box TICKED**: run **45565071726** `completed/success`
+  (07:02:36Z→08:35:49Z, head_sha `310214250bd38a7e…`, step 23/23). Asset `gpn-windows.zip`
+  253,251,369 bytes `sha256:51fbbab8…`; re-downloaded via `GET /releases/assets/790736756`,
+  `sha256sum` matches. Release body was stale (`6c3dd06d…`, the same
+  `publish-release-asset.py` create-only-`body` defect linux hit) — corrected via
+  `PATCH /releases/411990874` to `310214250bd3 (0.3.77)`.
+- **§5 attestation boxes TICKED** (private repo ⇒ cosign path): run step order 19 visibility →
+  20 github-attest **skipped** → 21 `cosign sign-blob` success → 22 provenance gate success
+  (no `if:`) → 23 publish. `gpn-windows.zip.bundle` (9,049 B) on `windows-latest`;
+  `cosign verify-blob --bundle … --certificate-identity-regexp 'release-windows.yml@.*'
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com gpn-windows.zip` ⇒
+  **`Verified OK`**, exit 0, on the re-downloaded bytes. §5 now 7/7, header renamed DONE.
+- **§7 cut NOT run**: `release-cut.sh`'s sign gate (`scripts/release-cut.sh:441-544`) refuses to
+  sign unless CI on the build sha concluded `success`. CI run **45565029747** is still
+  `in_progress` (created 07:02:15Z, updated 08:36:55Z, ~1h35m). Not waited on — next run polls it
+  and runs `scripts/release-cut.sh --timeout 300` if green.
+- No [TRIAGE] items.
+
 ## 00:16 PT 0.3.77 — Windows release build 45565071726 moved queued → in_progress; no waiting
 
 - **A0**: HEAD `d65aad85` is docs-only ⇒ `actions/runs?head_sha=d65aad85b2825cf802d8a821c0d3c44841d8aeac` = **0 runs** (expected, paths-ignore).
