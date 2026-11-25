@@ -1,3 +1,19 @@
+## 03:57 PT 0.3.77 filed (archive + INDEX row) — §0b 2/2, first release of the batch formally closed
+
+- **A0**: main HEAD `0736eacc924a4f517d0275e0b4a5b6320edf7659` is a docs commit ⇒
+  `actions/runs?head_sha=0736eacc…` `total_count: 0` (expected, `paths-ignore`). Nothing red.
+- **Box worked: §0b filing (2/2)** — the first unticked box in `docs/releases/0.3.77.md`.
+  Gate facts re-derived this run rather than copied from the previous note:
+  `https://gpncoin.ai/releases.json` ⇒ `0.3.77 2026-11-25T10:05:21Z`; the **running process**
+  (pid 3461458, `gpn-node`) answers `system_version` ⇒ `0.3.77`; §10 already 3/3 (03:40 PT).
+  - `git mv docs/releases/0.3.77.md docs/releases/archive/0.3.77.md` — verified `archive/0.3.77.md`
+    exists and `docs/releases/0.3.77.md` does not.
+  - `docs/releases/INDEX.md` row: `| 0.3.77 | 2026-11-25 | 262 …; 256 (AWAITING-OWNER) | archive/0.3.77.md |`.
+  - `checklist-status.py archive/0.3.77.md` ⇒ `TOTAL 48/53` (remaining: §0e 0/3 AWAITING-OWNER,
+    §10b 0/2 timing).
+- **Noticed, not this run's box:** `docs/releases/0.3.76.md` is still unfiled — not in `archive/`,
+  no `INDEX.md` row — and its §10 proof boxes are unticked (item 262's live proof was carried into
+  0.3.77 by design). It needs its own filing pass; flagging rather than editing it mid-release.
 ## 03:41 PT 0.3.77 §10 behaviour ticked 3/3 — deep-fork hold re-verified on the box, fleet steady 20 min
 
 - **A0**: HEAD `477136bb` docs-only ⇒ `actions/runs?head_sha=477136bb7550a53afbc5a908230ea7515a2453c3`

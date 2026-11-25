@@ -5,6 +5,7 @@ the checklist's last box is ticked and the version is published.
 
 | version | published | items | checklist |
 |---|---|---|---|
+| 0.3.77 | 2026-11-25 | 262 (deep-fork refusal held across a peer merely ahead — live proof box 3, PASS=True); 256 (AWAITING-OWNER — carried in §0e, GPU guest needed) | archive/0.3.77.md |
 | 0.3.75 | 2026-11-24 | 194 (both halves proven live on the published binaries); 256 (AWAITING-OWNER — carried in §0e, GPU guest needed) | archive/0.3.75.md |
 | 0.3.74 | 2026-11-24 | 257, 259, 260, 261; 256 (AWAITING-OWNER — carried in §0e, GPU guest needed) | archive/0.3.74.md |
 | 0.3.73 | 2026-11-24 | 255, 258; 256 (AWAITING-OWNER — steps 3-6 need a GPU guest, [TRIAGE] item 256) | archive/0.3.73.md |
