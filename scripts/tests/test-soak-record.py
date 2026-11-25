@@ -74,6 +74,95 @@ day2 = "### Day 2 — 2026-11-26 10:00 UTC\n\n- height: **300**"
 doc3 = sr.splice_day(doc2 + "\n" + day2, header, "### Day 2 — 2026-11-26 22:00 UTC\n\n- height: **400**")
 eq(doc3.count("### Day 2"), 1, "day 2 appears once after a rewrite")
 
+# ---- per-node telemetry (row 274) -------------------------------------------
+# The audit must be able to TREND, not just print prose: one small JSON per node
+# per day, and a report that flags a metric moving >25% week over week.
+import json
+import shutil
+import tempfile
+
+required = ["node", "date", "recorded_at", "height", "peers", "block_interval_p50",
+            "block_interval_p95", "restarts_24h", "jobs", "update", "disk_free_gb"]
+
+tmpdir = tempfile.mkdtemp(prefix="soak-telemetry-")
+try:
+    payload = sr.telemetry_payload(
+        height=364401, peers=3, intervals=[10.0, 11.0, 12.0], restarts_24h=4,
+        jobs=(256, 229, 7), update="no update activity in the last 24 h",
+        disk_free_gb=41.5, node="openclawassist",
+        now=__import__("datetime").datetime(2026, 11, 25, 23, 39, tzinfo=__import__("datetime").timezone.utc))
+    for k in required:
+        eq(k in payload, True, f"telemetry payload carries `{k}`")
+    eq(payload["date"], "2026-11-25", "payload date is the UTC date")
+    eq(payload["height"], 364401, "payload height is the measured height")
+    eq(payload["jobs"]["succeeded"], 229, "payload keeps job counts")
+    eq(round(payload["block_interval_p50"], 2), 11.0, "payload keeps the interval p50")
+
+    p1 = sr.write_telemetry(payload, tmpdir)
+    eq(os.path.basename(p1), "2026-11-25.json", "telemetry file is named for the UTC date")
+    eq(len(os.listdir(tmpdir)), 1, "one file per node per day")
+    with open(p1) as f:
+        eq(json.load(f)["height"], 364401, "file on disk parses back to the payload")
+    payload2 = dict(payload, height=364500)
+    sr.write_telemetry(payload2, tmpdir)
+    eq(len(os.listdir(tmpdir)), 1, "a second reading the same day replaces, not stacks")
+    with open(p1) as f:
+        eq(json.load(f)["height"], 364500, "the later reading wins")
+
+    # 7 consecutive days, one metric up 30% and one up 10%
+    base = __import__("datetime").datetime(2026, 11, 25, tzinfo=__import__("datetime").timezone.utc)
+    for i in range(7):
+        d = (base + __import__("datetime").timedelta(days=i)).strftime("%Y-%m-%d")
+        sr.write_telemetry(sr.telemetry_payload(
+            height=364401 + i * 100, peers=3, intervals=[10.0, 12.0] if i < 6 else [11.0, 13.2],
+            restarts_24h=4,
+            jobs=(256, 229, 7), update="none", disk_free_gb=41.5 if i < 6 else 45.65,
+            node="openclawassist", now=base + __import__("datetime").timedelta(days=i)), tmpdir)
+        # p50 11.0 -> 12.1 (+10%); disk free 41.5 -> 45.65 (+10%)
+    text, flags = sr.trend_report(tmpdir)
+    eq(len(flags), 0, "a 10% move is not a drift flag")
+    eq("trend" in text.lower(), True, "the report prints a trend line")
+    eq("2026-11-25" in text and "2026-12-01" in text, True, "the trend names both ends of the week")
+
+    # now make p50 30% worse week over week -> must flag
+    shutil.rmtree(tmpdir)
+    os.makedirs(tmpdir)
+    for i in range(7):
+        d = (base + __import__("datetime").timedelta(days=i))
+        sr.write_telemetry(sr.telemetry_payload(
+            height=364401, peers=3, intervals=[10.0, 10.0] if i == 0 else [13.0, 13.0],
+            restarts_24h=4,
+            jobs=(256, 229, 7), update="none", disk_free_gb=41.5, node="openclawassist", now=d), tmpdir)
+    text, flags = sr.trend_report(tmpdir)
+    eq(any("block_interval_p50" in f for f in flags), True,
+       "a >25% week-over-week move is flagged, naming the metric")
+    eq(any("30" in f or "30.0" in f for f in flags), True, "the flag states the size of the move")
+
+    # fewer than 7 consecutive days -> not a trend yet, and no false flags
+    shutil.rmtree(tmpdir)
+    os.makedirs(tmpdir)
+    for i in range(6):
+        d = (base + __import__("datetime").timedelta(days=i))
+        sr.write_telemetry(sr.telemetry_payload(
+            height=364401, peers=3, intervals=[10.0, 12.0], restarts_24h=4, jobs=(256, 229, 7),
+            update="none", disk_free_gb=41.5, node="openclawassist", now=d), tmpdir)
+    text, flags = sr.trend_report(tmpdir)
+    eq(flags, [], "six days produce no week-over-week flags")
+    eq("insufficient" in text.lower() or "6" in text, True, "the report says it is short of a week")
+
+    # a gap in the middle means they are not 7 consecutive days
+    shutil.rmtree(tmpdir)
+    os.makedirs(tmpdir)
+    for i in [0, 1, 2, 4, 5, 6, 7]:
+        d = (base + __import__("datetime").timedelta(days=i))
+        sr.write_telemetry(sr.telemetry_payload(
+            height=364401, peers=3, intervals=[10.0, 10.0] if i == 0 else [13.0, 13.0], restarts_24h=4,
+            jobs=(256, 229, 7), update="none", disk_free_gb=41.5, node="openclawassist", now=d), tmpdir)
+    text, flags = sr.trend_report(tmpdir)
+    eq(flags, [], "a missing day breaks the week — no flags from non-consecutive files")
+finally:
+    shutil.rmtree(tmpdir, ignore_errors=True)
+
 # ---- verdict wording --------------------------------------------------------
 eq(sr.day_index(__import__("datetime").datetime(2026, 11, 25, tzinfo=__import__("datetime").timezone.utc),
                 __import__("datetime").datetime(2026, 11, 25, 23, tzinfo=__import__("datetime").timezone.utc)),

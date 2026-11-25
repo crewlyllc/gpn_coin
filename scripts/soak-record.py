@@ -24,9 +24,13 @@ Usage: scripts/soak-record.py [--days 7] [--window 200] [--root <repo>]
 Exit codes: 0 recorded, 2 nothing to record (node unreachable).
 """
 import argparse
+import glob
 import json
+import math
 import os
 import re
+import shutil
+import socket
 import statistics
 import struct
 import subprocess
@@ -37,6 +41,9 @@ from datetime import datetime, timedelta, timezone
 
 RPC = "http://127.0.0.1:9944"
 STATE = os.path.expanduser("~/.gpn/soak-state.json")
+TELEMETRY_DIR = os.path.expanduser("~/.gpn/telemetry")
+TREND_DAYS = 7
+TREND_THRESHOLD = 0.25  # a metric moving more than this week over week is drift
 M64 = 0xFFFFFFFFFFFFFFFF
 
 
@@ -299,6 +306,109 @@ def day_index(start_date, today):
     return (today - start_date).days + 1
 
 
+# ---------- per-node telemetry, row 274 --------------------------------------
+# One small JSON per node per day, so the audit can trend a number instead of
+# reading prose. Every node writes its own ~/.gpn/telemetry/<date>.json; the
+# node name inside the file is what makes a copied/fleet-gathered file honest.
+def telemetry_payload(height, peers, intervals, restarts_24h, jobs, update,
+                      disk_free_gb, node=None, now=None):
+    now = now or datetime.now(timezone.utc)
+    attempted, succeeded, failed = (jobs or (None, None, None))[:3]
+    iv = [x for x in (intervals or []) if isinstance(x, (int, float)) and not math.isnan(x)]
+    p50 = statistics.median(iv) if iv else None
+    p95 = (statistics.quantiles(iv, n=20)[18] if len(iv) >= 20
+           else (max(iv) if iv else None))
+    return {
+        "node": node or socket.gethostname(),
+        "date": now.strftime("%Y-%m-%d"),
+        "recorded_at": now.strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "height": height,
+        "peers": peers,
+        "block_interval_p50": p50,
+        "block_interval_p95": p95,
+        "restarts_24h": restarts_24h,
+        "jobs": {"attempted": attempted, "succeeded": succeeded, "failed": failed},
+        "update": update if isinstance(update, (list, dict)) else [update] if update else [],
+        "disk_free_gb": disk_free_gb,
+    }
+
+
+def write_telemetry(payload, directory=None):
+    d = directory or TELEMETRY_DIR
+    os.makedirs(d, exist_ok=True)
+    path = os.path.join(d, f"{payload['date']}.json")
+    tmp = path + ".tmp"
+    with open(tmp, "w") as f:
+        json.dump(payload, f, indent=1, sort_keys=True)
+        f.write("\n")
+    os.replace(tmp, path)
+    return path
+
+
+_FLAT_METRICS = ("height", "peers", "block_interval_p50", "block_interval_p95",
+                 "restarts_24h", "disk_free_gb", "jobs.attempted", "jobs.succeeded",
+                 "jobs.failed")
+
+
+def _flat(rec, key):
+    cur = rec
+    for part in key.split("."):
+        if not isinstance(cur, dict) or part not in cur:
+            return None
+        cur = cur[part]
+    return cur
+
+
+def trend_report(directory=None, days=TREND_DAYS, threshold=TREND_THRESHOLD):
+    """Week-over-week trend from the telemetry files.
+
+    Returns (text, flags). Only a run of `days` CONSECUTIVE dates counts: a day
+    missed means the week is not a week, and no flag is derived from it.
+    """
+    d = directory or TELEMETRY_DIR
+    recs = {}
+    for p in sorted(glob.glob(os.path.join(d, "*.json"))):
+        try:
+            with open(p) as f:
+                r = json.load(f)
+        except Exception:  # noqa: BLE001
+            continue
+        if r.get("date"):
+            recs[r["date"]] = r
+    if not recs:
+        return (f"insufficient: no telemetry files under {d}", [])
+    latest = max(datetime.strptime(k, "%Y-%m-%d") for k in recs)
+    run = []
+    for i in range(days):
+        day = (latest - timedelta(days=i)).strftime("%Y-%m-%d")
+        if day not in recs:
+            break
+        run.append(day)
+    if len(run) < days:
+        return (f"insufficient: {len(run)} consecutive day(s) of {days} needed for a "
+                f"week-over-week trend (latest {latest.strftime('%Y-%m-%d')})", [])
+    run.sort()
+    first, last = recs[run[0]], recs[run[-1]]
+    lines = [f"trend {run[0]} -> {run[-1]} ({days} consecutive days, node "
+             f"{last.get('node', '?')}):"]
+    flags = []
+    for key in _FLAT_METRICS:
+        a, b = _flat(first, key), _flat(last, key)
+        if not isinstance(a, (int, float)) or not isinstance(b, (int, float)) or a == 0:
+            continue
+        pct = (b - a) / abs(a)
+        lines.append(f"  {key}: {a:g} -> {b:g} ({pct * 100:+.1f}%)")
+        if abs(pct) > threshold:
+            flags.append(f"{key} moved {pct * 100:+.1f}% week over week "
+                         f"({a:g} -> {b:g}) on {last.get('node', '?')}")
+    if flags:
+        lines.append("DRIFT:")
+        lines.extend(f"  - {f}" for f in flags)
+    else:
+        lines.append(f"no metric moved more than {threshold * 100:.0f}% week over week")
+    return ("\n".join(lines), flags)
+
+
 def main():
     global RPC
     ap = argparse.ArgumentParser()
@@ -306,8 +416,19 @@ def main():
     ap.add_argument("--window", type=int, default=200)
     ap.add_argument("--root", default=os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
     ap.add_argument("--rpc", default=RPC)
+    ap.add_argument("--telemetry-dir", default=TELEMETRY_DIR)
+    ap.add_argument("--trend", action="store_true",
+                    help="print the week-over-week trend from the telemetry files and exit")
     args = ap.parse_args()
     RPC = args.rpc
+
+    if args.trend:
+        text, flags = trend_report(args.telemetry_dir)
+        print(text)
+        if flags:
+            print(f"DRIFT: {len(flags)} metric(s) moved more than {TREND_THRESHOLD * 100:.0f}% "
+                  f"week over week", file=sys.stderr)
+        return 1 if flags else 0
 
     now = datetime.now(timezone.utc)
     st = load_state()
@@ -409,11 +530,32 @@ def main():
         f.write(body)
     os.replace(tmp, doc)
 
+    # row 274: the same numbers as one small JSON per node per day, so the audit
+    # can trend them. Disk free is the machine's home filesystem — the one that
+    # fills and takes the node down.
+    try:
+        disk_free_gb = round(shutil.disk_usage(os.path.expanduser("~")).free / 1e9, 1)
+    except Exception:  # noqa: BLE001
+        disk_free_gb = None
+    try:
+        tpath = write_telemetry(telemetry_payload(
+            height=best, peers=health.get("peers"), intervals=intervals,
+            restarts_24h=n_start, jobs=(att, succ, fail),
+            update="; ".join(update_outcome()), disk_free_gb=disk_free_gb, now=now),
+            args.telemetry_dir)
+    except Exception as e:  # noqa: BLE001
+        tpath = f"not written ({e})"
+        print(f"telemetry not written: {e}", file=sys.stderr)
+
+    trend_text, trend_flags = trend_report(args.telemetry_dir)
+
     st["last"] = {"height": best, "ts": now.timestamp(), "peers": health.get("peers")}
     st.setdefault("days", {})[now.strftime("%Y-%m-%d")] = best
     save_state(st)
 
     print(f"recorded day {day} at height {best}: {doc}")
+    print(f"telemetry: {tpath}")
+    print(trend_text)
     return 0
 
 

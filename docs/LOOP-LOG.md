@@ -1,3 +1,28 @@
+## 15:57 PT — box 3 of 0.3.80: row 274, per-node telemetry JSON + a week-over-week trend the audit can act on
+
+**A0 (CI):** HEAD `7d20ac72` is docs-only ⇒ `GET /actions/runs?head_sha=7d20ac724a7833e1e43c0b5aa8261fddba9daab0`
+**total_count: 0** — `paths-ignore` behaving. Nothing red to act on, nothing waited on.
+
+**Box worked — 274 (per-node telemetry, trend not prose).** Box 2 (273, the seven-day soak) cannot be ticked
+before 2026-12-02 by construction, so the next actionable box was taken.
+
+- **Test first, failing:** `python3 scripts/tests/test-soak-record.py` →
+  `AttributeError: module 'soak_record' has no attribute 'telemetry_payload'` (the 28 existing checks green).
+- **Change:** `scripts/soak-record.py` now writes `~/.gpn/telemetry/<date>.json` on every run — `node`, `date`,
+  `recorded_at`, `height`, `peers`, `block_interval_p50/p95`, `restarts_24h`, `jobs{attempted,succeeded,failed}`,
+  `update`, `disk_free_gb` — and a second reading the same day REPLACES the file. `--trend` reads the directory
+  back and prints a per-metric week line, flagging anything that moved >25 %; a week is **7 consecutive dates**,
+  so a missed day voids the window instead of being back-filled, and <7 days prints `insufficient`.
+- **After:** `49 checks passed, 0 failed` (10 % move not flagged; 30 % `block_interval_p50` move flagged with its
+  size; 6 days ⇒ insufficient; a gap in the middle ⇒ no flags).
+- **Live, this pass:** `scripts/soak-record.py` → `recorded day 1 at height 364487` /
+  `telemetry: /home/jeremyg/.gpn/telemetry/2026-11-25.json`; the file (673 B) carries `block_interval_p50 10.61`,
+  `p95 41.04`, `peers 3`, `restarts_24h 4`, `jobs 229/256`, `disk_free_gb 53.2`, `node openclawassist`.
+  `--trend` ⇒ `insufficient: 1 consecutive day(s) of 7 needed for a week-over-week trend` — the honest day-1 answer.
+
+Tick evidence is inline in `docs/releases/0.3.80.md` box 274. Row 274 stays IN-PROGRESS until 0.3.80 is published
+and a node reports it. Next box: 275 (canary rollout).
+
 ## 15:39 PT — box 2 of 0.3.80 started: row 273, the seven-day soak is now recording real numbers (day 1 of 7)
 
 **A0 (CI):** HEAD `c1c2a457` is docs-only ⇒ `GET /actions/runs?head_sha=c1c2a45…` **total_count: 0**, exactly what
