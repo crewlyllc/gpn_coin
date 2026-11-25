@@ -38,6 +38,9 @@ key shape, day-splice idempotency, day indexing).
 **Not ticked, and why:** the box's own "done when" is seven consecutive days. Ticking it today would be the
 "looks finished" failure the whole checklist exists to prevent.
 
+**Pushed once:** `b34b2a2e` `feat(273): soak collector + day 1 of 7 recorded`. That is a code commit
+(scripts/), so CI run **`45723274517`** was created for it (`pending` at 23:47Z) — recorded here, not waited on.
+
 **Next run:** §3b box 3 (274, per-node telemetry JSON) — and re-run the recorder first so day 2 starts with a fresh
 reading.
 
