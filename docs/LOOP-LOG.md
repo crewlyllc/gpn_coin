@@ -1,3 +1,32 @@
+## 11:58 PT — 0.3.79 linux build landed and verified; §5(linux) + §6 ticked; Windows build still in flight
+
+- **A0**: `fetch + reset --hard origin/main` ⇒ HEAD `ae99a8176a437faafdf414373f6a3d1d8dc3d55e`
+  (a docs commit — `head_sha=` returns `total_count: 0`, which is expected under `paths-ignore`, not a fault).
+  The code sha `66920316…` still has CI run **45685415856** (`queued` at 19:45:39Z) — noted, not waited on.
+- **§5 linux box ticked**: run **45687692671** completed **success** at 19:55:00Z, all 8 steps green
+  (packaging verified canonical WASM + completeness; publish to rolling `linux-latest`). Asset
+  `gpn-linux.tar.gz` 348,803,388 B, API digest `sha256:9622c0d4…40644`, re-downloaded and `sha256sum`
+  matched. Gotcha: the assets API needs `Accept: application/octet-stream`; without it you get a 1,813-byte
+  JSON error page and a meaningless hash.
+- **§6 ticked (both boxes)** — extracted the *published* tarball and grepped shipped ELFs for each row's own
+  code literal: row 270 `published a loopback/private channel_url` ⇒ `gpn_scheduler:1`; row 271
+  `cannot tell which is newer` ⇒ `gpn_update:1`; row 272 `gpn_warming` / `is inside its warm-up window` ⇒
+  `gpn_scheduler:1`, `[provider] warm-up:` ⇒ `gpn_llm_provider:1`. `./gpn-node --version` ⇒ `gpn-node 0.3.79`,
+  `./gpn_update --version` ⇒ `gpn_update 0.3.79`, crate version `0.3.79`.
+- **Mistake, recorded honestly**: `gpn_scheduler` and `gpn_llm_provider` have **no** `--version` flag — both
+  start the real service. `./gpn_scheduler --version` and `./gpn_llm_provider --help` from `/tmp/v379`
+  therefore started a live scheduler (`[janitor] re-adopted 2 non-terminal job(s) from #6340..#6595`) and a
+  live provider aimed at this host's ports. Both killed within ~40 s. Production untouched: `pid 3708715`
+  (started 09:13:38) is still the only `gpn_scheduler`, and a live `POST :8092/v1/chat/completions`
+  afterwards answered `HTTP/1.1 200 OK`, `job_id 1795636735914`, `payment: channel`. Only `gpn-node` and
+  `gpn_update` accept `--version`; never pass a flag to the other two.
+- **Windows build**: run **45687695024** `in_progress` at 19:45:41Z, contended with CI run 45685415856 on the
+  single-slot `DESKTOP-USBUADL`. Not waited on; not >90 min, so no stale-cancel. Handle left in §5.
+- **Next run**: read run 45687695024; if `success`, tick the Windows box, the same-SHA box, the attestation
+  boxes (repo visibility first) and go to §7 cut.
+- **[TRIAGE]** nothing new; item 256 (clean Windows guest for the stranger lifecycle) remains the only open
+  question for the assistant.
+
 ## 11:4x PT — 0.3.79 §3/§4 ticked, both release builds dispatched (linux + windows) and the run ended
 
 - **A0**: `fetch + reset --hard origin/main` ⇒ HEAD `669203161527f92351f71b0e1ef329d20fe4cb76`
