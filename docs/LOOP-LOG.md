@@ -1,3 +1,33 @@
+## 18:40 PT 0.3.75 DEPLOYED + FILED — §9 all four, §10 peer box fixed at the cause, row 194 COMPLETE
+
+- **§9 self-update proven on two nodes, no hand-copying.** Box 3 updated on its own timer
+  (`versions\0.3.75` staged 18:06:50, process started 18:07:02, `current.previous` = 0.3.74); this
+  host ran the same unit the hourly timer runs (`gpn-update.service`) ⇒ `update-attempts.json`
+  `{0.3.75, confirmed, release_id f7f0e6e9…}` 18:18:50, `current -> versions/0.3.75`. Running
+  process asked directly: `system_version` ⇒ `"0.3.75"`, spec 55.
+- **Full sequence printed, not inferred** — the timer passes `--quiet`, so I re-ran
+  `gpn_update --apply --force`: `staged → installed → current -> versions/0.3.75 (previous 0.3.74)
+  → copied 59 binaries → restart → confirm process=up rpc=no 0s → rpc=yes 2s version=0.3.75 →
+  confirmed 0.3.75 is running`.
+- **Rollback exercised**: `gpn_update --rollback` ⇒ `restored 59 binaries`, `rolled back to 0.3.74`,
+  fleet stayed `active`; `--apply --force` returned to 0.3.75 and confirmed. So the box is backed by
+  an actually-run rollback, not a claim that one exists.
+- **§10 bans were NOT a fleet problem — found and removed the cause.** `12D3KooWGEY59s…` was banned
+  `Reason: Genesis mismatch` every ~75 s; `chain-state` had already named it ("genesis 0x2f31793c
+  (best #287) vs ours 0xb8e4636a … a genesis mismatch is not a fork"). It was the **leftover row-194
+  rig on box 3** — pid 14148, started 14:22, `--chain C:\gpn\scratch194\specs\raw244.json`. Stopped
+  it; box 3's real node (pid 11008, 0.3.75) untouched. After that: 122/122 `Idle (3 peers)` samples
+  over 10 min, 0 bans / 0 `gpn-isolated` / 0 `gpn-forked`. Lesson: a harness that ends with a node
+  still running turns into a permanent ban stream; the rig teardown must kill every node it started.
+- **Filed**: checklist → `docs/releases/archive/0.3.75.md` (52/53; the one unticked box is §0e box 1,
+  AWAITING-OWNER item 256), INDEX row added, GPN-LIST row 194 → `COMPLETE 0.3.75 (2026-11-24)` with
+  both verdicts, `c9e10f45`, runs `45509384325`/`45509380702`, digests, and the pointer to the archive.
+- **Still open (not this release):** row 262 (`gpn-forked` cleared ~23 s after a refused deep fork —
+  behaviour correct, pause not held) and `[TRIAGE]` item 256 (which machine carries stranger steps
+  3-6). `scripts/r194-fork-test.{sh,ps1}` are still uncommitted in `~/.openclaw/workspace/scripts/`:
+  committing them starts a CI run (`scripts/**` is not in `paths-ignore`), so that belongs to the
+  next bundle, not this one.
+
 ## 18:12 PT 0.3.75 PUBLISHED — §7/§7b/§8/§10b ticked, §9 self-update recorded as a handle [TRIAGE: item 256 still unanswered]
 
 - **Published**: `release-cut.sh --timeout 300` ⇒ `released 0.3.75` at 17:52:33 PT; manifest commit
