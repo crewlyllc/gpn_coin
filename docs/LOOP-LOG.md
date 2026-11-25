@@ -1,3 +1,29 @@
+## 02:26 PT 0.3.77 §3b row 262 LIVE PROOF — box-3 deep-fork test PASS=True on the published 0.3.77 binary
+
+- **A0**: HEAD `21cdc562` docs-only ⇒ `actions/runs?head_sha=21cdc5625dd2…` `total_count: 0` (expected
+  under `paths-ignore`). Nothing red on main. Version in `gpn-agent/Cargo.toml` = `0.3.77`, checklist
+  existed ⇒ no regeneration (§0d).
+- **Box worked: §3b row 262** (the item's own "done when": the DeepFork refusal must be held while the
+  peer keeps announcing a taller chain). Ran `scripts/r194-fork-test.ps1 -Expect refuse` on box 3
+  against **0.3.77**, not 0.3.76, on the same frozen rigs (`E1`/`B2`/`BW`, spec `raw244.json`).
+- **First had to get the binary onto the box**: `Invoke-WebRequest` returned `len=0` and
+  `curl.exe` on `github.com/jeremyzguo/…/windows-latest/gpn-windows.zip` saved the 9-byte body
+  `Not Found`. The URL the manifest actually serves is the mirror —
+  `https://github.com/crewlyllc/gpn_coin/releases/download/windows-latest/gpn-windows.zip` — which
+  downloaded 253,251,369 B, sha256 `51fbbab811f40b83470fdc7dac32c3aa7f95c5415aff4abd61b36e78359f4d4b`
+  (= the manifest digest) and `gpn-node.exe 0.3.77` after expand.
+- **Result `PASS=True`** (`C:\gpn\r194\R194-TEST-e177-vs-b2.md`):
+  `2026-11-25 02:18:34.496 … fork-choice: work ours=1030915 theirs=2364454 peer=12D3KooWKAX…; reorg=refused:deep-fork depth=633`
+  held across the full 300 s window. `before: ours #692 work=1030915` → `after: ours #692 work=1030915`
+  — ours **never advanced and never adopted** the heavier branch (`forkImports=0`, `reorg=False`),
+  where 0.3.76's run `e176n` had climbed #692→#779 and lost the marker. `gpn-forked` present at the
+  end: `block sealing paused: a heavier canonical chain is known / peer=12D3KooWKAX… reason=deep-fork`.
+  This is the regression the fix exists for, observed on the published artifact.
+- Checklist now **34/53**, §3b DONE 1/1.
+- **Still open**: §7b capability-discoverability box, §8 stranger verify, §9 self-update, §10 behaviour,
+  §10b timing, §0b filing (archive + INDEX row), §0e stranger lifecycle.
+- No [TRIAGE] items.
+
 ## 02:15 PT 0.3.77 PUBLISHED — CI green, release-cut ran, §7 4/4 and three §7b boxes ticked
 
 - **A0**: HEAD `09ffb150` docs-only ⇒ 0 runs (expected). The gate that mattered was the release sha's:
