@@ -1,3 +1,18 @@
+## 00:16 PT 0.3.77 — Windows release build 45565071726 moved queued → in_progress; no waiting
+
+- **A0**: HEAD `d65aad85` is docs-only ⇒ `actions/runs?head_sha=d65aad85b2825cf802d8a821c0d3c44841d8aeac` = **0 runs** (expected, paths-ignore).
+- **§5 first unticked box (Windows release build)**: run **45565071726** (`head_sha 310214250bd3…`,
+  ref `build/310214250bd3`) is now **`in_progress`** — created 07:02:36Z, started running (updated 08:09:59Z).
+  It is not `queued` any more, so box 1's runner picked it up. No re-dispatch, no polling: dispatch-and-end.
+- **Read-only pre-check for §5 boxes 4–6**: `GET /repos/jeremyzguo/gpn_coin` ⇒ `visibility: private`,
+  `owner.type: User`. So the **cosign keyless** mechanism applies, not `attest-build-provenance`.
+  `release-windows.yml` already implements it: `Check attestation availability (repo visibility)` picks
+  `cosign` for non-public, `cosign sign-blob --bundle` writes `gpn-windows.zip.bundle`, and the gate step
+  (no `if:`) throws when the bundle is missing/<200 bytes or `cosign verify-blob` fails — all before publish
+  (lines 678–743). The `attestations/sha256:` 404 on this path is therefore not a failure.
+- **No blocker, no [TRIAGE].** Next run: ask GitHub once about 45565071726; if `success`, tick the box with
+  the asset size + sha256 and move to the attestation-digest boxes; if still `in_progress`, log and end.
+
 ## 23:58 PT 0.3.77 — §5 same-SHA box ticked; Windows release build still queued behind a 65-min CI job on box 1
 
 - **A0**: HEAD `0e7642bf` is docs-only ⇒ `actions/runs?head_sha=0e7642bf…` = **0 runs** (expected, paths-ignore).
