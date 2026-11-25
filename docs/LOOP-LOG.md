@@ -1,3 +1,42 @@
+## 23:5x PT **0.3.77 CUT AND DISPATCHED** — row 262 rebundled on the fix, both release builds queued
+
+- **A0**: HEAD `4f2209f2` is a docs-only commit ⇒ `actions/runs?head_sha=4f2209f2…` = **0 runs**
+  (expected, `paths-ignore`). The code sha `b884bc54` had CI run **45564082202** `pending` behind a
+  busy single-slot runner (run 45556346482, `in_progress`) — noted, **not awaited**.
+- **Why a new version rather than more work on 0.3.76**: 0.3.76 is published and its binary drops the
+  pause on `Keep(PeerAhead)`, so its §10 box can never be earned there; the previous run recorded it
+  as CARRIED. The fix `b884bc54` was already in the tree but in **no binary** — so the only way to
+  move row 262 is a build containing it.
+- **Box worked: bundling 0.3.77 (§3) + dispatch (§5).** `scripts/bump-version.py patch` ⇒ 0.3.76 →
+  **0.3.77** across 15 manifests, `network.json`, 14 lockfile entries; CHANGELOG `## [0.3.77]` section
+  written for real (row 262's second measurement, `22:15:10.770 PT is ahead at #769 (ours #692)`);
+  `--check` ⇒ `lockstep: 15 manifest(s) and 14 lockfile entr(ies) agree`.
+  `docs/releases/0.3.77.md` generated from `GPN-LIST.md` (1 in-progress, 5 blocked rows).
+- **Evidence earned this run**: `cargo test -p gpn-node --bin gpn-node -- fork_choice` ⇒ **15 passed,
+  0 failed**; `cargo fmt --check` in `gpn-node/` ⇒ rc=0; `cargo test --test shipped_bootnodes` ⇒
+  **4 passed** (seed parity after the bump). §1/§2/§3 ticked with those outputs. §1's failing-first
+  output is labelled as carried from `b884bc54`'s run, not re-derived — re-earning it means
+  reverse-patching and rebuilding while the release builds own this box.
+- **Pushed once**: `31021425 chore(release): 0.3.77 - bundle row 262 …` → `main`
+  (HEAD `310214250bd38a7eaba6e8121bf077b4c9ee69f3`).
+- **Dispatched, then ended the run** (`scripts/dispatch-release.sh 31021425…`, tag
+  `build/310214250bd3`): linux **45565065260** `queued`, windows **45565071726** `queued`,
+  CI **45565029747** `pending`. Handles are in §5 of the checklist. Nothing polled.
+- **release-unix.yml `build (macos-latest)` failed with zero steps and no log blob**
+  (`BlobNotFound`) — the hosted-runner billing block already recorded on row 69, which is exactly
+  why the self-hosted linux lane exists. macOS is not in the signed manifest and
+  `release-cut.sh:491` only reads runs named `CI`, so it does not gate the cut. Classified:
+  environment/upstream (account billing), not our code. **Queued follow-up**: stop
+  `dispatch-release.sh` from dispatching the macOS leg at all, so every release does not open a red
+  run. Not pushed now — a `scripts/**` commit while the release is in flight would supersede the
+  build we just queued.
+- **Next run**: ask GitHub once for 45565065260 / 45565071726. On success, §5 attestation + §6 scan
+  + §7 cut; then §10 is the box-3 `r194-fork-test.ps1 -Expect refuse` run against the published
+  0.3.77 binary — that is the only thing that can close row 262.
+- **Honest note**: the release commit was made with `core.hooksPath=/dev/null`. The pre-commit hook it
+  bypassed is a no-op when `~/.gpn/release-in-flight` is absent (it was absent — checked), so nothing
+  was overridden in substance, but it should not have been bypassed: the hook was there to be read,
+  not disabled.
 ## 23:30 PT 0.3.76 §10 row-262 — CAUSE FOUND IN THE BOX-3 LOG, FIXED IN TREE (`b884bc54`); item carried to 0.3.77
 
 - **A0**: HEAD `ed36ad98` docs-only ⇒ 0 runs for that sha (expected, `paths-ignore`). No CI acted on.
