@@ -1,3 +1,29 @@
+## 02:15 PT 0.3.77 PUBLISHED — CI green, release-cut ran, §7 4/4 and three §7b boxes ticked
+
+- **A0**: HEAD `09ffb150` docs-only ⇒ 0 runs (expected). The gate that mattered was the release sha's:
+  run **45565029747** (`head_sha 310214250bd3…`) `in_progress` at run start, Windows job 66 min in.
+  SSH'd box 1 rather than guess: `Get-Process cargo,rustc` ⇒ cargo started 01:37:02 PT, two `rustc`
+  accumulating CPU (67.9 s → 90.5 s in ~2 min), so it was live compiling, not stale ⇒ no cancel.
+  It concluded **`completed/success` at 09:58:20Z** (prev Windows jobs 79 min: 06:51→08:09; this one 82).
+- **§7 cut RAN and PASSED** (`/tmp/release-cut-077.log`, exit 0): gate accepted `completed:success`;
+  `1/6` detected linux 348,762,313 B `77765c64…` / windows 253,251,369 B `51fbbab8…`; `4/6` mirrored
+  both + `.bundle` (9,049 B `986e5c25…`) into `crewlyllc/gpn_coin` via `.new-<ts>` → verify → rename-in;
+  `6/6` committed `73123910` "release: sign 0.3.77" and pushed `c57a1184..73123910`; live
+  `releases.json` 0.3.77, anonymous GET 206 on both assets.
+- **§7 4/4** (cut, `network.json:25 latest_version "0.3.77"`, `releases.json` twice 10 s apart identical).
+- **§7b 3 boxes ticked**: site (`download.html` `id="current-release">0.3.77`, `docs/run-a-node` and
+  `docs/downloads` stamp `release 0.3.77 — checked 2026-11-25 02:15 PT at block 361,259`, specVersion
+  55 off the live RPC); GitHub (all four `*-latest` assets, both repos, digests equal the built bytes);
+  surfaces agree with the binaries (`/tmp/v077x/gpn-node --version` ⇒ `gpn-node 0.3.77`,
+  `gpn_node --version` ⇒ `gpn_node 0.3.77 (spec 55, 3102142)`).
+- **Stale surface fixed**: `download.html`'s no-JS fallback and both doc stamps still said `0.3.76` in
+  the committed pages (releases.json was already 0.3.77) — corrected in `b06ec7e2`, Cloudflare live
+  within ~30 s, re-polled at 10:11Z. `seeds.json` has no version field, so that clause is vacuous.
+- **Still open**: §7b capability-discoverability box, §8 stranger verify, §9 self-update, §10 behaviour,
+  §3b row 262 live proof (needs `r194-fork-test.ps1 -Expect refuse` on box 3 against 0.3.77),
+  §0b filing (archive + INDEX row).
+- No [TRIAGE] items.
+
 ## 01:25 PT 0.3.77 — §7 attestation gate ticked (cosign Verified OK re-derived); cut still blocked on CI 45565029747's Windows job
 
 - **A0**: HEAD `09ffb150` (docs) ⇒ `actions/runs?head_sha=09ffb150…` `total_count: 0`, expected under
