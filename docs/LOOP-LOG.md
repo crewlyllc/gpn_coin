@@ -1,3 +1,26 @@
+## 14:21 PT — 0.3.79 filed (§0b): checklist archived + INDEX row; release is complete bar the AWAITING-OWNER lifecycle
+
+**A0 (CI):** HEAD `5fcecdd7a5601f0b538ad9c054f5327398a93453` (`release(0.3.79): cut + publish …`) ⇒
+`GET /actions/runs?head_sha=` **total_count: 0** — docs-only commit, `paths-ignore` intact, expected.
+
+**Boxes ticked this run (one item):**
+- §0b filing — `git mv docs/releases/0.3.79.md docs/releases/archive/0.3.79.md`, verified present and
+  old path gone in the same commit.
+- §0b filing — `docs/releases/INDEX.md` row added at the top: `0.3.79 | 2026-11-25 | 270, 271, 272;
+  256 (AWAITING-OWNER — venue decision)`.
+
+**Re-verified before ticking (self-check of the previous run's claims):**
+- `https://gpncoin.ai/releases.json` ⇒ version `0.3.79`, `published_at 2026-11-25T21:40:28Z` (live poll).
+- Running process `pid 3912143` `/home/jeremyg/.local/bin/gpn-node --version` ⇒ `gpn-node 0.3.79`.
+- `scripts/checklist-status.py` ⇒ **51/56**, every section DONE except §0b (now 2/2), §0e (1/3) and §3b (3/4).
+
+**Still open, unchanged:** §0e box 1 + §3b row 256 — AWAITING-OWNER on `docs/NEEDS-TRIAGE.md` item 256
+(which clean Windows/GPU venue carries the stranger lifecycle). Carried into 0.3.79's archive as such.
+No [TRIAGE] raised this run: item 256 has been re-announced five times and is with the assistant.
+
+**Next run:** 0.3.79 is filed; row 270 is the one live-proof debt (needs a host that can actually load
+sdxl-turbo — today's attempt answered `HTTP 425 … recorded unloadable`). Otherwise §C: bundle NEW rows
+when five are ready.
 ## 13:59 PT — 0.3.79 cut, published and self-updated; §7/§7b/§8/§9/§10/§10b ticked [TRIAGE]
 
 - **A0**: `fetch + reset --hard origin/main` ⇒ HEAD `0edcb20f` (docs commit; `head_sha=` ⇒ `total_count: 0`,

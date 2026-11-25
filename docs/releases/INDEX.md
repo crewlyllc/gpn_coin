@@ -5,6 +5,7 @@ the checklist's last box is ticked and the version is published.
 
 | version | published | items | checklist |
 |---|---|---|---|
+| 0.3.79 | 2026-11-25 | 270 (AP refuses a loopback `channel_url` published by a remote provider — code+tests `cargo test --bin gpn_scheduler channel_url` 3 passed, live PNG half NOT observed: local provider's sdxl-turbo recorded unloadable ⇒ `HTTP 425`); 271 (update-guard refusal no longer claims a direction it cannot verify — live `gpn_update` refusal line on real signed manifest, `EXIT=3`, nothing installed); 272 (first chat after a restart answers `503 gpn_warming` + `Retry-After` instead of a 10 s timeout — live `POST :8092/v1/chat/completions` `200` in 3.384 s after the 0.3.79 swap); 256 (AWAITING-OWNER — venue decision, `docs/NEEDS-TRIAGE.md` item 256) | archive/0.3.79.md |
 | 0.3.78 | 2026-11-25 | 263 (image/video jobs reach a pull-only provider over the published channel URL — live proof on the new binary: PNG 256x256 125,300 B); 256 (AWAITING-OWNER — venue decision + the structural two-version window) | archive/0.3.78.md |
 | 0.3.77 | 2026-11-25 | 262 (deep-fork refusal held across a peer merely ahead — live proof box 3, PASS=True); 256 (AWAITING-OWNER — carried in §0e, GPU guest needed) | archive/0.3.77.md |
 | 0.3.76 | 2026-11-24 | 262 (fix `b884bc54` shipped here; its live proof needed a binary containing it, so it was earned and recorded on 0.3.77) | archive/0.3.76.md |
