@@ -1,6 +1,6 @@
 # Run a node (single command)
 
-*Verified against: chain spec 55 / release 0.3.78 — checked 2026-11-25 09:15 PT at block 362,878.*
+*Verified against: chain spec 55 / release 0.3.79 — checked 2026-11-25 13:48 PT at block 363,940.*
 
 GPN ships a **single-node supervisor**, `gpn_node`, so an operator runs **one
 command** and gets **one node** — the chain node/miner, the provider heartbeat,
