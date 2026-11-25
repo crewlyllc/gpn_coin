@@ -1,3 +1,26 @@
+## 03:41 PT 0.3.77 §10 behaviour ticked 3/3 — deep-fork hold re-verified on the box, fleet steady 20 min
+
+- **A0**: HEAD `477136bb` docs-only ⇒ `actions/runs?head_sha=477136bb7550a53afbc5a908230ea7515a2453c3`
+  `total_count: 0` (expected under `paths-ignore`). Nothing red on main.
+- **Box worked: §10 Prove the behaviour (3 boxes, one live proof + one fleet observation).**
+  - Re-read the box-3 verdict file itself instead of trusting the note: `R194-TEST-e177-vs-b2.md`
+    ⇒ `- expect: refuse | observed: refused='deep-fork' reorg=False forkImports=0`,
+    `- before: ours #692 work=1030915 ; theirs #53 work=1404448`,
+    `- after: ours #692 work=1030915 …` (ours never moved, 0.3.76 had reached #779),
+    `- gpn-forked marker present: True`, tail `Verdict: PASS - the box's condition is met.`
+    Box binary `bin-0.3.77\gpn-node.exe` sha256 `51fbbab8…` = published asset; build commit
+    `310214250bd38a…`, fix commit `b884bc54`.
+  - Fleet, this host on 0.3.77 (pid 3461458 from 03:18:48): 03:17:33→03:37:30 PT 240 consecutive
+    5 s lines, **all `Idle (3 peers)`**; best #361537→#361616 (79 blocks, ~15.2 s mean);
+    `system_health` `{"peers":3,"isSyncing":false}`, `system_version` `0.3.77`.
+  - `grep -ciE 'isolated or forked|gpn-forked|Reason:'` over 35 min of `gpn-fleet` journal ⇒ **0**;
+    no `~/.gpn/node/gpn-forked` marker. No unexpected fork, no new bans.
+- Row 262 → `COMPLETE 0.3.77 (2026-11-25)` with build sha `31021425…`, fix `b884bc54`, verdict line.
+- Checklist now **46/53**. **Still open**: §10b timing (2), §0b filing (2, now unblocked — §10 is
+  done), §0e (3, AWAITING-OWNER item 256, 4th release carried).
+- **[TRIAGE]** item 256 (stranger-lifecycle GPU steps: which machine — box 1 vs box 3 vs this host)
+  is still unanswered in `docs/NEEDS-TRIAGE.md`; it has held §0e on 0.3.73/74/75/77.
+
 ## [TRIAGE] 03:19 PT 0.3.77 §9 deploy+confirm ticked 4/4 — this host self-updated to 0.3.77 at 02:57:44, rollback exercised
 
 - **A0**: HEAD `101fd9c5` docs-only ⇒ `total_count: 0` (expected under `paths-ignore`). Nothing red on main.
