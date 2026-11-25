@@ -1,3 +1,24 @@
+## 20:36 PT 0.3.76 §3 seed-parity box ticked (local test 4/4 + live seeds.json match); cut still gated on CI 45539696287
+
+- **A0**: `origin/main` HEAD `6eeb62bf` is docs-only ⇒ `head_sha=6eeb62bf…` `total_count: 0`
+  (paths-ignore, expected). Code SHA run **45539696287** (`66b1982d`) still `in_progress` at
+  04:32Z (windows self-hosted job in step 6 `build node` since 04:05Z; linux + fmt/clippy +
+  secret-scan all `completed success`). Not awaited, not cancelled — it is the run §7's cut gate
+  needs, and it is 27 min into a 40–75 min cold Windows build.
+- **Box worked: §3 last box (seed-list parity) — ticked, section now DONE 4/4.**
+  `cd gpn-agent && CARGO_TARGET_DIR=~/.ci-cache/gpn-agent-target cargo test --test shipped_bootnodes`
+  ⇒ `4 passed; 0 failed` covering `install.sh`, `install.ps1`, `scripts/gpn-autostart.sh`,
+  `run-windows-provider.ps1`, `scripts/run-windows.cmd`, `chainspec::launcher_bootnodes()` and the
+  shared spec artifact (path present, 965,134 B ⇒ asserted, not skipped). Live
+  `https://gpncoin.ai/seeds.json` (04:36:22Z) `multiaddrs` == `network.json`'s two bootnodes exactly
+  (DNS + `142.129.54.88`, peer `12D3KooWAFt…`). `release-windows.yml:393` carries the canonical DNS
+  entry. Total now 27/53.
+- **Next run**: check 45539696287's `conclusion`; `success` ⇒ re-run `scripts/release-cut.sh
+  --timeout 300` detached (log `/tmp/cut076.log`, write the pid/handle into the box, END the run),
+  `failure` ⇒ read the failing step first. Everything after the cut (§7 tails, §7b, §8, §9, §10)
+  is blocked behind it.
+- No [TRIAGE] item this run.
+
 ## 20:25 PT 0.3.76 windows build VERIFIED (cosign) + §5/§7-attestation ticked; cut refused on in-flight CI
 
 - **A0**: `origin/main` HEAD `5cdb0d11` is docs-only ⇒ no ci.yml run by design (`total_count: 0`
