@@ -1,3 +1,54 @@
+## 09:55 PT — 0.3.78 CUT AND PUBLISHED, self-updated, §7/§7b/§8/§9/§10 all ticked with evidence
+
+- **A0**: `git fetch && reset --hard origin/main` moved HEAD `0cd2f8d7` → **`8fca94fc`** (docs-only; the
+  full-sha API query `?head_sha=8fca94fc7a2c539b2bb3eca6b453e8217d7bb4ba` ⇒ `total_count: 0`, expected
+  under `ci.yml` paths-ignore). Nothing red at HEAD.
+- **The §7 gate cleared on its own.** CI run **45634997014** (`50688dc5`) is `completed / success`
+  (created 14:31:30Z, finished 16:48:16Z); the windows self-hosted job 139296187708 step 7
+  `Build + test gpn-agent (release)` went `success` at 16:48:11Z — exactly the step the 08:02 attempt
+  was waiting on. Nothing was cancelled or re-dispatched.
+- **§7 CUT**: `scripts/release-cut.sh --version 0.3.78 --timeout 300` ⇒ exit 0, **`released 0.3.78`**.
+  mirror digests verified (`linux-latest 37b8d6d5…`, `windows-latest d3024bc0…`), signed
+  `OK: 0.3.78 … key 78015fab541c9a62…`, published `[main 88fbd56a] release: sign 0.3.78`, pushed
+  `8fca94fc..88fbd56a`, live manifest `0.3.78`, anonymous GET **206** on both assets.
+- **§7b**: `network.json` `latest_version` = `0.3.78`; `releases.json` served `0.3.78` twice 10 s apart
+  (`published_at 2026-11-25T17:05:25Z`). Site: found the **stale no-JS fallback** in
+  `website/download.html` (`current-release` literal `0.3.77`) and the `Verified against … release 0.3.77`
+  stamps in `docs/downloads.md` + `docs/run-a-node.md` — bumped the fallback to `0.3.78` and re-stamped
+  both docs against the live chain (`chain_getHeader` ⇒ block **362,878**, `spec_version: 55`, doc asset
+  URLs re-probed anonymously ⇒ **206**), then re-ran `scripts/build-site-docs.py`. **`seeds.json` has no
+  version field at all**, so that third surface is n/a.
+- **Latent docs bug fixed on the way**: regenerating the site would have **deleted** the "Deep-fork
+  refusal is held" bullet from `website/docs/technical-overview.html` — it exists only in the generated
+  HTML, never in `docs/GPN-TECHNICAL-OVERVIEW.md`. Added it to the markdown source, so regeneration is
+  now idempotent (`git diff website/docs/technical-overview.html` ⇒ empty). A live doc claim was one
+  `build-site-docs.py` away from vanishing.
+- **§8 PATTERN**: `scripts/release-cut.sh --verify-published --version 0.3.78` ⇒ exit 0:
+  `linux: 348762697 bytes sha256 37b8d6d5… matches the manifest`, `windows: 253264039 bytes sha256
+  d3024bc0… matches the manifest`, `PASS: both manifest assets are publicly downloadable by exact
+  filename and match their sha256/size` — anonymous, no token, no cookie jar.
+- **§9 SELF-UPDATE — first attempt refused, and the guard was right to.** `gpn-update.service` staged
+  0.3.78 then aborted: `gpn_diffusion_provider: refusing to replace 0.3.78 with a different build of the
+  same version: the install dir runs sha d91272b, the release was built from sha 50688dc`
+  (`gpn-agent/src/update.rs:1332`). This box's `~/.local/bin` carried a **locally built** 0.3.78 at
+  `d91272bb`. I could ask git, so I did: `git merge-base --is-ancestor d91272bb 50688dc5` ⇒ **true**
+  (`d91272bb` = `release(0.3.78): bundle rows 263 … and 256`, 06:04 PT; `50688dc5` = later docs commit
+  06:31 PT) — the release is the newer tree, so the documented `--force` applies. Forced run: `installed
+  0.3.78`, `current -> versions/0.3.78 previous: 0.3.77`, `copied 59 binaries`, 12 units restarted,
+  `confirm: process=up rpc=yes 22s version=0.3.78`, `confirmed 0.3.78 is running`. Running process
+  `~/.local/bin/gpn-node` pid **3708818** ⇒ `gpn-node 0.3.78`, RPC `system_version` ⇒ `0.3.78`.
+  **[TRIAGE]** the guard's *message* says "would swap newer code for older code" even when the installed
+  sha is an ancestor of the release's — the behaviour (refuse, demand `--force`) is correct, the wording
+  tells an operator the opposite of the truth. Non-urgent fix, worth its own row.
+- **§10**: on the new binary — chat `200` in **0.193 s** (`payment: channel`, channel 7), image job
+  `edfe5aad…` ⇒ PNG 256x256 **125,300 B** sha256 `7463805c…449f6` (byte-identical to row 263's 0.3.77
+  proof), AP `[images] … settled on channel 7 (job 1795626961567)`; node producing (`Imported #362892`,
+  `Prepared block for proposing at 362893`); peers 2→3, **0** `Reason:`/ban lines and **0**
+  `gpn-isolated`/`gpn-forked` in 30 min. Row **263** flipped to `COMPLETE 0.3.78 (2026-11-25)`; row 256
+  stays `AWAITING-OWNER` (venue decision + the structural two-version window).
+- **Cold-start note**: the first two chat calls after the restart timed out at 10 s while the local
+  provider warmed; the third answered in 0.193 s. Worth a row — a stranger's very first job can hit that
+  window.
 ## 08:41 PT — §7 cut still CI-gated (same run, still advancing); no other box is advanceable; checks re-run, nothing pushed but this log
 
 - **A0**: synced — `git fetch && reset --hard origin/main` moved HEAD `ee95f00f` → **`0cd2f8d7`** (force-update).

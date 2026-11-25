@@ -20,6 +20,7 @@ designed but **not wired** to the node's internal miner.
 - **Bitcoin-style rewards:** the block producer keeps the block reward (account bound via pre-runtime digest).
 - **Per-node wallets:** each miner pays out to its own account.
 - **Fork tolerance:** explicit network identity (chain-id + genesis hash + version); divergent chains warned + starved, not banned. No finality gadget → confirmation is probabilistic by depth.
+- **Deep-fork refusal is held:** if a peer announces a chain taller than ours that does not build on blocks we hold, the node keeps sealing paused and never reorgs onto that branch, for as long as the peer keeps announcing it. Sealing resumes only when the announced tip is a block we already have. A peer that is merely ahead on *our* own chain is not treated as a fork.
 
 ## Eligibility (GPU-only)
 - **Proof-of-Staked-GPU** attestation (GPU count + measured GFLOPS) → **tiers** (Bronze/Silver/Gold) → optional **reward multiplier**. **There is no staking or delegation prerequisite to attest, list, or serve.**
