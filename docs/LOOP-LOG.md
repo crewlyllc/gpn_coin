@@ -1,3 +1,37 @@
+## 11:2x PT — 0.3.79 §3b box 4 (item 272) ticked — an AP whose provider is still loading its model says "not ready" instead of timing out
+
+- **A0**: `fetch + reset --hard origin/main` ⇒ HEAD `6427d5c5` (item 271's commit). One CI run exists for the
+  full sha (`45681212900`, `pending`, created 19:02Z) — noted, not waited on (single-slot runner).
+- **Box worked**: §3b item **272** (first chat jobs after an update restart timed out at 10 s while the local
+  provider warmed). Took the item's first option: the AP reports `not ready` — three parts:
+  1. **Provider declares it.** `gpn_provider_status` now publishes `loaded_models` (ollama `GET /api/ps`) and
+     `warming`, from the pure `warming_now(uptime, served, loaded)`: true only inside a 180 s post-start window
+     AND with none of the served models resident. Unknown (`/api/ps` unanswered) and past-the-window both refuse
+     to claim, so a missing field can never turn a request away. The `/api/ps` read uses a new
+     `ModelsCache::answer_opt` that never blocks the request path (the #175 1500 ms reader budget still holds).
+  2. **AP answers retryable.** `Provider.warming` is parsed from the poll snapshot, merged per address (a warm
+     co-located process clears it), published on `/providers`, and `all_candidates_warming()` gates
+     `/v1/chat/completions` **before** any job is created: `503` + `Retry-After: 3` + `type: gpn_warming`.
+  3. **Provider warms at boot.** `gpn_llm_provider` runs one 1-token inference on the starter model in a
+     background task under `GpuYieldGuard`, logging `[provider] warm-up: <model> resident after Ns` — the
+     ~13 s load is paid at start, by nobody's request.
+- **Live evidence** (throwaway AP `127.0.0.1:18092`, HOME/GPN_DATA_DIR in /tmp, loopback poll as
+  `5WarmingTestAddr`, real new binaries): `HTTP/1.1 503` / `Retry-After: 3` /
+  `{"error":{"message":"provider is loading llama3.2:1b after a restart; retry shortly","type":"gpn_warming"}}`,
+  AP log `[route] not ready: every candidate for llama3.2:1b is inside its warm-up window — answering 503 with
+  Retry-After 3s`; `/providers` showed `warming: True`. Re-polling with `warming:false` did not gate.
+  Provider side, live against a stub ollama with empty `/api/ps`: `{'models': ['llama3.2:1b'], 'loaded_models':
+  [], 'warming': True}` inside the window, and no `loaded_models`/`warming:false` before the first `/api/ps` answer.
+- **Test first**: the gate test failed on a stub (`two cold boxes ⇒ not ready`); `warming_now`'s test caught a
+  real bug — `all()` over an empty served list is vacuously true, so a model-less box would have claimed warming.
+- **Suites**: `gpn_scheduler` 113 passed, `gpn_provider_status` 71, `gpn_llm_provider` 38; `cargo fmt --all --
+  --check` clean; clippy (release, bins, CI allow-list, `-D warnings`) EXIT=0.
+- **Residual**: this host's live AP/provider still run 0.3.78; the real pair is exercised in §9/§10 of this release.
+- **Also ticked** §1 and §2 (test-first / implement gates) for this bundle, with the evidence inline.
+- **Next run**: §3 Bump and record is already done for 0.3.79 (version + CHANGELOG shipped with the bundle), so the
+  next unticked work is §4 Push verification / §5-§7 builds, §0e's stranger-lifecycle box remains AWAITING-OWNER.
+- No blocker, no [TRIAGE].
+
 ## 11:05 PT — 0.3.79 §3b box 3 (item 271) ticked — the update guard stopped claiming a direction it cannot see
 
 - **A0**: `fetch + reset --hard origin/main` ⇒ HEAD `c83ae390` (list/stability track, docs-only —

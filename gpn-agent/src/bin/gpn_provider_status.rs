@@ -2230,6 +2230,48 @@ impl ModelsCache {
             }
         }
     }
+
+    /// Same cache, but for a field that is allowed to be **unknown** and must
+    /// never be paid for on the request path (item 272).
+    ///
+    /// Never blocks: a fresh answer is served, a stale one is served while a
+    /// background refresh runs, and a cold cache answers `None` ("not read
+    /// yet") instead of making `/status` wait on a second Ollama call. The
+    /// 1500 ms reader budget in `assign_pull` has to cover this route too —
+    /// a second blocking call on the cold path is exactly the #175 defect.
+    pub(crate) fn answer_opt<F>(&self, now: Instant, ttl: Duration, fetch: F) -> Option<Vec<String>>
+    where
+        F: FnOnce() -> (Vec<String>, bool) + Send + 'static,
+    {
+        let (names, known) = match self.plan(now, ttl) {
+            ModelsRead::Fresh(models, can_pull) => (models, can_pull),
+            ModelsRead::Stale(models, can_pull) => {
+                if self.begin_refresh(now, ttl) {
+                    let me = self.clone();
+                    std::thread::spawn(move || {
+                        let (m, c) = fetch();
+                        me.store(m, c, Instant::now());
+                    });
+                }
+                (models, can_pull)
+            }
+            ModelsRead::Cold => {
+                if self.begin_refresh(now, ttl) {
+                    let me = self.clone();
+                    std::thread::spawn(move || {
+                        let (m, c) = fetch();
+                        me.store(m, c, Instant::now());
+                    });
+                }
+                return None;
+            }
+        };
+        if known {
+            Some(names)
+        } else {
+            None
+        }
+    }
 }
 
 fn models_cache() -> &'static ModelsCache {
@@ -2271,6 +2313,97 @@ fn ollama_models_uncached(base: &str, fallback: &[String]) -> (Vec<String>, bool
         }
         Err(_) => (fallback.to_vec(), false),
     }
+}
+
+// ── item 272: warm-up state ─────────────────────────────────────────────────
+//
+/// How long after this heartbeat process starts an un-loaded model counts as
+/// **warming up** rather than "not served".
+///
+/// The window exists because a restart is the only time the model is provably
+/// about to be loaded: measured 2026-11-25, the first `POST :8092/v1/chat/
+/// completions` after an update restart timed out at the client's own 10 s
+/// budget twice, then answered in **0.193 s** — the ~13 s Ollama model load was
+/// paid inside the caller's request. Outside this window the AP must route as
+/// it always did: a model ollama unloaded after `keep_alive` expiry is not a
+/// restart, and answering `not ready` for it forever would be a worse bug than
+/// the one being fixed.
+const WARMUP_WINDOW: Duration = Duration::from_secs(180);
+
+/// When this process started, for the warm-up window.
+fn process_start() -> Instant {
+    static START: std::sync::OnceLock<Instant> = std::sync::OnceLock::new();
+    *START.get_or_init(Instant::now)
+}
+
+/// Models Ollama currently has **in memory** (`GET /api/ps`), or `None` when the
+/// read has not succeeded (unknown — never "nothing is loaded").
+fn ollama_loaded(base: &str) -> Option<Vec<String>> {
+    let base = base.to_string();
+    loaded_cache().answer_opt(Instant::now(), LOADED_TTL, move || {
+        ollama_loaded_uncached(&base)
+    })
+}
+
+fn loaded_cache() -> &'static ModelsCache {
+    static C: std::sync::OnceLock<ModelsCache> = std::sync::OnceLock::new();
+    C.get_or_init(ModelsCache::new)
+}
+
+/// How long a `/api/ps` answer is reused. Short: this is the field that decides
+/// whether a stranger is told `not ready`, so a stale "still loading" is worse
+/// than a slightly early "ready".
+const LOADED_TTL: Duration = Duration::from_secs(2);
+
+fn ollama_loaded_uncached(base: &str) -> (Vec<String>, bool) {
+    let cli = reqwest::blocking::Client::builder()
+        .timeout(Duration::from_millis(OLLAMA_TAGS_TIMEOUT_MS))
+        .build();
+    match cli.and_then(|c| c.get(format!("{base}/api/ps")).send()) {
+        Ok(r) => {
+            let v: serde_json::Value = r.json().unwrap_or_default();
+            let names: Vec<String> = v["models"]
+                .as_array()
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|m| m["name"].as_str().map(str::to_string))
+                        .collect()
+                })
+                .unwrap_or_default();
+            (names, true)
+        }
+        Err(_) => (Vec::new(), false),
+    }
+}
+
+/// Item 272: is this box inside its post-restart warm-up window **with none of
+/// the models it serves in memory**?
+///
+/// Pure so the rule can be tested without a clock or an Ollama. Every input is
+/// a fact, and every unknown fails **open**:
+///   • `loaded == None` (the `/api/ps` read has not answered) ⇒ not warming —
+///     the AP must not refuse a request on a missing field;
+///   • past the window ⇒ not warming — a model ollama dropped after
+///     `keep_alive` is a load the network has always paid, not a restart;
+///   • any served model already resident ⇒ not warming — we cannot say which
+///     model the next request names, so we must not speak for it.
+fn warming_now(uptime: Duration, served: &[String], loaded: Option<&[String]>) -> bool {
+    if uptime >= WARMUP_WINDOW {
+        return false;
+    }
+    let Some(loaded) = loaded else {
+        return false;
+    };
+    // A box that advertises no model has nothing to be cold about, and `all()`
+    // over an empty list is vacuously true — the test caught exactly that.
+    if served.is_empty() {
+        return false;
+    }
+    served.iter().all(|m| {
+        !loaded
+            .iter()
+            .any(|l| l == m || l.split(':').next() == m.split(':').next())
+    })
 }
 
 /// Total system RAM (MiB); 0 if unknown.
@@ -2498,6 +2631,9 @@ fn main() {
 }
 
 fn run_main() -> Result<(), Box<dyn std::error::Error>> {
+    // Item 272: start the warm-up window at process start, not at the first
+    // `/status` request.
+    let _ = process_start();
     let args: Vec<String> = std::env::args().collect();
     let listen = opt(&args, "--listen")
         .or_else(|| std::env::var("LISTEN").ok())
@@ -2932,6 +3068,19 @@ fn run_main() -> Result<(), Box<dyn std::error::Error>> {
                 // a promise the box will OOM on.
                 let models_now = vram_filter_logged(&models_now, hw_now.vram_mb);
                 let task_models_now = task_matrix_now(&models_now, &advertised_words);
+                // Item 272: which models Ollama has IN MEMORY right now, and —
+                // while this process is inside its post-restart window with none
+                // of the served models resident — the `warming` claim the AP
+                // turns into a retryable `not ready` instead of a 10 s timeout.
+                // The read never blocks `/status` (see `answer_opt`), and an
+                // unread `/api/ps` publishes no `loaded_models` and no
+                // `warming` claim at all rather than a false "cold".
+                let loaded_now = ollama_loaded(&ollama);
+                let warming = warming_now(
+                    process_start().elapsed(),
+                    &models_now,
+                    loaded_now.as_deref(),
+                );
                 // Item #43: report free space so a monitor can alert before
                 // ENOSPC silently halts block production. 0/null = unknown.
                 let disk = disk_space(
@@ -2973,6 +3122,13 @@ fn run_main() -> Result<(), Box<dyn std::error::Error>> {
                 // we are not allowed to log into — must answer "is it up to
                 // date?" from network-visible data alone.
                 attach_build(&mut body);
+                // Item 272: the loaded set as a fact, and the warm-up claim that
+                // depends on it. Absent `loaded_models` = "not read" (unknown),
+                // which is distinct from `[]` = "nothing resident".
+                if let Some(loaded) = &loaded_now {
+                    body["loaded_models"] = json!(loaded);
+                }
+                body["warming"] = json!(warming);
                 // #93: measurement conditions (samples, spread, "attested-idle"
                 // provenance, stale-record warning) — so a low number can be
                 // told apart from one taken under contention.
@@ -3124,6 +3280,46 @@ mod tests {
         }
     }
 
+    /// Item 272: the warm-up claim is a **fact about this box**, and every
+    /// unknown fails open. A request may be refused only on a self-declared
+    /// transient state — never because a field was missing or because ollama
+    /// dropped an idle model after `keep_alive`.
+    #[test]
+    fn the_warming_claim_is_only_made_inside_the_window_and_only_when_cold() {
+        let served = vec!["llama3.2:1b".to_string(), "qwen2.5:0.5b".to_string()];
+        let empty: Vec<String> = vec![];
+        let loaded = vec!["qwen2.5:0.5b".to_string()];
+
+        // Inside the window, nothing resident ⇒ warming.
+        assert!(warming_now(Duration::from_secs(2), &served, Some(&empty)));
+        // Past the window ⇒ never claimed, even with nothing resident: an idle
+        // unload is the load the network always paid, not a restart.
+        assert!(!warming_now(WARMUP_WINDOW, &served, Some(&empty)));
+        // A served model is resident ⇒ the box can answer ⇒ no claim.
+        assert!(!warming_now(Duration::from_secs(2), &served, Some(&loaded)));
+        // `/api/ps` never answered ⇒ unknown ⇒ no claim (fail open).
+        assert!(!warming_now(Duration::from_secs(2), &served, None));
+        // Nothing served ⇒ there is nothing to be cold about.
+        assert!(!warming_now(Duration::from_secs(2), &empty, Some(&empty)));
+    }
+
+    /// Item 272: `/api/ps` is parsed as the loaded set, and a failed read is
+    /// `None` (unknown) rather than an empty list ("nothing loaded").
+    #[test]
+    fn a_loaded_model_read_is_unknown_when_it_fails() {
+        let (names, ok) = ollama_loaded_uncached("http://127.0.0.1:1");
+        assert!(!ok, "an unreachable ollama is not a claim");
+        assert!(names.is_empty());
+
+        let stub = StubOllama::start_with_ps(
+            vec!["qwen2.5:0.5b".to_string()],
+            vec!["qwen2.5:0.5b".to_string()],
+        );
+        let (names, ok) = ollama_loaded_uncached(&stub.base());
+        assert!(ok, "/api/ps answered");
+        assert_eq!(names, vec!["qwen2.5:0.5b".to_string()]);
+    }
+
     /// A stub Ollama whose `/api/tags` takes `delay` to answer — the shape that
     /// made all three local providers go blind at the same second.
     struct StubOllama {
@@ -3135,12 +3331,29 @@ mod tests {
 
     impl StubOllama {
         fn start(delay: Duration, models: Vec<String>) -> Self {
+            Self::start_full(delay, models, Vec::new())
+        }
+
+        /// Item 272: `/api/tags` (installed) and `/api/ps` (resident) answer
+        /// different lists, because they are different facts.
+        fn start_with_ps(models: Vec<String>, loaded: Vec<String>) -> Self {
+            Self::start_full(Duration::from_millis(0), models, loaded)
+        }
+
+        fn start_full(delay: Duration, models: Vec<String>, loaded: Vec<String>) -> Self {
             let server = tiny_http::Server::http("127.0.0.1:0").expect("bind stub ollama");
             let port = server.server_addr().to_ip().expect("ip addr").port();
             let hits = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
             let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-            let body = serde_json::json!({
+            let tags_body = serde_json::json!({
                 "models": models
+                    .iter()
+                    .map(|m| serde_json::json!({ "name": m }))
+                    .collect::<Vec<_>>()
+            })
+            .to_string();
+            let ps_body = serde_json::json!({
+                "models": loaded
                     .iter()
                     .map(|m| serde_json::json!({ "name": m }))
                     .collect::<Vec<_>>()
@@ -3153,7 +3366,12 @@ mod tests {
                         Ok(Some(req)) => {
                             h.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                             std::thread::sleep(delay);
-                            let _ = req.respond(tiny_http::Response::from_string(body.clone()));
+                            let body = if req.url().starts_with("/api/ps") {
+                                ps_body.clone()
+                            } else {
+                                tags_body.clone()
+                            };
+                            let _ = req.respond(tiny_http::Response::from_string(body));
                         }
                         Ok(None) => {}
                         Err(_) => break,

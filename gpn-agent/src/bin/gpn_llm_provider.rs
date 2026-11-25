@@ -887,6 +887,50 @@ async fn run_main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
+    // Item 272: load the starter model into VRAM now, at start, instead of inside
+    // a stranger's first request.
+    //
+    // Measured 2026-11-25 09:14–09:15 PT, minutes after an update restart: two
+    // `POST :8092/v1/chat/completions` calls died at the caller's own 10 s budget
+    // (`exit 28`), and the third answered in **0.193 s** — the ~13 s Ollama model
+    // load had been paid inside the first requests. A box that has just started is
+    // the one moment we KNOW the model is cold and that requests are about to
+    // arrive, so pay the load here, in the background, where nobody is waiting.
+    //
+    // The heartbeat publishes `warming: true` while this is happening (item 272,
+    // `gpn_provider_status`), so the AP can answer `not ready` + `Retry-After` for
+    // the residual window rather than letting a client time out.
+    if let Some(first) = baseline.split(',').map(str::trim).find(|s| !s.is_empty()) {
+        let m = first.to_string();
+        tokio::task::spawn(async move {
+            let t0 = std::time::Instant::now();
+            // Same cross-process GPU lock every inference path takes: warming
+            // must never collide with a render or a mining yield.
+            let gpu =
+                match tokio::task::spawn_blocking(gpn_agent::gpu_yield::GpuYieldGuard::acquire)
+                    .await
+                {
+                    Ok(Ok(g)) => g,
+                    Ok(Err(e)) => {
+                        eprintln!("[provider] warm-up skipped: {e}");
+                        return;
+                    }
+                    Err(e) => {
+                        eprintln!("[provider] warm-up skipped: GPU lock task failed: {e}");
+                        return;
+                    }
+                };
+            match run_inference(&m, "warm up", 0.0, 1).await {
+                Ok(_) => println!(
+                    "[provider] warm-up: {m} resident after {:.1}s — the first request of this boot no longer pays the load",
+                    t0.elapsed().as_secs_f32()
+                ),
+                Err(e) => eprintln!("[provider] warm-up {m}: {e}"),
+            }
+            drop(gpu);
+        });
+    }
+
     // On-chain provider discovery (item 1): advertise this provider's reachable
     // `/status` URL on-chain so access points / the scheduler can discover us from
     // the chain instead of a hand-configured `--providers` list. Opt out by

@@ -1054,6 +1054,17 @@ struct Provider {
     /// challenge. `false` includes "never checked" and "unreadable": the
     /// honest default is unverified, never a bare fact.
     gpu_verified: bool,
+    /// Item 272: the provider says its model is **not resident yet and it is
+    /// still inside its post-restart warm-up window** — i.e. a request routed
+    /// to it now would spend its whole client budget inside the ~13 s Ollama
+    /// model load (measured 2026-11-25 09:14 PT: two 10 s timeouts, then the
+    /// third call answered in 0.193 s).
+    ///
+    /// `None` = the box did not say (older build, or its `/api/ps` read
+    /// failed): **unknown**, and routing treats unknown as "not warming" — the
+    /// gate may only ever turn a request away on a self-declared transient
+    /// state, never on a missing field.
+    warming: Option<bool>,
     /// Row 263: the dialable render channel this provider's **process**
     /// published with its poll (`http://host:port/channel/job`), when it serves
     /// one. A `pull://` box has no `status_url` to derive a channel from, which
@@ -1314,6 +1325,8 @@ fn provider_from_caps(addr: &str, v: &Value, status_url: String, latency_ms: u64
             .map(str::trim)
             .filter(|s| !s.is_empty())
             .map(String::from),
+        // Item 272: only a real boolean is a claim; absent stays unknown.
+        warming: v.get("warming").and_then(|x| x.as_bool()),
     }
 }
 
@@ -1374,7 +1387,19 @@ fn aggregate_snapshots(snaps: &[Value]) -> Value {
     // process's poll erase it, so the union rule used for caps/models applies
     // here too.
     let mut channel_url: Option<String> = None;
+    // Item 272: one address can host several provider processes. The address is
+    // "warming" only when **every** snapshot on it says so (a warm sibling can
+    // serve), and only when at least one said anything at all.
+    let mut warming_any = false;
+    let mut warming_all = true;
     for s in snaps {
+        match s.get("warming").and_then(|x| x.as_bool()) {
+            Some(w) => {
+                warming_any = true;
+                warming_all &= w;
+            }
+            None => warming_all = false,
+        }
         if channel_url.is_none() {
             channel_url = s
                 .get("channel_url")
@@ -1418,6 +1443,11 @@ fn aggregate_snapshots(snaps: &[Value]) -> Value {
         o.insert("active".into(), json!(active));
         if let Some(u) = channel_url {
             o.insert("channel_url".into(), Value::String(u));
+        }
+        if warming_any {
+            o.insert("warming".into(), Value::Bool(warming_all));
+        } else {
+            o.remove("warming");
         }
     }
     out
@@ -1593,6 +1623,9 @@ fn apply_push_heartbeats(
                     // A signed heartbeat carries no channel URL: it is
                     // published on the poll snapshot (row 263).
                     channel_url: None,
+                    // Nor a warm-up claim (item 272): that rides the poll
+                    // snapshot, and unknown must stay unknown.
+                    warming: None,
                 });
             }
         }
@@ -1792,6 +1825,8 @@ fn unreachable_placeholder(status_url: String) -> Provider {
         gpu_verified: false,
         // No answer means no channel URL either.
         channel_url: None,
+        // Nor a warm-up claim (item 272).
+        warming: None,
     }
 }
 
@@ -1815,6 +1850,9 @@ fn provider_json(p: &Provider) -> serde_json::Value {
     "task_limits": p.task_matrix.limits,
     // Row 263: the render channel this process published, when it serves one.
     "channel_url": p.channel_url,
+    // Item 272: `true` explains a `503 gpn_warming` an operator would otherwise
+    // read as a broken AP; `null` = the box did not say (never "warm").
+    "warming": p.warming,
     // An endpoint that never answered has no identity and no
     // capability claim: `capabilities` is empty and this is
     // false, so no consumer can read it as a provider (#147).
@@ -2216,6 +2254,23 @@ fn resolve_requested_model(reg: &[Provider], requested: &str) -> Result<String, 
 
 /// `Retry-After` we hand back while the registry is still warming up.
 const REGISTRY_WARMING_RETRY_AFTER: &str = "5";
+
+/// `Retry-After` for item 272's *provider* warm-up answer: the box is up and
+/// healthy but its model is still loading into VRAM (~13 s measured on
+/// qwen2.5:0.5b). Short on purpose — the client should come back inside the
+/// load, not give up.
+const PROVIDER_WARMING_RETRY_AFTER: &str = "3";
+
+/// Item 272: is **every** candidate a provider that says it is still warming
+/// up?
+///
+/// This is the whole condition for answering `not ready` instead of routing:
+/// one warm candidate and the request goes there and is served. A provider that
+/// said nothing (`None`) is not warming, so a missing field can never turn a
+/// stranger's request away.
+fn all_candidates_warming(cands: &[RouteCandidate]) -> bool {
+    !cands.is_empty() && cands.iter().all(|c| c.provider.warming == Some(true))
+}
 
 /// The `Retry-After` header for a warming-up registry (tiny_http wants a built
 /// `Header`, and these bytes are static so the parse cannot fail).
@@ -6943,6 +6998,42 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     // Capability filter, then first-come-first-served: the
                     // provider whose pull poll arrived first is `candidates[0]`.
                     let candidates = fcfs_order(route_candidates(&reg, JobKind::Text, &needs));
+                    // Item 272: after an update restart the box is up and polling
+                    // long before its model is in VRAM, so the first request paid a
+                    // ~13 s load inside the caller's own 10 s budget and timed out
+                    // (measured 2026-11-25 09:14–09:15 PT: two `exit 28` at 10 s,
+                    // then 0.193 s). Answer the transient state for what it is —
+                    // a distinct, retryable `503` — instead of making a stranger's
+                    // first job look like a broken network.
+                    if all_candidates_warming(&candidates) {
+                        println!(
+                            "[route] not ready: every candidate for {model} is inside its warm-up \
+                             window — answering 503 with Retry-After {PROVIDER_WARMING_RETRY_AFTER}s"
+                        );
+                        let r = Response::from_string(
+                            json!({
+                                "error": {
+                                    "message": format!(
+                                        "provider is loading {model} after a restart; retry shortly"
+                                    ),
+                                    "type": "gpn_warming",
+                                    "retry_after": PROVIDER_WARMING_RETRY_AFTER,
+                                }
+                            })
+                            .to_string(),
+                        )
+                        .with_header(hdr.clone())
+                        .with_header(
+                            Header::from_bytes(
+                                &b"Retry-After"[..],
+                                PROVIDER_WARMING_RETRY_AFTER.as_bytes(),
+                            )
+                            .expect("static header"),
+                        )
+                        .with_status_code(503);
+                        let _ = req.respond(r);
+                        return;
+                    }
                     let (provider, needs_pull) = match candidates.first() {
                         Some(c) => (c.provider.clone(), c.needs_pull),
                         None => {
@@ -10429,6 +10520,7 @@ mod tests {
             gpu_info_hash: None,
             gpu_verified: false,
             channel_url: None,
+            warming: None,
         }
     }
 
@@ -11672,6 +11764,88 @@ mod tests {
             "models": p.models
         }));
         p
+    }
+
+    /// Item 272: the AP answers `not ready` only when **every** candidate is a
+    /// provider that says it is warming up. A single warm box serves; a provider
+    /// that said nothing is unknown, not warm (a missing field must never turn a
+    /// stranger's first request away).
+    #[test]
+    fn a_request_is_told_not_ready_only_when_every_candidate_is_warming() {
+        let needs = RouteNeeds {
+            model: "m".into(),
+            ..Default::default()
+        };
+        let cands = |warming: &[Option<bool>]| {
+            let reg: Vec<Provider> = warming
+                .iter()
+                .enumerate()
+                .map(|(i, w)| {
+                    let mut p = prov_caps(&format!("p{i}"), "http://x", 1, "m", &["LLMInference"]);
+                    p.vram_mb = 24_576;
+                    p.warming = *w;
+                    p
+                })
+                .collect();
+            route_candidates(&reg, JobKind::Text, &needs)
+        };
+
+        assert!(
+            all_candidates_warming(&cands(&[Some(true), Some(true)])),
+            "two cold boxes ⇒ not ready"
+        );
+        assert!(
+            !all_candidates_warming(&cands(&[Some(true), Some(false)])),
+            "one warm box must serve the request"
+        );
+        assert!(
+            !all_candidates_warming(&cands(&[Some(true), None])),
+            "an unknown warm state must never refuse the request"
+        );
+        assert!(
+            !all_candidates_warming(&cands(&[])),
+            "an empty candidate list is a routing failure, not a warm-up"
+        );
+    }
+
+    /// Item 272: the claim survives the wire in both shapes it can arrive — a
+    /// poll snapshot (`provider_from_caps`) and several co-located processes
+    /// (`aggregate_snapshots'). Absent stays absent.
+    #[test]
+    fn the_warming_claim_is_parsed_and_never_invented() {
+        let mk = |v: serde_json::Value| {
+            provider_from_caps("5Addr", &v, "pull://5Addr".to_string(), 1).warming
+        };
+        assert_eq!(mk(json!({"models": ["m"]})), None, "absent ⇒ unknown");
+        assert_eq!(mk(json!({"warming": true})), Some(true));
+        assert_eq!(mk(json!({"warming": false})), Some(false));
+        assert_eq!(
+            mk(json!({"warming": "yes"})),
+            None,
+            "a non-boolean is not a claim"
+        );
+
+        let agg = |snaps: &[serde_json::Value]| aggregate_snapshots(snaps).get("warming").cloned();
+        assert_eq!(
+            agg(&[json!({"warming": true}), json!({"warming": true})]),
+            Some(json!(true)),
+            "every process cold ⇒ the address is cold"
+        );
+        assert_eq!(
+            agg(&[json!({"warming": true}), json!({"warming": false})]),
+            Some(json!(false)),
+            "a warm sibling can serve, so the address is not cold"
+        );
+        assert_eq!(
+            agg(&[json!({"warming": true}), json!({"models": ["m"]})]),
+            Some(json!(false)),
+            "one process said nothing ⇒ cannot claim the address is cold"
+        );
+        assert_eq!(
+            agg(&[json!({"models": ["m"]})]),
+            None,
+            "nobody said anything ⇒ the field is absent, not false"
+        );
     }
 
     /// A text request and an image request go through the SAME function, and it
