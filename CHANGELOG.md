@@ -8,6 +8,23 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 versions are [Semantic Versioning](https://semver.org/spec/v2.0.0.html), with
 the GPN-specific meaning of each level documented in `docs/updates.md`.
 
+## [0.3.76] - 2026-11-24
+
+Bumped from 0.3.75 (`scripts/bump-version.py patch`). One defect, found on the last step of the box-3
+fork test (row 194): a deep-fork refusal stopped pausing sealing about 23 s after the refusal.
+
+### Fixed
+- **A `DeepFork` refusal is held until the peer stops announcing a taller chain** (row 262): the
+  refusal inserted `pending[peer] = deep-fork` and `refresh_forked_marker` wrote `gpn-forked`, but the
+  peer's next announce carries `work: None` (row 194's rule: a work figure measured on another tip is
+  not evidence), so `fc::evaluate` returned `Keep(WorkUnavailable)` — whose `pauses_sealing()` is
+  false — and the pending entry (and the marker file) were dropped while the peer was still 150+
+  blocks taller. Measured on box 3 with the published 0.3.75 Windows build (17:26:15 PT:
+  `reorg=refused:deep-fork depth=633`, zero imports, no adoption — correct — but `gpn-forked` lived
+  only 17:26:15→~17:26:38 and was gone at the 17:33:17 verdict, which is what made the test report
+  `PASS=False`). The pending refusal is now cleared only by evidence that the fork is over: a claim
+  on our own chain, the peer's tip becoming a block we hold, or the link closing.
+
 ## [0.3.75] - 2026-11-24
 
 Bumped from 0.3.74 (`scripts/bump-version.py patch`). One fork-choice defect, found while working the
