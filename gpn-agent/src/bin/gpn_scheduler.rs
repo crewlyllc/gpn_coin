@@ -3782,6 +3782,59 @@ struct ImageCtx {
 /// `<host of status_url>:<GPN_IMAGE_CHANNEL_PORT>` (default 8095), then `None`
 /// (meaning "derive `status_url + 1`", which is right when LLM and diffusion
 /// share a process — not the case here).
+/// Does this host name an address only reachable from *this* machine (or this
+/// LAN), i.e. something no other box could dial back?
+///
+/// Row 270: a provider publishes `127.0.0.1` because its own process listens
+/// there. Read from a different machine that URL means *the reader's* loopback,
+/// which is why the AP POSTed a remote provider's job to its own diffusion
+/// provider and got `409 assignment names a different provider`.
+fn host_is_local_only(host: &str) -> bool {
+    let host = host.trim_start_matches('[');
+    if host.eq_ignore_ascii_case("localhost") {
+        return true;
+    }
+    match host.parse::<std::net::IpAddr>() {
+        Ok(std::net::IpAddr::V4(v4)) => {
+            v4.is_loopback()
+                || v4.is_unspecified()
+                || v4.is_private()
+                || v4.is_link_local()
+                || v4.octets()[0] == 0
+        }
+        Ok(std::net::IpAddr::V6(v6)) => {
+            let seg = v6.segments();
+            v6.is_loopback()
+                || v6.is_unspecified()
+                // fc00::/7 unique-local
+                || (seg[0] & 0xfe00) == 0xfc00
+                // fe80::/10 link-local
+                || (seg[0] & 0xffc0) == 0xfe80
+        }
+        Err(_) => false,
+    }
+}
+
+/// Is this provider's own process on *this* machine (so a loopback endpoint it
+/// published means the same listener for both of us)?
+///
+/// Same idea as `dialcheck`'s `same-egress` skip: two boxes behind one NAT
+/// cannot tell each other apart, so locality is decided from what the provider
+/// itself reported — a loopback/private `/status` URL or p2p multiaddr.
+fn provider_is_local(p: &Provider) -> bool {
+    // This host's own public address: two boxes behind one NAT are the same
+    // egress, which is exactly what `dialcheck` skips as `same-egress`.
+    static EGRESS: OnceLock<Option<String>> = OnceLock::new();
+    let egress = EGRESS.get_or_init(ap_public_ipv4);
+    known_hosts(p).iter().any(|h| {
+        host_is_local_only(h)
+            || egress
+                .as_deref()
+                .map(|e| e.eq_ignore_ascii_case(h))
+                .unwrap_or(false)
+    })
+}
+
 fn image_channel_endpoint(status_url: &str) -> Option<String> {
     if let Ok(u) = std::env::var("GPN_IMAGE_CHANNEL_URL") {
         if !u.trim().is_empty() {
@@ -3814,9 +3867,24 @@ fn image_channel_endpoint(status_url: &str) -> Option<String> {
 /// derivation above. Both are probed before a request is accepted, so a stale
 /// or unreachable published value costs one failed probe, never a dead render.
 fn image_endpoint_for(p: &Provider) -> Option<String> {
-    p.channel_url
-        .clone()
-        .or_else(|| image_channel_endpoint(&p.status_url))
+    if let Some(published) = p.channel_url.as_deref() {
+        let local_only = url_host(published)
+            .map(|h| host_is_local_only(&h))
+            .unwrap_or(false);
+        if local_only && !provider_is_local(p) {
+            // Row 270: this value names *our* loopback, not theirs. Skip the
+            // URL but not the provider — a derivation from its status_url may
+            // still be dialable.
+            eprintln!(
+                "[images] provider {} published a loopback/private channel_url {published} but is \
+                 not on this host (same-egress check) — ignoring that URL",
+                p.address
+            );
+        } else {
+            return Some(published.to_string());
+        }
+    }
+    image_channel_endpoint(&p.status_url)
 }
 
 /// Fetch one finished artifact from the provider and store it locally.
@@ -10375,10 +10443,12 @@ mod tests {
             None,
             "a pull-only status_url must not invent an endpoint"
         );
-        p.channel_url = Some("http://127.0.0.1:8095/channel/job".to_string());
+        // A pull-only box still routes by the URL it published — as long as it
+        // is one this host can actually dial (row 270).
+        p.channel_url = Some("http://203.0.113.10:8095/channel/job".to_string());
         assert_eq!(
             image_endpoint_for(&p).as_deref(),
-            Some("http://127.0.0.1:8095/channel/job")
+            Some("http://203.0.113.10:8095/channel/job")
         );
         // The published URL wins over the derivation for a dialable box too:
         // the diffusion channel is not one port above `/status`.
@@ -10390,25 +10460,72 @@ mod tests {
         );
     }
 
+    /// Row 270: a provider on another machine publishes `127.0.0.1` because its
+    /// own process listens there. That URL is dialable only from *its* host, so
+    /// the AP must not use it: its own loopback listener answers instead, and on
+    /// 2026-11-25 09:2x PT a remote row's `127.0.0.1:8095` job was POSTed to the
+    /// local diffusion provider, which rightly refused it with HTTP 409 and the
+    /// caller was told the service was down.
+    #[test]
+    fn a_loopback_channel_url_from_a_remote_provider_is_not_dialable() {
+        let mut remote = prov("5Hv", "pull://5Hv", 5, "sdxl-turbo");
+        remote.p2p_multiaddrs = vec!["/ip4/203.0.113.7/tcp/30333/p2p/12D3KooWTest".to_string()];
+        remote.channel_url = Some("http://127.0.0.1:8095/channel/job".to_string());
+        assert_eq!(
+            image_endpoint_for(&remote),
+            None,
+            "a loopback channel_url from a remote provider is this host's own listener"
+        );
+
+        // Private ranges are the same mistake: 10.0.0.5 is not dialable from a
+        // box on a different network either.
+        remote.channel_url = Some("http://10.0.0.5:8095/channel/job".to_string());
+        assert_eq!(image_endpoint_for(&remote), None);
+
+        // The URL is refused, not the provider: a public published URL still
+        // routes, and so does the derivation from a public status_url.
+        remote.channel_url = Some("http://203.0.113.7:8095/channel/job".to_string());
+        assert_eq!(
+            image_endpoint_for(&remote).as_deref(),
+            Some("http://203.0.113.7:8095/channel/job")
+        );
+        remote.channel_url = Some("http://127.0.0.1:8095/channel/job".to_string());
+        remote.status_url = "http://203.0.113.7:8093".to_string();
+        assert_eq!(
+            image_endpoint_for(&remote).as_deref(),
+            Some("http://203.0.113.7:8095/channel/job"),
+            "a refused loopback value must fall through to a dialable derivation"
+        );
+
+        // A provider whose own /status is loopback IS on this machine, so its
+        // loopback channel is the right value.
+        let mut local = prov("5En", "http://127.0.0.1:8093", 5, "sdxl-turbo");
+        local.channel_url = Some("http://127.0.0.1:8095/channel/job".to_string());
+        assert_eq!(
+            image_endpoint_for(&local).as_deref(),
+            Some("http://127.0.0.1:8095/channel/job")
+        );
+    }
+
     /// Row 263: the channel URL must survive aggregation across co-located
     /// processes on one address — taking only the newest snapshot lets a
     /// chat-only poll erase it.
     #[test]
     fn aggregation_keeps_the_channel_url_from_any_process_on_the_address() {
         let older = json!({"capabilities":["ImageGeneration"],"active":0,
-            "channel_url":"http://127.0.0.1:8095/channel/job"});
+            "channel_url":"http://203.0.113.10:8095/channel/job"});
         let newer = json!({"capabilities":["LLMInference"],"active":1});
         // `snaps` is newest-first; the newest says nothing about a channel.
         let merged = aggregate_snapshots(&[newer, older]);
         assert_eq!(
             merged["channel_url"],
-            json!("http://127.0.0.1:8095/channel/job")
+            json!("http://203.0.113.10:8095/channel/job")
         );
         // And it lands on the registry row the image router reads.
         let p = provider_from_caps("5En", &merged, "pull://5En".into(), 5);
         assert_eq!(
             image_endpoint_for(&p).as_deref(),
-            Some("http://127.0.0.1:8095/channel/job")
+            Some("http://203.0.113.10:8095/channel/job")
         );
     }
 

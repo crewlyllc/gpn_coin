@@ -1,3 +1,28 @@
+## 10:25 PT — 0.3.79 §3b box 1 (item 270) ticked — a remote provider's loopback channel_url is no longer dialable
+
+- **A0**: `fetch + reset --hard origin/main` ⇒ HEAD `3ac533b0` (docs-only, `total_count: 0` for the
+  full sha). Two CI runs exist and were noted, not waited on: `45660996072` (`88fbd56a`,
+  `in_progress` 51 min) and `45666721897` (`b4648fbd`, `pending`) — single-runner queue, not a fault.
+- **Box worked**: §3b item **270** (first workable unticked box; §0e's box 1 is still
+  AWAITING-OWNER for item 256's venue). **Code + tests done; the live POST rides §9/§10** because
+  the running AP is still 0.3.78 and a request today would only re-prove the bug.
+- **(a)** `image_endpoint_for` refuses a loopback/private `channel_url` unless the provider is
+  same-egress-local (`provider_is_local` = known host loopback/private **or** == `ap_public_ipv4()`,
+  the same comparison `dialcheck` calls `same-egress`); a refused URL falls through to the
+  `status_url` derivation, so the URL is dropped, not the provider.
+- **(b)** verified, no change needed: a 409 at accept is `ChannelFail::NotAttempted` (hub_ap 4xx arm)
+  and `fallback_ok()` already advances the image walk. The observed failure needed *every* route in
+  its window to be a loopback impostor — 5HVtpo… (`/ip6/2603:…` + `127.0.0.1:8095`) and 5Hgbpi…
+  (box 1, `pull://`, no multiaddrs) both publish `127.0.0.1:8095`, which the local 5ENq… box
+  answers. (a) removes both from the list.
+- **Evidence**: failing before ⇒ `left: Some("http://127.0.0.1:8095/channel/job") right: None
+  ... FAILED`; after ⇒ `3 passed; 0 failed` (`channel_url` filter), full bin suite
+  `111 passed; 0 failed`; `cargo fmt --all -- --check` clean; clippy with CI's allow-list ⇒ 0
+  errors in `gpn_scheduler.rs`.
+- **Next run**: §3b item 271 (update guard's refusal wording) — the message text at
+  `gpn-agent/src/update.rs:1332`, before/after from its own unit test.
+- No blocker, no [TRIAGE].
+
 ## 09:4x PT — 0.3.78 confirmed closed; 0.3.79 bundled (rows 270, 271, 272) and checklist generated
 
 - **A0**: HEAD `a3b0e992` is docs-only — full-sha API query ⇒ `total_count: 0`, expected under
