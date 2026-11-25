@@ -327,9 +327,19 @@ pub fn work_for_tip(
 /// unmeasured claim is not evidence that the heavier branch is gone. It is
 /// released by
 /// - a claim whose tip is a block we hold (the peer is on our own chain), or
-/// - a claim that *does* measure the fork and answers not-heavier / peer-ahead
-///   (the branch no longer threatens us), or
+/// - a claim that *does* measure the fork and answers not-heavier (the branch
+///   no longer threatens us), or
 /// - the link closing (the caller drops the entry on stream close).
+///
+/// Row 262, second measurement (box 3, 0.3.76, 2026-11-24 22:15:10.770 PT, run
+/// `e176n`): the hold *was* inserted and *was* held across the work-less
+/// claim, then died 56 s later when the same peer announced
+/// `#769 (ours #692, same genesis)` — `Keep(PeerAhead)`. A peer that is ahead by
+/// height is normally ordinary forward sync (`sync_source`), but for a peer we
+/// have just refused as `DeepFork` it is the same heavier branch, now taller, and
+/// releasing there resumed sealing underneath it (ours mined #692 → #779 while
+/// their branch grew past #854). "Ahead" is therefore only a release once the
+/// announced tip is a block we hold, i.e. its chain has actually landed here.
 ///
 /// Other reasons keep the old per-claim behaviour: only `DeepFork` is held,
 /// because only `DeepFork` names a fork that outlives one announcement.
@@ -344,7 +354,10 @@ pub fn next_pending(
     let holding_deep_fork = previous == Some(RefuseReason::DeepFork.slug());
     if holding_deep_fork
         && !peer_tip_held
-        && matches!(decision, Decision::Keep(KeepReason::WorkUnavailable))
+        && matches!(
+            decision,
+            Decision::Keep(KeepReason::WorkUnavailable) | Decision::Keep(KeepReason::PeerAhead)
+        )
     {
         return Some(RefuseReason::DeepFork.slug());
     }
@@ -628,11 +641,17 @@ mod tests {
         let d3 = evaluate(&ours, &lighter, ctx());
         assert_eq!(d3, Decision::Keep(KeepReason::NotHeavier));
         assert_eq!(next_pending(held, d3, false), None);
-        // A peer announcing a chain ahead by height is ordinary forward sync.
+        // A peer announcing a chain ahead by height is ordinary forward sync —
+        // but for a peer we just refused as deep-fork it is the same branch,
+        // taller. Measured 2026-11-24 22:15:10.770 PT (run e176n, box 3): the
+        // hold died on exactly this claim and sealing resumed under the fork.
         let ahead = tip(GENESIS, 700, H2, Some(9_999_999));
         let d4 = evaluate(&ours, &ahead, ctx());
         assert_eq!(d4, Decision::Keep(KeepReason::PeerAhead));
-        assert_eq!(next_pending(held, d4, false), None);
+        assert!(!d4.pauses_sealing());
+        assert_eq!(next_pending(held, d4, false), Some("deep-fork"));
+        // It releases the moment that ahead branch is a chain we hold.
+        assert_eq!(next_pending(held, d4, true), None);
         // Every other reason keeps today's behaviour: only deep-fork is sticky.
         assert_eq!(next_pending(Some("primary-authoritative"), d2, false), None);
     }
