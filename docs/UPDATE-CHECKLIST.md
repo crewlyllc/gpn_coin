@@ -149,6 +149,22 @@ Rules that follow from this:
   be re-announced louder, not silently dropped.
 - A decision raised and not delivered is worse than no rule at all: it looks handled and is not.
 
+## 0f. Batch size: five fixes, or one critical one (owner policy, 2026-11-25)
+
+**Do not cut a release for every fix.** From 0.3.79 onward:
+
+- **Wait for five fixes** in the queue before opening the next version, so one update carries a batch
+  and machines restart once instead of five times.
+- **Exception — cut immediately** if the fix is *critical*: **people cannot connect** (peering,
+  registration, dialability, discovery) or **AI does not work** (chat, images, audio, fine-tuning,
+  routing to providers). A critical fix does not wait for a batch.
+- **Keep testing and collecting data meanwhile.** Testing, measurement, audits, proofs and
+  investigations continue exactly as now; they simply *file rows* instead of bumping a version.
+- A batch may include documentation, tests and cleanups only if they came with a fix; a batch of
+  "tidying" is still not worth a fleet-wide restart.
+
+When the fifth fix lands, the loop opens the next version, bundles everything `NEW`, and releases.
+
 ## 0e. A stranger must be able to join and stay joined (owner rule, 2026-11-23)
 
 **A release is not publishable if the machines already running the previous release cannot reach it
