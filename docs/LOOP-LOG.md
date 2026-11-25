@@ -1,3 +1,23 @@
+## 01:25 PT 0.3.77 — §7 attestation gate ticked (cosign Verified OK re-derived); cut still blocked on CI 45565029747's Windows job
+
+- **A0**: HEAD `09ffb150` (docs) ⇒ `actions/runs?head_sha=09ffb150…` `total_count: 0`, expected under
+  `paths-ignore`. Nothing red on main.
+- **Box ticked**: §7 *refuse to cut unless §5's attestation checks passed* — re-derived, not copied:
+  `/tmp/win077/gpn-windows.zip` 253,251,369 B `sha256:51fbbab8…` = asset 790736756's API `digest`
+  (the bytes `release-cut.sh` step 2 fetches); `cosign verify-blob --bundle gpn-windows.zip.bundle
+  --certificate-identity-regexp '^https://github\.com/jeremyzguo/gpn_coin/\.github/workflows/release-windows\.yml@.*$'
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com` ⇒ `Verified OK`, exit 0;
+  bundle sha256 `986e5c25…` = asset 790738855's digest. Linux lane has no attestation step
+  (`grep cosign|attest` empty), so the gate is Windows-only by construction.
+- **Why the cut did not run**: `release-cut.sh` refuses to sign a bundle whose commit has no green CI
+  run. Run **45565029747** (`head_sha 31021425…`) is `in_progress`: fmt/clippy, secret-scan, linux
+  build all `success`; the only open job is `Build + unit tests (windows, self-hosted)` started
+  08:36:55Z (~50 min, single-slot contention behind the release build) — under the 90-min stale
+  threshold, so no cancel. Next run polls it once; on `success` run `scripts/release-cut.sh --timeout 300`.
+- **Still open in 0.3.77**: §7 cut + network/releases.json, §7b surfaces, §8 stranger verify, §9
+  self-update, §10 behaviour, §3b row 262 live proof, §0b filing (archive + INDEX row).
+- No [TRIAGE] items.
+
 ## 01:05 PT 0.3.77 — §5 artifact-verification box ticked (cosign re-derived); cut still gated on CI 45565029747's Windows job
 
 - **A0**: HEAD `fa7619ed` is docs-only ⇒ no build expected. The release sha `310214250bd3…` still has
