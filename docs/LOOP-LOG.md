@@ -1,3 +1,31 @@
+## 07:0x PT — 0.3.78 §5 linux DONE + artifact verified (§6); windows build still queued
+
+- **A0**: `git reset --hard origin/main` → `90148413`. `GET /actions/runs?head_sha=90148413dc333a11d8a564ff1aae12d33499da1e`
+  ⇒ **`total_count: 0`** — docs-only tip, no run, nothing red. Not waited on.
+- **§5 linux build DONE**: run **45636833040** `completed / success` 14:41:37Z→14:55:02Z, `head_sha` `50688dc5…`,
+  9/9 steps success incl. *publish GitHub Release (rolling 'linux-latest')*. Asset `gpn-linux.tar.gz`
+  **348,762,697 B**, `updated_at` 14:54:57Z, GitHub digest `sha256:37b8d6d590849cadc664c14cdb50022b0dd4351ecf2af022ef2a411521f1a796`.
+  Re-downloaded via `GET /releases/assets/791958522` and `sha256sum`-ed locally: **37b8d6d5…a796** — bytes match.
+- **§6 DONE for the linux artifact** (2/2): `./gpn-node --version` ⇒ `gpn-node 0.3.78`; `./gpn_node --version` ⇒
+  `gpn_node 0.3.78 (spec 55, 50688dc)`. Code literals from `8c507301` found in the shipped binaries:
+  `gpn_scheduler` has `channel_url` ×1 + `/channel/job` ×4; `gpn_diffusion_provider` has `channel_url` ×2
+  (`with_channel_url` / `attach_channel_url`) + `(POST /channel/job, GET /channel/artifact/{id})`.
+  Windows zip scan + `--version` still owed once its build lands.
+- **§5 windows build still `queued`** (run **45636841344**, created 14:41:40Z): `GET /actions/runners` ⇒
+  `DESKTOP-USBUADL online busy=True`, held by CI run **45625934746** `Build + unit tests (windows, self-hosted)`
+  `in_progress` since 13:40:10Z (~80 min into a 40-75 min step). Contention on a single-slot runner, not a fault;
+  the stale-cancel rule targets a run *in progress* >90 min, not a queued release run, so nothing was killed.
+  **Not waited on — run ended.**
+- **§0e self-check of the previous tick holds**: `GET :8092/providers` still shows
+  `5ENqSp5Q…` with `channel_url = http://127.0.0.1:8095/channel/job` (the row-263 mechanism is live, not a one-off).
+- **Defect (again, recorded not hand-fixed)**: the rolling `linux-latest` release **body is stale** —
+  `commit 310214250bd3… (0.3.77)`. `publish-release-asset.py` writes `body` only when it creates a release, never on
+  the rolling update. Queued fix (set `body` on the update path) must land **after** this cut; until then the cut's
+  republish + a `PATCH /releases/…` body correction is the only thing keeping §7b honest.
+- **§0e box 1 / item 256 unchanged**: AWAITING-OWNER (clean GPU-attached Windows guest; box 4 is off-tailnet).
+- **Next run**: read run 45636841344 once; if `success` → tick §5 box 3, scan the Windows zip, then §7 cut
+  (`release-cut.sh --timeout 300`) and §7b.
+
 ## 06:4x PT — 0.3.78 §4 closed, both release builds dispatched (not waited on)
 
 - **A0**: `git reset --hard origin/main` → `50688dc5`. `GET /actions/runs?head_sha=50688dc5fc3a908a3a9e91b49f37f541e93559cc`
