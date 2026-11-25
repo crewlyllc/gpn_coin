@@ -1,3 +1,32 @@
+## 15:2x PT — box 1 of 0.3.80 ticked: row 277, an aborted `release-cut` no longer leaves the repo locked
+
+**A0 (CI):** HEAD `63d81c72` (`release(0.3.80): open the batch …`) ⇒ run `45717607703` `in_progress`, not acted
+on and not waited on (the rule: observe, keep working). Nothing red to fix.
+
+**Box ticked (§3b box 1) — 277, release-cut lock leak.** Cause in mechanism terms: `release-lock.sh take`
+writes `holder: user@host pid <its own pid>`, while `cleanup()` in `scripts/release-cut.sh` only released when
+the file matched `release-cut pid $$` — a line that appears only after the *first* `step` rewrites it. Every
+abort in the window between `take` (line ~772) and `step 3b/6` therefore leaked a lock naming a dead pid, and
+the pre-commit hook refused all later commits. 2026-11-25 12:19 was exactly that window (built 0.3.5 not newer
+than published 0.3.9).
+
+**Test first, and it failed:** new `t15_lock_released_on_early_abort` in `scripts/tests/test-release-cut.sh`
+⇒ `FAIL the commit lock is gone after the abort`, `FAIL release-lock.sh status agrees the repo is free`
+(4 passed, 2 failed). **After the fix:** t15 `18 checks passed, 0 failed`; full file `104 checks passed,
+0 failed`; `test-release-lock.sh` `PASS=19 FAIL=0`, including its
+`release-cut.sh releases the lock when the manifest is live` call-site check.
+
+**The change:** `LOCK_TAKEN=1` + `LOCK_TAKEN_VERSION=$VER` set the moment take succeeds; `cleanup()` releases
+**by version** on that flag (pid-grep kept only as a fallback); the publish step clears the flag when it
+releases, so a successful cut does not release twice. Host check: `scripts/release-lock.sh status` →
+`no release in flight`.
+
+Pushed once: `ce61dd2f` `fix(277): an aborted release-cut releases the lock it took`. That is a code commit,
+so CI run `45720343974` was dispatched for it — recorded here, not waited on.
+
+**Next run:** §3b box 2 (273, seven-day soak measured against `docs/STABILITY-GATE.md`, box 1 baseline).
+No [TRIAGE] raised.
+
 ## 15:0x PT — 0.3.80 opened: five NEW rows bundled (batch policy §0f), checklist generated, pushed once
 
 **A0 (CI):** HEAD `14deabed116f3e5838d623f3d91fa5c477bad51c` (`test(270): live half proven on 0.3.79 …`) ⇒
