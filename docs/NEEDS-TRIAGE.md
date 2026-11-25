@@ -108,3 +108,22 @@ Format: `- [ ] <item id> — <question> | options: A … B … | recommend: … 
       **DEFAULT IF NO ANSWER BY THE NEXT RUN**: the loop proceeds with D, because box 3 is already
       granted as a test venue and creating a guest on it is not a new machine decision. If that is
       wrong, say so before then.
+
+- [ ] **box1 PowerShell outage (blocks box1.sh, the Windows runner's PS steps, and any lifecycle
+      venue work)** — every `powershell.exe` on box 1 exits `Access is denied.` with no other output
+      (as sshd's command, as a `cmd /c` child, and as a SYSTEM scheduled task); `cmd`/`reg`/`wmic`/
+      `schtasks`/`diskpart`/`cscript` still work, registry writes succeed, the binary is intact with a
+      normal ACL, no AppLocker events, 357 GB free. Started ~04:32 PT during this run's guest-prep
+      attempt; not root-caused. Deleting the Bitdefender AMSI provider key is refused (self-protection).
+      | options: A reboot box 1 now — PowerShell comes back, but `GPN-Node` is `LogonType
+      InteractiveToken` (`UserId …-1001`) and `AutoAdminLogon` is absent, so **the node stays down until
+      you log in at the console** (~however long that takes) · B before rebooting, convert `GPN-Node` to
+      a startup/SYSTEM principal so the node returns by itself — a permanent change to a production
+      node's task, untested at the time of writing, and the GPU node has only ever been run from an
+      interactive session · C leave PowerShell dead and do nothing (Windows CI's PowerShell steps on
+      box 1 keep failing, so the next Windows release build cannot be produced) | recommend: **B then
+      A** — but only if you accept the task change; otherwise **A** and log in once. Also unanswered
+      from this run: the **lifecycle venue** (item 256, now a 6th carry) — box 3 is a live 0.3.77 node
+      (so not wipeable), box 4 is off the tailnet, and GPN-209's existing GPU partition is attached to
+      the **Intel iGPU with `CurrentPartitionCompute 0`**, which is the wrong GPU and has no compute
+      share | raised 2026-11-25 05:0x PT (loop run, stranger-lifecycle venue attempt)

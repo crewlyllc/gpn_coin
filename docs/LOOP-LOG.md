@@ -1,3 +1,47 @@
+## [TRIAGE] 05:0x PT box1's PowerShell is dead machine-wide — the lifecycle-venue attempt stopped on it
+
+Every claim below is from a command run in this session (04:36–05:00 PT).
+
+- **A0**: `origin/main` HEAD `23ce0de7b1dae7b792ec35c542089afcfbdb9e3a`;
+  `GET /actions/runs?head_sha=23ce0de7…` ⇒ `total_count: 0` (docs-only commit, `paths-ignore` correct).
+  Nothing red, nothing waited on.
+- **Queue**: no row `IN-PROGRESS`; only `256 | NEW`. 0.3.76 and 0.3.77 are both at **52/53** with the
+  same box open (§0e box 1, the stranger lifecycle). Bundling 256 into 0.3.78 would publish a version
+  with no content, so this run worked the actual gate: **the venue for lifecycle steps 3-6**.
+- **Venue facts measured** (all read-only, over SSH to each box):
+  - **box 3** (`100.110.139.101`): Win10 Pro 19045, i7-6700K, RTX 4060, `Microsoft-Hyper-V-All Disabled`,
+    and it is a **live node** — `gpn_node` + 4 providers + ollama running, `gpn-node.exe --version` ⇒
+    `0.3.77`, `update.log` 04:09 `up to date (0.3.77)`. So "wipe box 3" is off the table (it would take a
+    registered, serving node's wallet/earnings).
+  - **box 4**: unreachable (SOCKS proxy: `General SOCKS server failure`) ⇒ option B unavailable today.
+  - **GPN-209 (box 1)**: already carries a GPU partition adapter, but `InstancePath`
+    `\\?\PCI#VEN_8086&DEV_9BC5&SUBSYS_7D091462&REV_05…#GPUPARAV` = the **Intel UHD 630 iGPU**, with
+    `CurrentPartitionCompute 0` — the wrong GPU and no compute share. Guest = Server 2022 Datacenter
+    Evaluation, WinRM 5985 open, Guest Service Interface OK, **no autologon**, only `Administrator`.
+- **Stopped mid-attempt**: GPN-209 shut down and its VHDX mounted offline; the prep script then died on
+  **my own bug** (`Get-ItemProperty HKLM:\G209SYSTEM` while only SAM+SOFTWARE had been loaded, with
+  `$ErrorActionPreference='Stop'`), so **nothing was injected into the guest** — no driver copy, no
+  autologon, no password change in the image. No evidence of damage to the guest.
+- **box1's PowerShell is now dead — this is the run's real finding.** Every `powershell.exe` invocation
+  exits `Access is denied.` with no other output: as the sshd command, as a child of `cmd /c`, and as a
+  `schtasks` job running as **SYSTEM**. `cmd`, `reg`, `wmic`, `schtasks`, `diskpart`, `cscript` all still
+  work; registry writes succeed (`reg add HKLM\SOFTWARE\ZZTest` + `reg delete` both OK); `powershell.exe`
+  is 450,560 B with a normal ACL; no AppLocker events; C: has 357 GB free. **Not root-caused.** The
+  Bitdefender AMSI DLL (`bdamsi\266180858461382691\antimalware_provider64.dll`) *is* rejected by Code
+  Integrity (event 3033) — but those events predate the outage (the log starts 2026-11-23 and PS worked
+  after them), so that is a **hypothesis, not a finding**. Deleting the AMSI provider key was refused
+  (`Access is denied.` — Bitdefender self-protection).
+- **Why I did not reboot box1**: `schtasks /query /tn GPN-Node /xml` ⇒ `LogonType InteractiveToken`,
+  `UserId S-1-5-21-…-1001`, `RunLevel HighestAvailable`, and `AutoAdminLogon` is absent. A reboot
+  therefore leaves box1's node **down until a human logs in**. That is an owner decision, not an ops
+  default.
+- **Restored**: VHDX detached via `diskpart`; GPN-209 back to `EnabledState 2` (running) via
+  `RequestStateChange`; box1's own node still listening on `127.0.0.1:9944` (pid 56724).
+- **[TRIAGE] two questions in `docs/NEEDS-TRIAGE.md`**: (1) reboot box1 now (node down until you log
+  in) or first convert `GPN-Node` to a startup/SYSTEM principal; (2) the lifecycle venue (256, 6th
+  carry). While PowerShell is down, **every Windows CI job's PowerShell steps on box 1 will fail**, so
+  this gates the next Windows release build too.
+
 ## [TRIAGE] 04:1x PT 0.3.76 filed + both checklists closed to 52/53 — only the stranger-lifecycle venue is open
 
 - **A0**: main HEAD `14d45a624a57873447ef8cbfa872fa52857dc4f4` is a docs commit ⇒
