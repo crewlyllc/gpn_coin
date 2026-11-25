@@ -1,3 +1,16 @@
+## 23:58 PT 0.3.77 — §5 same-SHA box ticked; Windows release build still queued behind a 65-min CI job on box 1
+
+- **A0**: HEAD `0e7642bf` is docs-only ⇒ `actions/runs?head_sha=0e7642bf…` = **0 runs** (expected, paths-ignore).
+- **§5 "Same SHA on both runs" ticked**: API shows run **45565065260** (linux, `completed/success`) and run
+  **45565071726** (windows) both on `head_sha 310214250bd38a7eaba6e8121bf077b4c9ee69f3`, branch
+  `build/310214250bd3`. Identical commit by construction. §5 now 3/7.
+- **Windows release build 45565071726 still `queued`** (dispatched 07:02:36Z, ~55 min): box 1's single-slot
+  runner is running CI run 45556346482's `Build + unit tests (windows, self-hosted)` job, `in_progress`
+  since 06:51Z at step 7 `Build + test gpn-agent (release)`. Contention, not a fault — no re-dispatch.
+  It is under 90 min, so the stale-run cancellation rule does not apply yet. Not blocking anything else.
+- **No blocker, no [TRIAGE].** Next run: ask GitHub once about 45565071726 and tick the windows box, else
+  re-dispatch.
+
 ## 23:45 PT 0.3.77 — LINUX BUILD SUCCESS, asset verified; release body had a stale commit and was corrected
 
 - **A0**: HEAD `284ddfa1` docs-only ⇒ `actions/runs?head_sha=284ddfa16…` = **0 runs** (expected).
