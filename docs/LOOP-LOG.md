@@ -1,3 +1,18 @@
+## 09:4x PT — 0.3.78 confirmed closed; 0.3.79 bundled (rows 270, 271, 272) and checklist generated
+
+- **A0**: HEAD `a3b0e992` is docs-only — full-sha API query ⇒ `total_count: 0`, expected under
+  `ci.yml` paths-ignore. Nothing red.
+- **Section B verified before bundling**: `https://gpncoin.ai/releases.json` ⇒ `0.3.78`
+  (`published_at 2026-11-25T17:05:25Z`) and `system_version` on `:9944` ⇒ `0.3.78`; the 0.3.78
+  checklist is archived with one unticked box (§0e stranger lifecycle, AWAITING-OWNER), as in every
+  release since 0.3.73. Row 263 already read COMPLETE 0.3.78.
+- **Bundled 0.3.79** (`b4648fbd`, pushed once): rows 270, 271, 272 marked IN-PROGRESS; version bumped
+  across 15 manifests + `network.json` + 14 lockfile entries (`bump-version.py --check` ⇒ lockstep,
+  0.3.79); CHANGELOG section written with each defect and its live symptom. Row 256 stays
+  AWAITING-OWNER and is carried into the new checklist's §3b.
+- `scripts/make-release-checklist.py 0.3.79` ⇒ `docs/releases/0.3.79.md` (4 in-progress, 5 blocked).
+- No decision needed this run; the 256 venue question is unchanged and still in `docs/NEEDS-TRIAGE.md`.
+
 ## 09:30 PT — 0.3.78 complete: filed, live site/served manifest/node all 0.3.78, rows 270-272 opened
 
 - Post-filing check on the live surfaces, no token: `https://gpncoin.ai/releases.json` ⇒ `0.3.78`;
