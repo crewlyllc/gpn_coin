@@ -1,3 +1,26 @@
+## 18:45 PT — A0 caught a second red: the CLI update tests predate the canary gate (fixed, pushed)
+
+**A0 (CI).** Run 45738389392 (`665bb967`, the Config-fixture fix) ⇒ `fmt + clippy` **success**
+(`139639761515`) — the earlier red is confirmed gone. But `Build + unit tests (linux)` came back
+**failure** at step 8 `Test gpn_update CLI (debug - throwaway signing key)`:
+`test result: FAILED. 13 passed; 11 failed`, exit 101, every failure the same line —
+`"9.9.9 is available, but this node is not the canary — no canary proof published for 9.9.9 — holding
+until one node has run it"`. Class: **our test**. Row 275's gate is correct; the fixture never learned it.
+
+**Fixed the fixture, not the gate** (`73f8db8a`): `apply_feed()` publishes a green `/canary.json` beside
+the signed manifest; the harness derives `GPN_CANARY_URL` from the fixture URL and removes inherited
+`GPN_CANARY`; the two hit-lists expect the gate's fetch; three new tests pin the gate from the binary's
+side (no proof ⇒ exit 3 naming the hold, proof for 8.8.8 ⇒ exit 3 naming both versions, `GPN_CANARY=1`
+⇒ installs first). Local: `cargo test --test gpn_update_cli` ⇒ **27 passed, 0 failed**; fmt clean;
+CI's clippy flag set ⇒ **CLIPPY_EXIT=0**.
+
+**Boxes ticked:** none — §4's last box needs a `success` conclusion on the SHA carrying `73f8db8a`.
+**Other evidence this pass:** box 1 over SSH (read-only, while its runner built) ⇒
+`gpn-node.exe 0.3.79`, `{"peers":2,"isSyncing":false,...}` — soak row 273 still counting (day 1/7,
+ticks 2026-12-02). This host: `system_version` `0.3.79`, peers 3.
+**Next run:** ask once for the run on `73f8db8a`; if `success`, dispatch both §5 builds with handles and
+end the run.
+
 ## 18:0x PT — 0.3.80 §1/§2 ticked on re-derived evidence; freed the single Windows slot from a doomed run
 
 **A0 (CI).** Full sha `665bb967af04bb22d5f33e975d5d756f9be44a90` ⇒ run **45738389392** `pending`,
