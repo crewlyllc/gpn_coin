@@ -21,6 +21,8 @@ run took evidence/source work on a queued row instead.
 - `network.json` `spec_version` 54 → 55; note above `spec_ok` in `network_registry.rs` records that raising the floor is
   the deliberate compatibility call. `cargo test --lib network_registry` ⇒ 2 passed, 0 failed.
 
+**Pushed:** `2f863ada`; CI run `45774396984` created `pending` at 07:29Z — noted, **not waited on** (next run asks once for its conclusion).
+
 **Boxes ticked:** none — row 279 stays NEW until it ships in a version with a fully ticked checklist.
 **Blockers / [TRIAGE]:** none new.
 **Next run:** record soak day 3 after the 09:11 PST timer; keep filling the batch (278 Windows updater gate, 256 lifecycle).
