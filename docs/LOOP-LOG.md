@@ -1,3 +1,31 @@
+## 14:2x PT — 0.3.82 §7: linux lane now attested and verified; cut refused on two SHAs (correctly), windows rebuild dispatched
+
+**A0 (HEAD `fb3fc750`, docs).** `?head_sha=fb3fc750…` ⇒ **total_count 0** — expected under
+`ci.yml` `paths-ignore`. Nothing red.
+
+**§7 box 1 — ticked, on evidence from the published bytes.** `release-linux-selfhosted.yml` run
+**`45902084529`** (sha `bad49d12`) ⇒ `completed/success` 22:01:49→22:13:45Z; steps 7/9/10/12 green,
+gate at 22:11:17Z then publish 22:13:38Z. Log: `repo visibility: private` / `provenance method:
+cosign`; `signed: …gpn-linux.tar.gz.bundle (8881 bytes)`; `Verified OK`;
+`provenance gate PASSED (method=cosign, sha256=be5b28da…887fe3)`. Re-downloaded both published
+assets via the API (tarball 349,013,982 B `be5b28da…887fe3`, bundle 8,881 B `ede04bc1…f3a5b583`,
+both == API digests) and ran `cosign verify-blob` with the linux-workflow identity ⇒ **`Verified
+OK`**. So the §7 gate found a real gap last run and the gap is now closed on both lanes.
+
+**§6 re-checked on the rebuilt linux bytes** (the rebuild changed the digest): `gpn_scheduler`
+`image service unavailable` 1 / `no channel render endpoint` 2; node binaries 0/0; `--version` ⇒
+`gpn-node 0.3.82` / `gpn_node 0.3.82 (spec 55, bad49d1)`.
+
+**§7 box 2 — the cut refused, and it was right.** `release-cut.sh --version 0.3.82` aborted at
+step 3: `ABORT: bundles were built from different commits (bad49d1 vs eb53874)` — one version
+number must mean one codebase. Nothing was mirrored or published; lock released on exit 1. Fix:
+tag `build/bad49d1292c7` at `bad49d12`, `release-windows.yml` **dispatched run `45904624707`**
+22:24:46Z so both assets come from the same commit. Run ended immediately after dispatch.
+
+Tally: 30/56. Next run: check run `45904624707`, verify the new zip + bundle by hand (digest,
+`cosign verify-blob`, strings, `--version`), update §5/§6 windows notes, then re-run
+`release-cut.sh`.
+
 ## 14:10 PT — 0.3.82 §7 gate: the Linux lane had no provenance at all — fixed, rebuild dispatched, run ended
 
 **A0 (HEAD `e57b5f83`, docs).** `?head_sha=e57b5f83…` ⇒ **total_count 0** — expected under
