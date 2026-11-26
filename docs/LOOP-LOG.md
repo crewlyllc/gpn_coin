@@ -1,3 +1,39 @@
+## 04:2x PT — no open checklist, batch at 4 of 5, so nothing was bundled; disproved a "23 node crashes" reading of the fleet journal (they are all clean shutdowns, timestamp-identical to systemd `Stopping`)
+
+**A0:** `origin/main` HEAD `cbeafdf9` (docs only: `GPN-LIST.md`, `docs/LOOP-LOG.md`, `docs/soak-2026-11-25.md` —
+`git show --stat`) ⇒ `?head_sha=` **0 runs**, which is what `ci.yml`'s `paths-ignore` is supposed to do. No
+conclusion to act on, no run waited for.
+
+**Checklist state:** `docs/releases/` holds only `archive/` — 0.3.80 is filed and its two unticked boxes are
+unworkable by their own terms: §0e stranger-lifecycle is **AWAITING-OWNER** (triage 256, 6th carry, the loop
+itself decided 2026-11-25 05:2x PT not to spend runs on it) and 273 (soak) is day 3 of 7 with the timer
+**NEXT 09:11:36 PST**. So section A has no workable box this pass.
+
+**Batch, counted rather than assumed:** `GPN-LIST.md` carries 4 rows whose source is done and whose live half
+needs a build — 278 (`release_hold()` before the stop), 279 (`network.json` spec 55 + hard-fail
+`check-spec-version.sh`), 282 (`cfg!(test)` exit log), 283 (no shipped file points at the deleted clone). That
+is **4 of 5**; per the 2026-11-25 batch rule no version was opened and nothing NEW was bundled. 273 is
+IN-PROGRESS but is a soak, not a fix.
+
+**Evidence for queued rows, re-run on this HEAD (they were recorded at 23:2x PT; nothing re-verified them since):**
+- 279's gate: `bash scripts/tests/test-check-spec-version.sh` ⇒ `PASS=6 FAIL=0`, including
+  `shipped network.json spec_version=55 == runtime spec 55`; live chain `state_getRuntimeVersion` ⇒ **specVersion 55**.
+- 273's collector: `/usr/bin/python3 scripts/tests/test-soak-record.py` ⇒ **89 checks passed, 0 failed**.
+
+**The find, and its refutation (the reason this entry is worth reading later):** the fleet journal holds
+**23** `Essential task `txpool-background` failed. Shutting down service.` lines in 7 days — reading like a
+node that crashes ~3×/day, which is what made `[chat] stopped waiting for #6591 after 285s: cancelled on
+chain` and 12 `Failed` AP jobs look caused by crashes. They are not. Every one of the 23 shares its timestamp
+**to the second** with systemd's `Stopping gpn-fleet.service`; the whole gpn-\* unit set was stopped and
+started in the same second (2026-11-25 09:13:39 and 13:49:59 = the loop's own fleet redeploys, 21:05:49 =
+the 0.3.80 updater apply). It is upstream sc-service reporting a shutdown, already classified as *planned* by
+`scripts/soak-record.py::restart_audit` (±2-line `Stopping` window). Written up as a note in
+`docs/soak-2026-11-25.md` so the next pass cannot re-invent the crash theory.
+
+**Live health (probed):** peers **3**, isSyncing=false, height **367400** (0x59b28), spec 55; `gpn-incident-alarm`
+last two runs `peers=3 height=367388/367394 jobs_seen=256 — ok: no incident conditions`; running binary
+`gpn-node 0.3.80`; AP `/jobs` 256 seen / 228 Completed / 12 Failed / 16 Cancelled (95.3% of settled).
+
 ## 04:0x PT — cleaned 32 fake `corrupt-key` records out of the operator's real `~/.gpn/last-exit.json`; proved 282's guard on the real file (808 `--lib` green, file not recreated)
 
 **A0:** `origin/main` HEAD `02174f49` (loop-log only) ⇒ `?head_sha=` **0 runs** (paths-ignore correct).
