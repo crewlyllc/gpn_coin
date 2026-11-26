@@ -1,3 +1,27 @@
+## 18:59 PT — A0: the fix's run is building on both runners, nothing red, no box tickable yet
+
+**A0 (CI).** Run **45743326550** (head `77b1c93f`, the push that carries the CLI-fixture fix `73f8db8a`)
+is `in_progress`, started `02:39:43Z` — **20 min in**, so well short of the 90-minute stale-run rule; no cancel.
+Job states asked once: `secret-scan` success · `fmt + clippy` success (so the Config-fixture fix `665bb967`
+holds a second time) · `Build + unit tests (linux)` at **step 7/27** `Test gpn-agent (non-GPU)` — the suite that
+was red (`step 8 Test gpn_update CLI`) has not been reached yet · `Build + unit tests (windows, self-hosted)`
+at **step 6** `Build + test gpn-node (release)` on `DESKTOP-USBUADL`. Both runners `online, busy=true`; GPU/macOS/
+audit jobs `skipped` as configured. Nothing is red, so there is nothing to diagnose.
+
+**Boxes ticked:** none.
+- **§4 box 4** stays unticked by its own wording: it needs a `success` conclusion *on a code SHA*; the handle
+  is run 45743326550 and the next pass reads its conclusion, not a guess.
+- **§0e box 1** (stranger lifecycle on a clean Windows guest) is still `AWAITING-OWNER` on **item 256** — the
+  venue question in `docs/NEEDS-TRIAGE.md` (attach a partition of box 1's 5070 Ti to guest GPN-209, recommended
+  A, no spend). Not re-raised as new; still the same open decision, and it is the only thing between this
+  release and a fully-green §0e.
+- **§3b row 273** (seven-day soak) is day 1/7 as recorded; a second reading today would overwrite day 1, so the
+  collector was deliberately not re-run. Timer `gpn-soak-record.timer` next fires 2026-11-26 09:10 PST.
+
+**Blockers / [TRIAGE]:** none new.
+**Next run:** ask once for 45743326550. `success` ⇒ tick §4 box 4 and dispatch §5's two platform builds on the
+same SHA with the run ids written into the box, then end the run. `failure` ⇒ read the failing step's log,
+quote the line, fix the cause, push once.
 ## 18:45 PT — A0 caught a second red: the CLI update tests predate the canary gate (fixed, pushed)
 
 **A0 (CI).** Run 45738389392 (`665bb967`, the Config-fixture fix) ⇒ `fmt + clippy` **success**
