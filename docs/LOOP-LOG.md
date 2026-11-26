@@ -1,3 +1,25 @@
+## 11:4x PT — soak day 2 refreshed (row 273); release cut still CI-gated, run 34 min old
+
+**A0:** HEAD `80e48edbb8d326c784092c50e5d0ef903bef07cd` (docs) ⇒ `total_count: 0` (paths-ignore
+correct). Release code sha `eb5387448d49a8cb6a4133fd4fa2cc0c3e7c029a` ⇒ run **45880574537** asked
+again: `in_progress`, created 19:02:20Z, 35 min old — not >90, so **not** cancelled and **not**
+waited on.
+
+**Box worked — §3b row 273 (soak, first unticked box):**
+- `scripts/soak-record.py` re-run (idempotent per date) ⇒ day 2 at **369064**, 4577 blocks over
+  19.67 h ⇒ effective **15.47 s/block** vs the 13.4 s baseline (named drift, unchanged in character
+  from the 15.50 s read at 18:57Z); p50 10.29 s / p95 43.29 s; peers 3, 0 lines at 0 peers;
+  **0 unexplained terminations**; `Reason:` bans **0**; jobs 256 attempted / 227 ok; box 1 peers 2
+  at 369065.
+- Box stays unticked: it cannot tick before **2026-12-02** (7-day gate). Checklist notes updated
+  with the refreshed numbers.
+
+**Still unticked, and why (no new work opened):**
+- §4 "dispatch the release cut once CI is green" — gated on `45880574537`. Box now records the
+  19:37Z observation and that no `~/.gpn/release-in-flight` marker exists. Next run: ask once;
+  `success` ⇒ `scripts/release-cut.sh --version 0.3.82` in the background, write the run id, end.
+
+No [TRIAGE] item this pass.
 ## 11:2x PT — 0.3.82 §1/§2/§4 evidence boxes ticked; release cut still CI-gated (no build yet)
 
 **A0:** code sha `eb5387448d49a8cb6a4133fd4fa2cc0c3e7c029a` (full) ⇒ run **45880574537** asked once,
