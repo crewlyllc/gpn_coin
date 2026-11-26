@@ -1,3 +1,45 @@
+## 11:56 PT — CI 54 min in, linux+fmt+secret-scan green, only the windows self-hosted job left; release cut still gated
+
+**A0:** HEAD `5bc5c3765e87bb5babc2fc833ee51f1939902b4c` (docs: soak day 2 refresh + 19:37Z CI box)
+⇒ `total_count: 0` with the full 40-char sha — `paths-ignore` intact, as expected for prose. Release
+code sha `eb5387448d49a8cb6a4133fd4fa2cc0c3e7c029a` ⇒ run **45880574537** asked once: `in_progress`,
+created 19:02:20Z ⇒ **54 min old**, not >90 ⇒ not cancelled, not waited on.
+
+**Job-level detail (new this run, from `runs/45880574537/jobs`):**
+- `fmt + clippy` **success** 19:11:33→19:12:28Z (all 12 steps, incl. both `-D warnings` clippy steps)
+- `secret-scan` **success** 19:13:36→19:13:45Z
+- `Build + unit tests (linux)` **success** 19:13:47→**19:40:40Z** (all 27 steps: gpn-node build+test,
+  gpn-agent build+test, gpn_update CLI, launcher identity, wallet provisioning, fast sync, referral,
+  autostart, in-flight guard, lane patterns, snapshot preflight, disk guard, status, wrong-tree gate,
+  website/join/chat/nodes/access-points/docs/worker suites)
+- `Build + unit tests (windows, self-hosted)` **in_progress**, step 7 `Build + test gpn-agent
+  (release)` since 19:11:33Z (45 min). Step 6 `Build + test gpn-node (release)` already **success**.
+  Box 1's runner is single-slot and a release gpn-agent build there runs 40–60 min — contention, not
+  a fault.
+
+**Box worked:** none opened. The checklist's first unticked workable box is §4 "dispatch the release
+cut once CI is green", and by its own terms it cannot be dispatched while the run above is still
+`in_progress` (a cut must be from a CI-verified sha). §0e stranger-lifecycle stays **AWAITING-OWNER**
+(triage 256, venue question), 273 soak stays unticked until 2026-12-02. Nothing else may be committed
+while this checklist is open (§0), so no code or unrelated docs were touched.
+
+**Self-check of the previous tick (§0e rule):** re-derived the §2/§3b evidence that the released tree
+carries the fixes — `git status --porcelain` empty; `grep -n` in `gpn-agent/src/bin/gpn_scheduler.rs`
+⇒ `fn published_account` l.2209, `const MAX_ENDPOINT_PROBES: usize = 8` l.2394, `fn probe_media_routes`
+l.3962, plus the test `published_accounts_are_ss58_not_chain_hex` l.10903; `git diff --stat eb538744
+HEAD` touches only `docs/LOOP-LOG.md`, `docs/releases/0.3.82.md`, `docs/soak-2026-11-25.md`. Claim
+holds. Fresh corroboration of the 116-test claim: the linux CI job's `Test gpn-agent (non-GPU)` step
+passed at 19:40:40Z on exactly this sha.
+
+**Live surfaces:** `https://gpncoin.ai/releases.json` ⇒ `version 0.3.81` (expected — 0.3.82 not cut
+yet); `http://127.0.0.1:8092/v1/models` answers with ollama names; :8092 held by `gpn_scheduler`
+pid 439407.
+
+**Next run:** ask `45880574537` once for `conclusion`. `success` ⇒
+`scripts/release-cut.sh --version 0.3.82` **in the background**, write the run id into the §4 box, end
+the run. `failure` ⇒ read the failing job's log, quote the line, fix, push once. If still
+`in_progress` and >90 min old (after 20:32Z), cancel it and dispatch a fresh one.
+
 ## 11:4x PT — soak day 2 refreshed (row 273); release cut still CI-gated, run 34 min old
 
 **A0:** HEAD `80e48edbb8d326c784092c50e5d0ef903bef07cd` (docs) ⇒ `total_count: 0` (paths-ignore
