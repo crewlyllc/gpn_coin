@@ -1,3 +1,25 @@
+## 02:5x PT — queued fix 282 re-verified independently (12/12, live log untouched); CI has no conclusion; soak day 3 not due
+
+**A0:** `origin/main` HEAD `661ad742` (soak + loop-log docs) ⇒ `?head_sha=` **0 runs** (`paths-ignore` correct).
+The code run **`45803757268`** (`437f97b0`, the soak classifier fix) is still **`pending`** since 10:42:04Z with
+`DESKTOP-USBUADL` busy — **no conclusion, nothing acted on, nothing waited on.** Next pass reads it.
+
+**Row 273 (only IN-PROGRESS row, soak day 2/7).** Day 3 is not due: `systemctl --user list-timers
+gpn-soak-record.timer` ⇒ `NEXT Thu 2026-11-26 09:11:36 PST`, LAST `-` (first scheduled fire). Nothing to record yet,
+and the two evidence defects yesterday's passes fixed (forward-window restart audit, `day_first`) are already in
+day 2's line: **2 terminations (2 adjacent to a systemd `Stopping`, 0 unexplained)** at height 367,023.
+
+**Queued fix 282 re-verified this pass, independently of its commit message.** `cargo test --release --lib
+exit_report::` ⇒ **12 passed / 0 failed** (incl. `default_path_never_points_at_the_real_prefix_under_cargo_test`),
+and `~/.gpn/last-exit.json` was **md5 `5eae314b95422a9c2351ca66b0639f53`, 32 lines before and after** the run — the
+in-crate path can no longer append to the operator's exit log. Row 282 stays NEW (hardening, not counted).
+
+**Live spot check:** `system_version` ⇒ `0.3.80`; head **#367,085** (`0x599ed`); `POST :8092/v1/chat/completions`
+(`llama3.2:1b`) ⇒ **200 in 2.27 s**.
+
+**Batch:** 278, 279, 283 = **3 of 5**; 282 hardening (not counted); 256 AWAITING-OWNER (venue, `NEEDS-TRIAGE.md`).
+**No version opened, nothing bundled.** No new [TRIAGE] item.
+
 ## 02:5x PT — the soak's "unexplained termination" was the classifier's own blind spot; the day's interval no longer vanishes on a re-run
 
 **A0:** the run for `4928d8ae` (`45800949746`) ended **`cancelled` with `jobs: 0`** — cancelled at 10:42:05Z, i.e. by
