@@ -1,3 +1,35 @@
+## 02:5x PT — the soak's "unexplained termination" was the classifier's own blind spot; the day's interval no longer vanishes on a re-run
+
+**A0:** the run for `4928d8ae` (`45800949746`) ended **`cancelled` with `jobs: 0`** — cancelled at 10:42:05Z, i.e. by
+the concurrency group when this pass pushed `437f97b0`; a queued-then-cancelled run proves nothing about that SHA
+(TOOLS.md). The new HEAD's run is **`45803757268`**, `pending` since 10:42:04Z (runner `DESKTOP-USBUADL` `busy=true`) —
+**no conclusion, nothing waited on**. Next pass reads it; a `failure` there is the box.
+
+**Row 273 (only IN-PROGRESS row, soak day 2/7).** Day 3 is not due (`gpn-soak-record.timer` NEXT 09:07 PT, `Persistent=true`),
+so the pass went at two defects in the *evidence tooling* — both found by reading the journal, not the classifier's prose:
+
+1. **`restart_audit()` could not see a stop it caused itself.** Yesterday's day-2 line read `1 unexplained`, and an
+   unexplained count > 0 is what blocks the stability gate. `journalctl --user -u gpn-fleet.service -o cat` around
+   2026-11-25 21:05:49Z shows the order plainly: `Essential task `txpool-background` failed` **then**
+   `Stopping gpn-fleet.service ...` — the 0.3.80 updater signals the node's process directly, so systemd records the
+   stop reason one line *after*. The old ±2 **backward** window scored that planned apply as a death. Window is now
+   ±2 either side; forward is safe because `Stopping` is only emitted for an explicit stop request (a crashed main
+   process logs `Main process exited` / `Scheduled restart job`). Live re-record now reads
+   **`2 terminations (2 adjacent to a systemd Stopping, 0 unexplained)`**.
+2. **A same-day re-run destroyed the day's effective interval.** `prev` came from `state["last"]`, so a second pass
+   two minutes later hit `best <= prev_height` and rewrote the line as `n/a (first record of this soak)` — the number
+   the gate reads, silently gone (happened in this very pass before it was caught). `select_prev()` now measures from
+   the day's **first** reading (`state["day_first"]`), and the `n/a` text distinguishes "first record" from "no
+   progress / window under 60 s". Day 2's **10.04 s** (139 blocks / 0.39 h, measured 10:22Z) is restored with its
+   provenance in `docs/soak-2026-11-25.md`.
+
+Tests: `scripts/tests/test-soak-record.py` ⇒ **89 checks passed, 0 failed** (4 new: stop *after* the termination,
+stop 2 before, stop 4 after = still unexplained, `select_prev` same-day / new-day / empty state). Pushed as
+`437f97b0` — a real code commit, so it starts CI (queued behind the Windows runner being busy; not waited on).
+
+**Batch:** 278, 279, 283 counted = **3 of 5**; 282 is hardening, not counted; 256 AWAITING-OWNER (venue) in
+`docs/NEEDS-TRIAGE.md`. **No version opened, nothing bundled.** No new [TRIAGE] item.
+
 ## 02:4x PT — the soak's restart column could not tell a planned stop from a crash; it can now; 3 stale clone paths fixed; no version
 
 **A0:** `origin/main` HEAD `71686376` (soak/log docs) ⇒ `?head_sha=` **0 runs** (paths-ignore correct). The code run
