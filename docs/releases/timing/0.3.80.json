@@ -1,0 +1,415 @@
+{
+  "version": "0.3.80",
+  "start": "2026-11-25T14:58:08-08:00",
+  "total_s": 25177,
+  "rows": [
+    {
+      "box": "`scripts/bump-version.py patch`",
+      "section": "3b. Items in this release  <!-- generator inserts them here, do NOT hand-edit -->",
+      "ticked_at": "2026-11-25T14:58:08-08:00",
+      "since_start_s": 0,
+      "step_s": 0,
+      "sha": "63d81c72d4749b5deb9b639642a3616515f5ee12"
+    },
+    {
+      "box": "CHANGELOG section written",
+      "section": "3b. Items in this release  <!-- generator inserts them here, do NOT hand-edit -->",
+      "ticked_at": "2026-11-25T14:58:08-08:00",
+      "since_start_s": 0,
+      "step_s": 0,
+      "sha": "63d81c72d4749b5deb9b639642a3616515f5ee12"
+    },
+    {
+      "box": "`scripts/bump-version.py --check` \u2192 `lockstep: 15 manifest(s) an",
+      "section": "3b. Items in this release  <!-- generator inserts them here, do NOT hand-edit -->",
+      "ticked_at": "2026-11-25T14:58:08-08:00",
+      "since_start_s": 0,
+      "step_s": 0,
+      "sha": "63d81c72d4749b5deb9b639642a3616515f5ee12"
+    },
+    {
+      "box": "277",
+      "section": "3b. Items in this release  <!-- generator inserts them here, do NOT hand-edit -->",
+      "ticked_at": "2026-11-25T15:18:31-08:00",
+      "since_start_s": 1223,
+      "step_s": 1223,
+      "sha": "ce61dd2fb0594f3f1cd827a34cc081d92386b308"
+    },
+    {
+      "box": "274",
+      "section": "3b. Items in this release  <!-- generator inserts them here, do NOT hand-edit -->",
+      "ticked_at": "2026-11-25T15:58:12-08:00",
+      "since_start_s": 3604,
+      "step_s": 2381,
+      "sha": "3b09ed5b050c6f5239bd3aa262c026110ac446e7"
+    },
+    {
+      "box": "275",
+      "section": "3b. Items in this release  <!-- generator inserts them here, do NOT hand-edit -->",
+      "ticked_at": "2026-11-25T16:24:42-08:00",
+      "since_start_s": 5194,
+      "step_s": 1590,
+      "sha": "4c1ed61e964b1bb148e26b137fb7262165eb42ad"
+    },
+    {
+      "box": "276",
+      "section": "3b. Items in this release  <!-- generator inserts them here, do NOT hand-edit -->",
+      "ticked_at": "2026-11-25T16:41:18-08:00",
+      "since_start_s": 6190,
+      "step_s": 996,
+      "sha": "07be732cbe863414a2c0c24f13fad15a4f031f0a"
+    },
+    {
+      "box": "Seed lists still agree across `network.json`, `seeds.json`, `ins",
+      "section": "3b. Items in this release  <!-- generator inserts them here, do NOT hand-edit -->",
+      "ticked_at": "2026-11-25T16:59:11-08:00",
+      "since_start_s": 7263,
+      "step_s": 1073,
+      "sha": "1a51945cbcc4f5ec2ecfd0da04cfde59e55c4599"
+    },
+    {
+      "box": "A docs-only commit must not start a build",
+      "section": "4. Push (once)",
+      "ticked_at": "2026-11-25T17:17:51-08:00",
+      "since_start_s": 8383,
+      "step_s": 1120,
+      "sha": "5134055e026177a2218078c6d875667c943189f2"
+    },
+    {
+      "box": "Batch documentation edits into ONE commit. One commit per questi",
+      "section": "4. Push (once)",
+      "ticked_at": "2026-11-25T17:17:51-08:00",
+      "since_start_s": 8383,
+      "step_s": 0,
+      "sha": "5134055e026177a2218078c6d875667c943189f2"
+    },
+    {
+      "box": "CI is observed, not waited on. Ask GitHub once for the run on th",
+      "section": "4. Push (once)",
+      "ticked_at": "2026-11-25T17:17:51-08:00",
+      "since_start_s": 8383,
+      "step_s": 0,
+      "sha": "5134055e026177a2218078c6d875667c943189f2"
+    },
+    {
+      "box": "Every step failure names a cause a stranger can act on",
+      "section": "0e. A stranger must be able to join and stay joined (owner rule, 2026-11-23)",
+      "ticked_at": "2026-11-25T17:49:57-08:00",
+      "since_start_s": 10309,
+      "step_s": 1926,
+      "sha": "665bb967af04bb22d5f33e975d5d756f9be44a90"
+    },
+    {
+      "box": "Name the behaviour in one sentence, and the machine-observable t",
+      "section": "1. Test first (before any code is written)",
+      "ticked_at": "2026-11-25T18:00:19-08:00",
+      "since_start_s": 10931,
+      "step_s": 622,
+      "sha": "dfe0f7594bec40c13a497bd3b0a9201bc1f5a2ac"
+    },
+    {
+      "box": "Write the test that fails now. Paste the failing output. No fix ",
+      "section": "1. Test first (before any code is written)",
+      "ticked_at": "2026-11-25T18:00:19-08:00",
+      "since_start_s": 10931,
+      "step_s": 0,
+      "sha": "dfe0f7594bec40c13a497bd3b0a9201bc1f5a2ac"
+    },
+    {
+      "box": "If the change cannot be tested, stop and tell Jeremy",
+      "section": "1. Test first (before any code is written)",
+      "ticked_at": "2026-11-25T18:00:19-08:00",
+      "since_start_s": 10931,
+      "step_s": 0,
+      "sha": "dfe0f7594bec40c13a497bd3b0a9201bc1f5a2ac"
+    },
+    {
+      "box": "The test passes.",
+      "section": "2. Implement",
+      "ticked_at": "2026-11-25T18:00:19-08:00",
+      "since_start_s": 10931,
+      "step_s": 0,
+      "sha": "dfe0f7594bec40c13a497bd3b0a9201bc1f5a2ac"
+    },
+    {
+      "box": "`cargo fmt --check` clean; clippy with CI's `-D warnings` clean.",
+      "section": "2. Implement",
+      "ticked_at": "2026-11-25T18:00:19-08:00",
+      "since_start_s": 10931,
+      "step_s": 0,
+      "sha": "dfe0f7594bec40c13a497bd3b0a9201bc1f5a2ac"
+    },
+    {
+      "box": "Full affected suites run, not just the new test.",
+      "section": "2. Implement",
+      "ticked_at": "2026-11-25T18:00:19-08:00",
+      "since_start_s": 10931,
+      "step_s": 0,
+      "sha": "dfe0f7594bec40c13a497bd3b0a9201bc1f5a2ac"
+    },
+    {
+      "box": "A call site exists for anything new",
+      "section": "2. Implement",
+      "ticked_at": "2026-11-25T18:00:19-08:00",
+      "since_start_s": 10931,
+      "step_s": 0,
+      "sha": "dfe0f7594bec40c13a497bd3b0a9201bc1f5a2ac"
+    },
+    {
+      "box": "Nothing new is off by default behind a flag nobody sets.",
+      "section": "2. Implement",
+      "ticked_at": "2026-11-25T18:00:19-08:00",
+      "since_start_s": 10931,
+      "step_s": 0,
+      "sha": "dfe0f7594bec40c13a497bd3b0a9201bc1f5a2ac"
+    },
+    {
+      "box": "The change is in the tree you are about to release:",
+      "section": "2. Implement",
+      "ticked_at": "2026-11-25T18:00:19-08:00",
+      "since_start_s": 10931,
+      "step_s": 0,
+      "sha": "dfe0f7594bec40c13a497bd3b0a9201bc1f5a2ac"
+    },
+    {
+      "box": "If the lifecycle cannot be run this release, say so in the check",
+      "section": "0e. A stranger must be able to join and stay joined (owner rule, 2026-11-23)",
+      "ticked_at": "2026-11-25T19:20:46-08:00",
+      "since_start_s": 15758,
+      "step_s": 4827,
+      "sha": "33dcb3a29b287b66ceaa6291d4c557c370656b05"
+    },
+    {
+      "box": "The run that matters is the one for this SHA, and a docs-only SH",
+      "section": "4. Push (once)",
+      "ticked_at": "2026-11-25T20:03:39-08:00",
+      "since_start_s": 18331,
+      "step_s": 2573,
+      "sha": "b9cda505e6ca8d288120f082a395c7134728087f"
+    },
+    {
+      "box": "Per-item Windows evidence was collected over SSH (paste the Powe",
+      "section": "5. Build both platforms",
+      "ticked_at": "2026-11-25T20:03:39-08:00",
+      "since_start_s": 18331,
+      "step_s": 0,
+      "sha": "b9cda505e6ca8d288120f082a395c7134728087f"
+    },
+    {
+      "box": "`release-linux-selfhosted.yml` \u2192 `gpn-linux.tar.gz` on `linux-la",
+      "section": "5. Build both platforms",
+      "ticked_at": "2026-11-25T20:20:20-08:00",
+      "since_start_s": 19332,
+      "step_s": 1001,
+      "sha": "8b9d7ce126925dba05e85f109b6b6694b2ed647a"
+    },
+    {
+      "box": "`release-windows.yml` on box 1's runner \u2192 `gpn-windows.zip` on `",
+      "section": "5. Build both platforms",
+      "ticked_at": "2026-11-25T20:56:22-08:00",
+      "since_start_s": 21494,
+      "step_s": 2162,
+      "sha": "733b0b93d6e4358e810e6e2f6cfec546bd289552"
+    },
+    {
+      "box": "Same SHA on both runs. macOS is not required and is not in the m",
+      "section": "5. Build both platforms",
+      "ticked_at": "2026-11-25T20:56:22-08:00",
+      "since_start_s": 21494,
+      "step_s": 0,
+      "sha": "733b0b93d6e4358e810e6e2f6cfec546bd289552"
+    },
+    {
+      "box": "The attestation step runs BEFORE the publish step, and a failed ",
+      "section": "5. Build both platforms",
+      "ticked_at": "2026-11-25T20:56:22-08:00",
+      "since_start_s": 21494,
+      "step_s": 0,
+      "sha": "733b0b93d6e4358e810e6e2f6cfec546bd289552"
+    },
+    {
+      "box": "The attestation exists for the digest that is actually published",
+      "section": "5. Build both platforms",
+      "ticked_at": "2026-11-25T20:56:22-08:00",
+      "since_start_s": 21494,
+      "step_s": 0,
+      "sha": "733b0b93d6e4358e810e6e2f6cfec546bd289552"
+    },
+    {
+      "box": "Verify the downloaded artifact with the verifier that matches th",
+      "section": "5. Build both platforms",
+      "ticked_at": "2026-11-25T20:56:22-08:00",
+      "since_start_s": 21494,
+      "step_s": 0,
+      "sha": "733b0b93d6e4358e810e6e2f6cfec546bd289552"
+    },
+    {
+      "box": "Scan the built binaries for strings the change added. Use litera",
+      "section": "6. Verify the artifact BEFORE publishing",
+      "ticked_at": "2026-11-25T20:56:22-08:00",
+      "since_start_s": 21494,
+      "step_s": 0,
+      "sha": "733b0b93d6e4358e810e6e2f6cfec546bd289552"
+    },
+    {
+      "box": "The binary's `--version` matches the version being released.",
+      "section": "6. Verify the artifact BEFORE publishing",
+      "ticked_at": "2026-11-25T20:56:22-08:00",
+      "since_start_s": 21494,
+      "step_s": 0,
+      "sha": "733b0b93d6e4358e810e6e2f6cfec546bd289552"
+    },
+    {
+      "box": "Refuse to cut unless \u00a75's attestation checks passed. If the atte",
+      "section": "7. Cut and publish",
+      "ticked_at": "2026-11-25T20:56:22-08:00",
+      "since_start_s": 21494,
+      "step_s": 0,
+      "sha": "733b0b93d6e4358e810e6e2f6cfec546bd289552"
+    },
+    {
+      "box": "`scripts/release-cut.sh --timeout 300`",
+      "section": "7. Cut and publish",
+      "ticked_at": "2026-11-25T20:56:22-08:00",
+      "since_start_s": 21494,
+      "step_s": 0,
+      "sha": "733b0b93d6e4358e810e6e2f6cfec546bd289552"
+    },
+    {
+      "box": "`network.json` `latest_version` equals the published version.",
+      "section": "7. Cut and publish",
+      "ticked_at": "2026-11-25T20:56:22-08:00",
+      "since_start_s": 21494,
+      "step_s": 0,
+      "sha": "733b0b93d6e4358e810e6e2f6cfec546bd289552"
+    },
+    {
+      "box": "`releases.json` serves the new version twice, ten seconds apart.",
+      "section": "7. Cut and publish",
+      "ticked_at": "2026-11-25T20:56:22-08:00",
+      "since_start_s": 21494,
+      "step_s": 0,
+      "sha": "733b0b93d6e4358e810e6e2f6cfec546bd289552"
+    },
+    {
+      "box": "GitHub carries the same version",
+      "section": "7b. Every surface that names a version must be updated",
+      "ticked_at": "2026-11-25T20:56:22-08:00",
+      "since_start_s": 21494,
+      "step_s": 0,
+      "sha": "733b0b93d6e4358e810e6e2f6cfec546bd289552"
+    },
+    {
+      "box": "gpncoin.ai serves the new version",
+      "section": "7b. Every surface that names a version must be updated",
+      "ticked_at": "2026-11-25T20:58:53-08:00",
+      "since_start_s": 21645,
+      "step_s": 151,
+      "sha": "6d40bcdaaed54edb96e5efdc1d84450c39a5964e"
+    },
+    {
+      "box": "Both surfaces agree with each other and with the binaries",
+      "section": "7b. Every surface that names a version must be updated",
+      "ticked_at": "2026-11-25T20:58:53-08:00",
+      "since_start_s": 21645,
+      "step_s": 0,
+      "sha": "6d40bcdaaed54edb96e5efdc1d84450c39a5964e"
+    },
+    {
+      "box": "One node updates itself",
+      "section": "9. Deploy and confirm",
+      "ticked_at": "2026-11-25T21:20:47-08:00",
+      "since_start_s": 22959,
+      "step_s": 1314,
+      "sha": "658ed85f69b0943e12cd210cff8ca4f1f8077f45"
+    },
+    {
+      "box": "The running process reports the new version (check `(Get-Process",
+      "section": "9. Deploy and confirm",
+      "ticked_at": "2026-11-25T21:20:47-08:00",
+      "since_start_s": 22959,
+      "step_s": 0,
+      "sha": "658ed85f69b0943e12cd210cff8ca4f1f8077f45"
+    },
+    {
+      "box": "Log shows `check \u2192 stop \u2192 download \u2192 swap \u2192 start \u2192 CONFIRMED <v",
+      "section": "9. Deploy and confirm",
+      "ticked_at": "2026-11-25T21:20:47-08:00",
+      "since_start_s": 22959,
+      "step_s": 0,
+      "sha": "658ed85f69b0943e12cd210cff8ca4f1f8077f45"
+    },
+    {
+      "box": "Previous version retained for rollback; a failed update leaves t",
+      "section": "9. Deploy and confirm",
+      "ticked_at": "2026-11-25T21:20:47-08:00",
+      "since_start_s": 22959,
+      "step_s": 0,
+      "sha": "658ed85f69b0943e12cd210cff8ca4f1f8077f45"
+    },
+    {
+      "box": "The change observed on a real machine, with timestamps and the a",
+      "section": "10. Prove the behaviour",
+      "ticked_at": "2026-11-25T21:20:47-08:00",
+      "since_start_s": 22959,
+      "step_s": 0,
+      "sha": "658ed85f69b0943e12cd210cff8ca4f1f8077f45"
+    },
+    {
+      "box": "Peers hold >5 minutes; no new `Reason:` bans; no unexpected `gpn",
+      "section": "10. Prove the behaviour",
+      "ticked_at": "2026-11-25T21:20:47-08:00",
+      "since_start_s": 22959,
+      "step_s": 0,
+      "sha": "658ed85f69b0943e12cd210cff8ca4f1f8077f45"
+    },
+    {
+      "box": "`--verify-published` exits 0 for this version; paste its three l",
+      "section": "8. Verify as a stranger would",
+      "ticked_at": "2026-11-25T21:23:14-08:00",
+      "since_start_s": 23106,
+      "step_s": 147,
+      "sha": "4f5b53d0f3a23e06b4fd7941830c7f0675ee582e"
+    },
+    {
+      "box": "Anonymous download of both assets from `gpncoin.ai` succeeds.",
+      "section": "8. Verify as a stranger would",
+      "ticked_at": "2026-11-25T21:23:14-08:00",
+      "since_start_s": 23106,
+      "step_s": 0,
+      "sha": "4f5b53d0f3a23e06b4fd7941830c7f0675ee582e"
+    },
+    {
+      "box": "sha256 and size match the manifest for both.",
+      "section": "8. Verify as a stranger would",
+      "ticked_at": "2026-11-25T21:23:14-08:00",
+      "since_start_s": 23106,
+      "step_s": 0,
+      "sha": "4f5b53d0f3a23e06b4fd7941830c7f0675ee582e"
+    },
+    {
+      "box": "Docs stamp and `downloads.md` show the same version; the live UR",
+      "section": "8. Verify as a stranger would",
+      "ticked_at": "2026-11-25T21:23:14-08:00",
+      "since_start_s": 23106,
+      "step_s": 0,
+      "sha": "4f5b53d0f3a23e06b4fd7941830c7f0675ee582e"
+    },
+    {
+      "box": "Every capability added in this bundle is discoverable from gpnco",
+      "section": "7b. Every surface that names a version must be updated",
+      "ticked_at": "2026-11-25T21:37:44-08:00",
+      "since_start_s": 23976,
+      "step_s": 870,
+      "sha": "06d4cb4214559c386ebfd94674c4e60b5e01e21b"
+    },
+    {
+      "box": "Mark the task row `DONE (date)` with version, commit sha and the",
+      "section": "10. Prove the behaviour",
+      "ticked_at": "2026-11-25T21:57:45-08:00",
+      "since_start_s": 25177,
+      "step_s": 1201,
+      "sha": "651527993ded645c28c561bc50a8c57bd1c093da"
+    }
+  ]
+}
