@@ -1,3 +1,44 @@
+## 20:58 PT — 0.3.80 CUT AND PUBLISHED (f6aff08a); §5/§6/§7/§7b ticked, box 1 auto-update triggered
+
+**A0 (CI).** `reset --hard origin/main` ⇒ HEAD `8b9d7ce1` (docs-only). Full-40-char run query ⇒ 0 runs, the
+expected answer for a docs SHA. Nothing red.
+
+**Windows leg (box ticked).** run **45752717739** asked once ⇒ `completed success` 04:29:54Z, head
+`77b1c93f` (same full sha as the linux run 45752712360 — read from the API on both runs, not from the
+dispatch script). Asset `gpn-windows.zip` 253,289,648 B, digest `ca093f0e…625f42`, plus
+`gpn-windows.zip.bundle` 9,049 B.
+
+**Attestation (§5, private repo path).** `visibility: private` ⇒ cosign. Step order read from the workflow
+and matched by the run's own step list: 18 package → 19 availability → 21 sign keyless → 22 provenance gate
+(no `if:`) → 23 publish. Re-downloaded the published pair and ran `cosign verify-blob` by hand with the
+identity pinned to this repo + `release-windows.yml` ⇒ **Verified OK** (exit 0).
+
+**Artifact scan (§6).** On the published zip: `gpn-node.exe` carries `reorg=` x1, `work ours=` x1,
+`gpn-forked` x2, `0.3.80`; `gpn-agent.exe` carries `0.3.80`. Windows exe can't execute here, so `--version`
+was proven on the copy this run deployed to box 1: `C:\gpn\bin\gpn-node.exe` (71,208,448 B — same size as
+the one in the zip) ⇒ `gpn-node.exe 0.3.80`, supervisor ⇒ `gpn_node 0.3.80 (spec 55, 77b1c93)`.
+
+**Cut (§7).** `scripts/release-cut.sh --version 0.3.80 --timeout 300 --yes` at 04:44Z. Content scan 3b
+passed on both platforms (5 markers each + `gpn-node/0.3.80`). Mirrored to `crewlyllc/gpn_coin`, digests
+verified identical in all four release endpoints, manifest signed (key `78015fab…`), commit **f6aff08a**
+pushed, anonymous re-download matched both assets (`GET 206`), `released 0.3.80`.
+
+**Surfaces (§7b).** `releases.json` served `0.3.80` at 04:55:10Z and 04:55:20Z with unchanged digests.
+The site still hard-coded `0.3.79` in `download.html` and the sample line of `docs/run-a-node.html` /
+`docs/downloads.html`; bumped all three to 0.3.80 (with the live block 365,670 / 20:55 PT), pushed
+**733b0b93**, and re-read anonymously: `/download` ⇒ `Current signed release: 0.3.80`, both docs pages ⇒
+`0.3.80`. `seeds.json` has no version field by design; `updated_at` 04:55:11Z, `live_providers: 4`.
+
+**Found, filed, not fixed.** `network.json` ships `spec_version: 54` while the chain answers
+`state_getRuntimeVersion ⇒ specVersion=55`. Safe in direction (the check is `chain >= registry`, 55 >= 54),
+but it means a spec-54 node would still be classified compatible. Raising it declares every spec-54 node
+incompatible — a policy call, so it gets a row, not an edit.
+
+**Dispatched and ended (not waited on).** box 1 was on 0.3.79 (`system_version` ⇒ `0.3.79`, process started
+20:26:08 PT) with `update-state.json` still `latest_version: 0.3.79` (last check 04:26Z, before the cut).
+Triggered its own updater: `Start-ScheduledTask -TaskName GPN-Update` at **04:58:34Z** (state `Running`).
+Next run reads `update-state.json` + the updater log + `system_version` and ticks §9/§10.
+
 ## 20:22 PT — 0.3.80 §5 box 1 ticked: linux artifact published, sha256 + `--version` verified; Windows leg still building
 
 **A0 (CI).** `git fetch && reset --hard origin/main` ⇒ HEAD `b9cda505` (docs-only commit). Full-40-char query
