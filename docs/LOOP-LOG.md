@@ -1,3 +1,30 @@
+## 11:2x PT — 0.3.82 §1/§2/§4 evidence boxes ticked; release cut still CI-gated (no build yet)
+
+**A0:** code sha `eb5387448d49a8cb6a4133fd4fa2cc0c3e7c029a` (full) ⇒ run **45880574537** asked once,
+`in_progress`, created 19:02:20Z, 14 min old. Not waited on, not polled. Docs HEAD
+`7f5c1369ef1c9f4c7115af34c01e9c3119f19d82` ⇒ `total_count: 0` (paths-ignore behaving).
+
+**Boxes ticked (evidence inline in `docs/releases/0.3.82.md`):**
+- §4 "A docs-only commit must not start a build" — docs sha ⇒ 0 runs, code sha ⇒ 1 run; `paths-ignore`
+  intact.
+- §4 "CI is observed, not waited on" — run id noted, no wait.
+- §4 "The run that matters is the one for this SHA" — both cases observed with the full 40-char sha.
+- §2 "The change is in the tree you are about to release" — `git log --oneline -3 --
+  gpn-agent/src/bin/gpn_scheduler.rs` ⇒ `eb538744`, `7830a822`, `66920316`; HEAD is a descendant,
+  `git diff --stat eb538744 HEAD` is LOOP-LOG + this checklist only, and the released tree carries
+  `fn published_account` (l.2209), `MAX_ENDPOINT_PROBES = 8` (l.2394), `fn probe_media_routes` (l.3962).
+
+**Still unticked, and why (no new work opened):**
+- §4 "dispatch the release cut once CI is green" — gated on `45880574537` reaching `success`. Next
+  run: ask once; `success` ⇒ `scripts/release-cut.sh --version 0.3.82` **in the background**, write
+  the run id into the box, end the run.
+- §3b row 273 (soak) — date-gated, day 2 of 7, cannot tick before 2026-12-02.
+- §0e stranger-lifecycle boxes — need a clean Windows guest run; box 1 is build-priority and its
+  runner is the single slot, so this waits until no release job is in flight.
+
+**Blockers / [TRIAGE]:** unchanged (only 256, venue = GPU-P of box 1's 5070 Ti to GPN-209). Nothing
+needs Jeremy.
+
 ## 11:0x PT — row 286: images/audio refused while a provider was online; fixed, cut as 0.3.82 (critical)
 
 **A0:** `origin/main` HEAD `7830a822` ⇒ CI run `45878215070` **pending** at 18:43Z — noted, not waited
