@@ -82,6 +82,11 @@ const EXIT_OK: u8 = 0;
 const EXIT_ERROR: u8 = 1;
 const EXIT_UNREACHABLE: u8 = 2;
 const EXIT_UPDATE_AVAILABLE: u8 = 3;
+/// A newer release exists and this node may NOT install it yet (policy, the
+/// row-275 canary proof, or the retry backoff). Distinct from `3` so a wrapper
+/// can tell "install it" from "leave the node alone and retry later" without
+/// parsing text (row 278).
+const EXIT_HELD: u8 = 5;
 /// `--confirm` could not see the expected version running before the deadline.
 const EXIT_NOT_CONFIRMED: u8 = 4;
 
@@ -251,8 +256,11 @@ USAGE:
              [--state-dir DIR] [--target-dir DIR] [--url URL]
              [--expect VERSION] [--timeout SECS] [--rpc URL]
 
-  --check        fetch + verify the manifest, print current vs latest.
-                 Downloads nothing. Exit 3 when a newer release exists.
+  --check        fetch + verify the manifest, print current vs latest, and
+                 evaluate the whole install decision (policy, canary proof,
+                 retry backoff). Downloads nothing. Exit 3 when a newer
+                 release exists AND this node may install it; exit 5 when one
+                 exists but this node is held (row 278).
   --apply        download, verify, extract, flip `current`, copy the binaries
                  into the target dir, prune old versions. When a restart
                  command is configured it also restarts, CONFIRMS the running
@@ -277,7 +285,9 @@ USAGE:
 
 EXIT CODES: 0 up to date / applied / confirmed, 1 error, 2 manifest unreachable,
             3 newer verified release available (or not applied by policy),
-            4 --confirm did not see the expected version running
+            4 --confirm did not see the expected version running,
+            5 --check only: a newer release exists but this node is held
+              (policy, no canary proof, or retry backoff)
 
 ENV: GPN_AUTO_UPDATE=0 disables --apply.
      GPN_UPDATE_RESTART_CMD is run after a successful swap; when unset the
@@ -746,6 +756,16 @@ fn run_check(o: &Options, report: &mut Report) -> u8 {
     report.asset_size = Some(asset.size);
     report.asset_sha256 = Some(asset.sha256.clone());
 
+    // Row 278: answer "would `--apply` do anything right now?" here, not only in
+    // `--apply`. A held release has to be reportable WITHOUT stopping the node —
+    // the Windows wrapper reads this exit code before it touches the process
+    // tree, which is the whole point of the gate living in one function.
+    let held = if newer {
+        release_hold(o, report, &m, asset)
+    } else {
+        None
+    };
+
     if !o.quiet && !o.json {
         println!("gpn_update: manifest verified ({})", o.manifest_url);
         println!(
@@ -779,13 +799,28 @@ fn run_check(o: &Options, report: &mut Report) -> u8 {
             short(&asset.sha256)
         );
         if newer {
-            println!(
-                "  -> update available: {} (run `gpn_update --apply`)",
-                m.version
-            );
+            match &held {
+                Some(why) => println!("  -> update available {} but HELD here: {why}", m.version),
+                None => println!(
+                    "  -> update available: {} (run `gpn_update --apply`)",
+                    m.version
+                ),
+            }
         } else {
             println!("  -> up to date ({})", report.current);
         }
+    }
+
+    if let Some(msg) = held {
+        // Not an error: a newer release exists and this node deliberately does
+        // not install it yet. `EXIT_HELD` says which, so no caller has to parse
+        // prose to tell "install it" from "leave the node alone".
+        if o.json {
+            emit_json(report);
+        } else if !o.quiet {
+            eprintln!("gpn_update: {msg}");
+        }
+        return EXIT_HELD;
     }
     if o.json {
         emit_json(report);
@@ -892,6 +927,143 @@ fn guard_install(o: &Options, staged: &Path) -> Result<(), InstallFailure> {
     Ok(())
 }
 
+/// Everything that stands between "a newer release exists" and "we may touch
+/// the install": the `GPN_AUTO_UPDATE` policy, the row-275 canary proof, and
+/// the per-release retry backoff.
+///
+/// Row 278: `--check` runs exactly this too, so it can answer "would `--apply`
+/// do anything right now?". The Windows wrapper used to learn that answer only
+/// by stopping the node first (`taskkill /T /F` over the whole provider tree)
+/// and then reading `holding` out of `--apply` — so every pending release cost
+/// every non-canary node a full process-tree kill and restart, every check
+/// interval, for a decision that needs no file unlocked.
+///
+/// `Some(message)` = held: say this and stop. `None` = the install may
+/// proceed. The caller picks the exit code: `--apply` keeps its historical `3`
+/// ("a newer release exists, deliberately not applied"), `--check` answers
+/// `EXIT_HELD` so a wrapper can tell it apart from "go ahead".
+fn release_hold(
+    o: &Options,
+    report: &mut Report,
+    m: &update::ReleaseManifest,
+    asset: &update::ReleaseAsset,
+) -> Option<String> {
+    // Policy check before any download: GPN_AUTO_UPDATE=0 means "tell me, do
+    // not install". The manifest is already verified, so the exit code is a
+    // truthful "newer release exists, not applied".
+    if !update::auto_update_enabled(non_empty_env("GPN_AUTO_UPDATE").as_deref()) {
+        let msg = format!(
+            "{} is available, but GPN_AUTO_UPDATE=0 — refusing to install. \
+             Re-run with GPN_AUTO_UPDATE=1 (or unset) to apply.",
+            m.version
+        );
+        report.error = Some(msg.clone());
+        return Some(msg);
+    }
+
+    // Row 275: canary gate. A non-canary node does NOT install a release until a
+    // published proof says one node already ran it AND served a job on it. A
+    // missing or unreadable proof is a HOLD, not an error: the node stays healthy
+    // on its current version and retries on the next tick.
+    let canary = update::canary_mode(non_empty_env("GPN_CANARY").as_deref());
+    if !canary {
+        let url =
+            non_empty_env("GPN_CANARY_URL").unwrap_or_else(|| update::CANARY_STATE_URL.to_string());
+        let proof = match fetch(&url) {
+            Ok(body) => match update::parse_canary_state(&body) {
+                Ok(st) => Some(st),
+                Err(e) => {
+                    report.note = Some(format!("the canary proof at {url} is unreadable: {e}"));
+                    None
+                }
+            },
+            Err(e) => {
+                report.note = Some(format!(
+                    "no canary proof readable at {url}: {}",
+                    e.message()
+                ));
+                None
+            }
+        };
+        if let update::CanaryGate::Hold(why) =
+            update::canary_gate(proof.as_ref(), &m.version, false)
+        {
+            let msg = format!(
+                "{} is available, but this node is not the canary — {why}",
+                m.version
+            );
+            report.error = Some(msg.clone());
+            return Some(msg);
+        }
+    } else if !o.quiet && !o.json {
+        println!(
+            "  canary: this node installs {} first, before the rest of the fleet",
+            m.version
+        );
+    }
+
+    // #203: retry with backoff, forever. The old rule read the attempt by
+    // *boot* and stopped for the rest of that boot, which is how box 1 declined
+    // 0.3.51 and 0.3.52 and sat two releases behind. A failed attempt now sets
+    // `next_retry_at` (1 h, 2 h, then 4 h) and the next tick after that retries;
+    // there is no state in which the node stops trying.
+    if !o.force {
+        if let Some(prev) = update::attempt_for_version(&o.state_dir, &m.version) {
+            match update::retry_wait_secs(&prev, &asset.sha256, update::now_unix()) {
+                None => {
+                    if prev.outcome != update::OUTCOME_CONFIRMED
+                        && prev.outcome != update::OUTCOME_INSTALLED
+                    {
+                        // Blocking in principle, but for a *different build* of
+                        // the same version: the box is allowed to try the new
+                        // bytes. Say so, so the log answers "why did it retry
+                        // after a rollback?".
+                        let msg = format!(
+                            "{} was attempted earlier ({}) against a different build; this \
+                             release is a re-cut, so it is eligible again",
+                            m.version, prev.outcome
+                        );
+                        report.note = Some(msg.clone());
+                        if !o.quiet && !o.json {
+                            println!("  note: {msg}");
+                        }
+                    }
+                }
+                Some(wait) if wait > 0 => {
+                    let msg = update::declined_text(prev.next_retry_at, &prev.reason);
+                    report.attempt_blocked = Some(msg.clone());
+                    report.next_retry_at = Some(prev.next_retry_at);
+                    report.attempts = Some(prev.attempts.max(1));
+                    report.error = Some(msg.clone());
+                    return Some(msg);
+                }
+                Some(_) => {
+                    // Backoff elapsed: this is the retry. Log it as such — the
+                    // operator must be able to see the ladder working.
+                    let msg = format!(
+                        "retrying {} after a failed attempt ({}, attempt {}); last: {}",
+                        m.version,
+                        prev.outcome,
+                        prev.attempts.max(1).saturating_add(1),
+                        if prev.reason.trim().is_empty() {
+                            "no reason recorded"
+                        } else {
+                            prev.reason.trim()
+                        }
+                    );
+                    report.note = Some(msg.clone());
+                    if !o.quiet && !o.json {
+                        println!("  note: {msg}");
+                    }
+                    eprintln!("gpn_update: {msg}");
+                }
+            }
+        }
+    }
+
+    None
+}
+
 fn run_apply(o: &Options, report: &mut Report) -> u8 {
     // Same refusal as `--check`: an install decided against an unreadable
     // "current" cannot run the #148 guard, so it would be replacing a tree it
@@ -946,63 +1118,6 @@ fn run_apply(o: &Options, report: &mut Report) -> u8 {
         return EXIT_OK;
     }
 
-    // Policy check before any download: GPN_AUTO_UPDATE=0 means "tell me, do
-    // not install". The manifest is already verified, so `3` is a truthful
-    // "newer release exists, not applied".
-    if !update::auto_update_enabled(non_empty_env("GPN_AUTO_UPDATE").as_deref()) {
-        let msg = format!(
-            "{} is available, but GPN_AUTO_UPDATE=0 — refusing to install. \
-             Re-run with GPN_AUTO_UPDATE=1 (or unset) to apply.",
-            m.version
-        );
-        report.error = Some(msg.clone());
-        emit_error(o, report, &msg);
-        return EXIT_UPDATE_AVAILABLE;
-    }
-
-    // Row 275: canary gate. A non-canary node does NOT install a release until a
-    // published proof says one node already ran it AND served a job on it. A
-    // missing or unreadable proof is a HOLD, not an error: the node stays healthy
-    // on its current version and retries on the next tick. Exit `3` is the honest
-    // code — a newer release exists and was deliberately not applied.
-    let canary = update::canary_mode(non_empty_env("GPN_CANARY").as_deref());
-    if !canary {
-        let url =
-            non_empty_env("GPN_CANARY_URL").unwrap_or_else(|| update::CANARY_STATE_URL.to_string());
-        let proof = match fetch(&url) {
-            Ok(body) => match update::parse_canary_state(&body) {
-                Ok(st) => Some(st),
-                Err(e) => {
-                    report.note = Some(format!("the canary proof at {url} is unreadable: {e}"));
-                    None
-                }
-            },
-            Err(e) => {
-                report.note = Some(format!(
-                    "no canary proof readable at {url}: {}",
-                    e.message()
-                ));
-                None
-            }
-        };
-        if let update::CanaryGate::Hold(why) =
-            update::canary_gate(proof.as_ref(), &m.version, false)
-        {
-            let msg = format!(
-                "{} is available, but this node is not the canary — {why}",
-                m.version
-            );
-            report.error = Some(msg.clone());
-            emit_error(o, report, &msg);
-            return EXIT_UPDATE_AVAILABLE;
-        }
-    } else if !o.quiet && !o.json {
-        println!(
-            "  canary: this node installs {} first, before the rest of the fleet",
-            m.version
-        );
-    }
-
     let asset = match update::select_asset(&m, update::platform_os(), update::platform_arch()) {
         Ok(a) => a,
         Err(e) => {
@@ -1013,69 +1128,15 @@ fn run_apply(o: &Options, report: &mut Report) -> u8 {
         }
     };
 
-    // #203: retry with backoff, forever. The old rule read the attempt by
-    // *boot* and stopped for the rest of that boot, which is how box 1 declined
-    // 0.3.51 and 0.3.52 and sat two releases behind. A failed attempt now sets
-    // `next_retry_at` (1 h, 2 h, then 4 h) and the next tick after that retries;
-    // there is no state in which the node stops trying.
-    let boot = update::boot_id();
-    if !o.force {
-        if let Some(prev) = update::attempt_for_version(&o.state_dir, &m.version) {
-            match update::retry_wait_secs(&prev, &asset.sha256, update::now_unix()) {
-                None => {
-                    if prev.outcome != update::OUTCOME_CONFIRMED
-                        && prev.outcome != update::OUTCOME_INSTALLED
-                    {
-                        // Blocking in principle, but for a *different build* of
-                        // the same version: the box is allowed to try the new
-                        // bytes. Say so, so the log answers "why did it retry
-                        // after a rollback?".
-                        report.note = Some(format!(
-                            "{} was attempted earlier ({}) against a different build; this \
-                             release is a re-cut, so it is eligible again",
-                            m.version, prev.outcome
-                        ));
-                        if !o.quiet && !o.json {
-                            println!(
-                                "  note: {} rolled back earlier for a different build; this \
-                                 re-cut is eligible",
-                                m.version
-                            );
-                        }
-                    }
-                }
-                Some(wait) if wait > 0 => {
-                    let msg = update::declined_text(prev.next_retry_at, &prev.reason);
-                    report.attempt_blocked = Some(msg.clone());
-                    report.next_retry_at = Some(prev.next_retry_at);
-                    report.attempts = Some(prev.attempts.max(1));
-                    report.error = Some(msg.clone());
-                    emit_error(o, report, &msg);
-                    return EXIT_UPDATE_AVAILABLE;
-                }
-                Some(_) => {
-                    // Backoff elapsed: this is the retry. Log it as such — the
-                    // operator must be able to see the ladder working.
-                    let msg = format!(
-                        "retrying {} after a failed attempt ({}, attempt {}); last: {}",
-                        m.version,
-                        prev.outcome,
-                        prev.attempts.max(1).saturating_add(1),
-                        if prev.reason.trim().is_empty() {
-                            "no reason recorded"
-                        } else {
-                            prev.reason.trim()
-                        }
-                    );
-                    report.note = Some(msg.clone());
-                    if !o.quiet && !o.json {
-                        println!("  note: {msg}");
-                    }
-                    eprintln!("gpn_update: {msg}");
-                }
-            }
-        }
+    // Policy, canary proof and retry backoff in one place. `--check` runs the
+    // same gate, which is how the Windows wrapper learns "held" without
+    // stopping the node first (row 278).
+    if let Some(msg) = release_hold(o, report, &m, asset) {
+        emit_error(o, report, &msg);
+        return EXIT_UPDATE_AVAILABLE;
     }
+
+    let boot = update::boot_id();
 
     let bundle = update::is_bundle(asset);
     report.layout = Some(update::asset_layout(asset));

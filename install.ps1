@@ -1908,6 +1908,16 @@ try {
     Write-Log 'release manifest unreachable - will retry on the next cycle (node NOT restarted)'
     exit 0
   }
+  # Row 278: `--check` answers the whole decision, including the policy, canary
+  # and retry-backoff gates. `5` means the release is available and this node
+  # may not install it yet -- a decision that needs no file unlocked, so the
+  # node is NOT stopped (the hold reason is already in the `check:` lines above)
+  # and the next cycle asks again. Before this, every pending release cost every
+  # non-canary node a taskkill of the whole provider tree plus a restart, hourly.
+  if ($check -eq 5) {
+    Write-Log 'holding - the release is available but not installable on this node yet (node NOT restarted)'
+    exit 0
+  }
   if ($check -ne 3) {
     Show-UpdateFailure $check 'update check' 'the signed manifest was rejected or could not be read'
     exit 1

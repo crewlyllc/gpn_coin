@@ -345,6 +345,9 @@ fn check_newer_exits_3_and_downloads_nothing() {
         signed_manifest(NEW_VERSION, &bundle, &sk, &asset_url),
     );
     feed.add("/gpn-linux.tar.gz", bundle);
+    // Row 278: `--check` now answers the whole decision, so a proof must exist
+    // for the honest `3` ("install it") answer. The held answers are below.
+    feed.add("/canary.json", canary_proof(NEW_VERSION));
 
     let (code, out, err) = ctx.run(&["--check", "--json"], &[], &feed.url("/releases.json"));
     assert_eq!(code, 3, "stdout={out} stderr={err}");
@@ -354,9 +357,122 @@ fn check_newer_exits_3_and_downloads_nothing() {
     assert_eq!(v["update_available"], true);
     assert_eq!(
         feed.hits(),
-        vec!["/releases.json"],
+        vec!["/releases.json", "/canary.json"],
         "--check must never download the asset"
     );
+}
+
+/// Row 278: a release this node may not install yet is reported by `--check`
+/// itself (exit 5), so no wrapper has to stop the node to find out. Without a
+/// canary proof the same manifest that answered `3` above answers `5`.
+#[test]
+fn check_holds_exit_5_when_no_canary_proof_is_published() {
+    let ctx = Ctx::new("check-canary-missing");
+    ctx.seed_old();
+    let (sk, _) = test_key();
+    let bundle = make_bundle(NEW_VERSION);
+    let feed = Feed::start();
+    let asset_url = feed.url("/gpn-linux.tar.gz");
+    feed.add(
+        "/releases.json",
+        signed_manifest(NEW_VERSION, &bundle, &sk, &asset_url),
+    );
+    feed.add("/gpn-linux.tar.gz", bundle);
+
+    let (code, out, err) = ctx.run(&["--check"], &[], &feed.url("/releases.json"));
+    assert_eq!(
+        code, 5,
+        "a hold is neither 3 nor an error: stdout={out} stderr={err}"
+    );
+    assert!(
+        err.contains("not the canary") && err.contains("no canary proof published for"),
+        "stderr must carry the hold reason: {err}"
+    );
+    assert_eq!(feed.hit_count("/gpn-linux.tar.gz"), 0, "nothing downloaded");
+    assert!(
+        update::current_version_dir(&ctx.state).is_none(),
+        "a held check must not touch the install"
+    );
+}
+
+/// The policy lane is part of the same gate: `GPN_AUTO_UPDATE=0` is a hold, so
+/// the wrapper does not stop the node for a release it will refuse to install.
+#[test]
+fn check_holds_exit_5_when_auto_update_is_disabled() {
+    let ctx = Ctx::new("check-policy-hold");
+    ctx.seed_old();
+    let (sk, _) = test_key();
+    let bundle = make_bundle(NEW_VERSION);
+    let feed = Feed::start();
+    let asset_url = feed.url("/gpn-linux.tar.gz");
+    feed.add(
+        "/releases.json",
+        signed_manifest(NEW_VERSION, &bundle, &sk, &asset_url),
+    );
+    feed.add("/gpn-linux.tar.gz", bundle);
+    feed.add("/canary.json", canary_proof(NEW_VERSION));
+
+    let (code, out, err) = ctx.run(
+        &["--check"],
+        &[("GPN_AUTO_UPDATE", "0")],
+        &feed.url("/releases.json"),
+    );
+    assert_eq!(code, 5, "stdout={out} stderr={err}");
+    assert!(err.contains("GPN_AUTO_UPDATE=0"), "stderr={err}");
+    assert_eq!(feed.hit_count("/gpn-linux.tar.gz"), 0, "nothing downloaded");
+    assert!(update::current_version_dir(&ctx.state).is_none());
+}
+
+/// A proof for a *different* version is no proof — `--check` says so too.
+#[test]
+fn check_holds_exit_5_when_the_proof_is_for_another_version() {
+    let ctx = Ctx::new("check-canary-other");
+    ctx.seed_old();
+    let (sk, _) = test_key();
+    let bundle = make_bundle(NEW_VERSION);
+    let feed = Feed::start();
+    let asset_url = feed.url("/gpn-linux.tar.gz");
+    feed.add(
+        "/releases.json",
+        signed_manifest(NEW_VERSION, &bundle, &sk, &asset_url),
+    );
+    feed.add("/gpn-linux.tar.gz", bundle);
+    feed.add("/canary.json", canary_proof("8.8.8"));
+
+    let (code, out, err) = ctx.run(&["--check"], &[], &feed.url("/releases.json"));
+    assert_eq!(code, 5, "stdout={out} stderr={err}");
+    assert!(err.contains("is for 8.8.8 not 9.9.9"), "stderr={err}");
+    assert_eq!(feed.hit_count("/gpn-linux.tar.gz"), 0);
+}
+
+/// The canary itself is not held: it must be able to install first.
+#[test]
+fn check_canary_itself_is_not_held() {
+    let ctx = Ctx::new("check-canary-self");
+    ctx.seed_old();
+    let (sk, _) = test_key();
+    let bundle = make_bundle(NEW_VERSION);
+    let feed = Feed::start();
+    let asset_url = feed.url("/gpn-linux.tar.gz");
+    feed.add(
+        "/releases.json",
+        signed_manifest(NEW_VERSION, &bundle, &sk, &asset_url),
+    );
+    feed.add("/gpn-linux.tar.gz", bundle);
+
+    let (code, out, err) = ctx.run(
+        &["--check"],
+        &[
+            ("GPN_CANARY", "1"),
+            ("GPN_CANARY_URL", "http://127.0.0.1:1/canary.json"),
+        ],
+        &feed.url("/releases.json"),
+    );
+    assert_eq!(
+        code, 3,
+        "the canary installs first: stdout={out} stderr={err}"
+    );
+    assert_eq!(feed.hit_count("/gpn-linux.tar.gz"), 0);
 }
 
 #[test]

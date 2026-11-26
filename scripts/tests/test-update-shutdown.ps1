@@ -116,6 +116,23 @@ Ok 'J the notes are logged' ($notesAt -gt 0) 'notes logging missing'
 Ok 'J notes are logged before the deferral branch' ($notesAt -gt 0 -and $notesAt -lt $branchStart) ("notes=" + $notesAt + " branch=" + $branchStart)
 Ok 'J the notes log does not defer' (-not $body.Substring($notesAt, [Math]::Max(0, $branchStart - $notesAt)).Contains('exit 75')) 'exit 75 between notes and branch'
 
+# ---- K: a held release never stops the node (row 278) --------------------
+# The gate (policy, canary proof, retry backoff) is answered by `--check` itself,
+# which exits 5 for "available but not installable here". That branch must exit
+# before anything touches the process tree: three consecutive hourly checks on
+# box 1 (2026-11-25 20:58-21:13) each stopped the whole provider tree and
+# restarted it only to read `holding` afterwards.
+$holdAt = $body.IndexOf('if ($check -eq 5) {')
+Ok 'K the check-5 hold branch exists' ($holdAt -gt 0) 'missing'
+$holdEnd = if ($holdAt -ge 0) { $body.IndexOf(("`n" + '  if ($check -ne 3) {'), $holdAt) } else { -1 }
+Ok 'K the hold branch is closed before the next check' ($holdEnd -gt $holdAt) 'unterminated'
+$hold = if ($holdEnd -gt $holdAt) { $body.Substring($holdAt, $holdEnd - $holdAt) } else { '' }
+Ok 'K it logs that the node was not restarted' ($hold.Contains('node NOT restarted')) 'reassurance missing'
+Ok 'K it exits 0 (a hold is not a failure)' ($hold.Contains('exit 0')) 'wrong exit code'
+Ok 'K it does not stop the node' (-not $hold.Contains('Stop-NodeTree')) 'stop inside the branch'
+Ok 'K it does not install anything' (-not $hold.Contains('--apply')) 'apply inside the branch'
+Ok 'K it runs before the stop line' ($holdAt -gt 0 -and $holdAt -lt $stopAt) ("hold=" + $holdAt + " stop=" + $stopAt)
+
 # ---- the extracted code stays pure ASCII (Windows PowerShell 5.1 decoding) --
 $nonAscii = 0
 foreach ($ch in $body.ToCharArray()) { if ([int]$ch -gt 127) { $nonAscii++ } }

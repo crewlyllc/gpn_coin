@@ -1,3 +1,39 @@
+## 23:3x PT — row 278 source complete: the Windows updater asks the gate before it kills the node
+
+**A0 (CI).** `fetch && reset --hard origin/main` ⇒ HEAD `3ec1a89` (loop-log docs commit). Run `45774396984`
+(row 279's `2f863ada`) `in_progress`: `secret-scan` and `fmt + clippy` **success**, linux + windows build jobs
+still running. Not waited on, per the rule; nothing red.
+
+**Why this box.** No open checklist (0.3.80 archived; only 273 soak and 177 AWAITING-OWNER remain), NEW rows stand
+at 3 of 5 (256, 278, 279) so no version is opened, and 273 cannot advance tonight (soak timer fires 09:11 PST).
+Per the batch rule the run took source work on the next queued NEW row: 278.
+
+**Row 278 — a held update cost every non-canary node a full provider-tree kill, hourly.** The gate
+(`GPN_AUTO_UPDATE` policy, row-275 canary proof, #203 retry backoff) lived only inside `--apply`, so the Windows
+wrapper had to stop the node first and read `holding` afterwards — which is exactly what box 1 logged at
+20:58/21:00/21:13 on 2026-11-25.
+
+- `gpn-agent/src/bin/gpn_update.rs`: the three checks moved into one `release_hold() -> Option<String>`, called by
+  **both** `run_apply` (unchanged exit `3` on a hold) and `run_check`. `--check` gains exit **`5`** = "a newer
+  release exists but this node is held"; `3` keeps its meaning ("install it"). Help text + EXIT CODES updated.
+- `install.ps1` update wrapper: `if ($check -eq 5)` branch added *before* the stop line — logs
+  `holding - the release is available but not installable on this node yet (node NOT restarted)`, `exit 0`.
+  No `Stop-NodeTree`, no `taskkill`, no `--apply`.
+- Tests, run and pasted: `cargo test --test gpn_update_cli` ⇒ **31 passed / 0 failed**, 4 new
+  (`check_holds_exit_5_when_no_canary_proof_is_published`, `..._when_auto_update_is_disabled`,
+  `..._when_the_proof_is_for_another_version`, `check_canary_itself_is_not_held`) — each asserts nothing downloaded,
+  no `current` flip, exit 5; `scripts/tests/test-update-shutdown.ps1` ⇒ **RESULT: PASS (all checks)**, new section K
+  proves the branch exists, exits 0, contains no `Stop-NodeTree` / `--apply`, and sits before the stop line;
+  `cargo fmt --check` clean; `cargo clippy --release --all-targets` with CI's documented allow-list `-D warnings` clean.
+
+**Still open on the row:** the live half — one real Windows check cycle logging `holding` with no `taskkill` line —
+needs a build containing this change (0.3.81). Source-side, the branch that would have killed the tree is gone.
+
+**Boxes ticked:** none — row 278 stays NEW until it ships in a version with a fully ticked checklist.
+**Blockers / [TRIAGE]:** none.
+**Next run:** ask once for 45774396984's conclusion (and this commit's run); then row 256 (stranger lifecycle on
+GPN-209 — it is work, not a decision, per the 2026-11-25 correction).
+
 ## 23:2x PT — row 279 (spec floor) source complete: network.json 54 → 55 and the guard can no longer pass a divergence
 
 **A0 (CI).** `fetch && reset --hard origin/main` ⇒ HEAD `d35c0a34` (loop-log docs commit); `GET /actions/runs?head_sha=d35c0a34…`
