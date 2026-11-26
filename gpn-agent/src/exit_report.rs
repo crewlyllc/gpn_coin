@@ -229,6 +229,21 @@ pub fn default_path() -> PathBuf {
             return PathBuf::from(p);
         }
     }
+    // Row 282: a **unit test** must never append to the operator's real exit log.
+    // Measured 2026-11-26: every `cargo test --lib` appended three fake
+    // `corrupt-key` records to `~/.gpn/last-exit.json` (keystore-validation
+    // tests in `firstrun::tests` go through `provision_wallet`, which records
+    // here) — and the updater *reads* that file to classify a failed start, so
+    // a test run could be quoted as the reason a real update rolled back. Same
+    // class as row 281, which only fixed the shell script. `cfg!(test)` is true
+    // only for in-crate unit/bin tests; integration tests (`tests/`, which spawn
+    // the real binary) must set `GPN_EXIT_LOG` themselves.
+    if cfg!(test) {
+        return std::env::temp_dir().join(format!(
+            "gpn-test-last-exit-{}.json",
+            std::process::id()
+        ));
+    }
     let home = std::env::var("USERPROFILE")
         .or_else(|_| std::env::var("HOME"))
         .unwrap_or_else(|_| ".".to_string());
@@ -603,6 +618,26 @@ pub fn rfc3339(secs: u64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Row 282: the default path under `cargo test` must never be the operator's
+    /// live `~/.gpn/last-exit.json` — a test that exercises a failed start would
+    /// otherwise write a record the updater reads as a real one.
+    #[test]
+    fn default_path_never_points_at_the_real_prefix_under_cargo_test() {
+        let p = default_path();
+        let s = p.to_string_lossy().to_string();
+        let home_suffix = "/.gpn/last-exit.json";
+        assert!(
+            !s.ends_with(home_suffix),
+            "cargo test must not write the operator's exit log, got {s}"
+        );
+        assert!(
+            p.starts_with(std::env::temp_dir()),
+            "expected a temp path, got {s}"
+        );
+        // And it is per-process, so two concurrent test binaries cannot collide.
+        assert!(s.contains(&std::process::id().to_string()), "got {s}");
+    }
 
     fn report(kind: ExitKind, ts_unix: u64) -> Report {
         Report {

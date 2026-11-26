@@ -1,3 +1,33 @@
+## 01:5x PT — exit-log leak: the class row 281 fixed for the script was still open for `cargo test`; soak day 2 refreshed
+
+**A0:** `origin/main` HEAD `0ce61ee8` (a docs/soak+log commit) ⇒ `GET /actions/runs?head_sha=` returns **0 runs** —
+`paths-ignore` correct. Nothing to act on, nothing waited on.
+
+**Row 273 (only IN-PROGRESS row, soak day 2/7).** Day 3 is not due until the `gpn-soak-record.timer` fire at
+**09:11:36 PT** (verified `systemctl --user list-timers`: NEXT = 09:11:36 PST, LAST = `-` — its first scheduled fire),
+so this pass refreshed day 2 rather than opening a day: `height 366763`, effective interval **15.06 s** (88 blocks /
+0.37 h) vs the 13.4 s baseline, p50 **12.75 s** / p95 49.38 s over the last 200 blocks, peers 3, 0 lines at 0 peers,
+imports 3810/24 h with the longest gap 144 s, `NRestarts=0`, 0 `Reason:`/ban lines, gate-6 strings all 0, jobs
+256 attempted / 228 succeeded / 12 failed, box 1 **peers=2 syncing=False** answering `0.3.80`. Live spot check:
+#366756 → #366763 in ~3 min; `system_version` ⇒ `0.3.80`, spec 55, canary `0.3.80 ok:true job 6595`.
+
+**Found and fixed (row 282, hardening — not counted in the batch of five).** The soak's `node exit report` line was
+quoting a **fake** record: `~/.gpn/last-exit.json` held **32 records written by test runs** between
+2026-11-25T15:33Z and 2026-11-26T08:03:49Z, three per run every ~90 min (`keystore … EOF while parsing a string at
+line 1 column 17`, `'nonsense' is not a valid SS58 account`, `invalid signer URI: InvalidPhrase`). Row 281 fixed the
+script (`scripts/tests/test-wallet-provision.sh` now exports `GPN_EXIT_LOG`) at 00:18:58 PT = 08:18:58Z, and **no
+record has appeared since** — but `exit_report::default_path()` still fell back to the live path for any *in-process*
+unit/bin test, which is how the class recurred twice. Fix: under `cfg!(test)` it returns
+`$TMP/gpn-test-last-exit-<pid>.json`. Evidence: the new test
+`default_path_never_points_at_the_real_prefix_under_cargo_test` **fails with the guard removed and passes with it**;
+`cargo test --lib` ⇒ **808 passed / 0 failed**; the real log stayed at **32 lines / md5 `5eae314b…`** across two full
+lib runs (one of them deliberately with the guard disabled); `cargo clippy --all-targets` with CI's own allow-list ⇒
+clean. **Honest scope:** no in-crate test writes the exit log today, so this is an invariant guard against a
+twice-recurred class, not a live-bug fix.
+
+**Batch:** 278, 279 still NEW and green from the previous pass; 282 is hardening and is **not** counted, so the batch
+is **2 of 5** — no version opened, nothing bundled. No [TRIAGE] item.
+
 ## 01:2x PT — row 273 day 2 re-recorded (height 366675, box 1 caught up); both queued fixes re-verified green; no version
 
 **A0:** `origin/main` HEAD `28de197d` (row 281's `soak-record.py` change, a code commit) has run **45788172599**,
