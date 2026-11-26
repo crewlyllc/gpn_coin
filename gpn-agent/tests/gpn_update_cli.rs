@@ -286,9 +286,15 @@ impl Ctx {
         url: &str,
         declare_test_node: bool,
     ) -> (i32, String, String) {
+        // The canary proof lives beside the manifest on the same fixture server.
+        let canary_url = url
+            .rsplit_once('/')
+            .map(|(base, _)| format!("{base}/canary.json"))
+            .unwrap_or_else(|| url.to_string());
         let mut cmd = std::process::Command::new(BIN);
         cmd.args(args)
             .env("GPN_UPDATE_URL", url)
+            .env("GPN_CANARY_URL", &canary_url)
             .env("GPN_UPDATE_PUBKEY", test_key().1)
             .env("GPN_UPDATE_DIR", &self.state)
             .env("GPN_UPDATE_TARGET_DIR", &self.target)
@@ -306,6 +312,7 @@ impl Ctx {
             )
             // Never inherit a policy/restart setting from the developer's shell.
             .env_remove("GPN_AUTO_UPDATE")
+            .env_remove("GPN_CANARY")
             .env_remove("GPN_UPDATE_RESTART_CMD")
             .env_remove("GPN_PREFIX")
             .env_remove("GPN_UPDATE_TEST_FAIL_AFTER_COPIES");
@@ -423,6 +430,20 @@ fn check_bad_signature_exits_1_and_downloads_nothing() {
 // --apply
 // ─────────────────────────────────────────────────────────────────────────────
 
+/// A published canary proof for `version` that a non-canary node may act on
+/// (row 275: the gate refuses to install anything a canary has not proven).
+fn canary_proof(version: &str) -> Vec<u8> {
+    serde_json::to_vec(&serde_json::json!({
+        "version": version,
+        "ok": true,
+        "job_served": true,
+        "confirmed_at": 1_760_000_000u64,
+        "failed_at": 0u64,
+        "reason": "",
+    }))
+    .unwrap()
+}
+
 fn apply_feed() -> (Feed, Vec<u8>) {
     let (sk, _) = test_key();
     let bundle = make_bundle(NEW_VERSION);
@@ -433,6 +454,10 @@ fn apply_feed() -> (Feed, Vec<u8>) {
         signed_manifest(NEW_VERSION, &bundle, &sk, &asset_url),
     );
     feed.add("/gpn-linux.tar.gz", bundle.clone());
+    // `--apply` is gated on a published canary proof; every apply fixture
+    // starts from the state a healthy fleet is in once one node has proven the
+    // release. The hold itself is tested separately, below.
+    feed.add("/canary.json", canary_proof(NEW_VERSION));
     (feed, bundle)
 }
 
@@ -493,11 +518,12 @@ fn apply_installs_bundle_flips_current_and_prunes() {
         stale.display()
     );
 
-    // 5. The whole bundle was downloaded exactly once.
+    // 5. The whole bundle was downloaded exactly once. The canary proof is
+    //    fetched between the manifest and the asset (row 275's gate).
     assert_eq!(
         feed.hits(),
-        vec!["/releases.json", "/gpn-linux.tar.gz"],
-        "one manifest fetch and one download"
+        vec!["/releases.json", "/canary.json", "/gpn-linux.tar.gz"],
+        "one manifest fetch, one canary check and one download"
     );
 }
 
@@ -542,7 +568,13 @@ fn apply_mid_copy_failure_leaves_the_old_supervisor_intact() {
     );
     assert_eq!(
         feed.hits(),
-        vec!["/releases.json", "/gpn-linux.tar.gz", "/releases.json"],
+        vec![
+            "/releases.json",
+            "/canary.json",
+            "/gpn-linux.tar.gz",
+            "/releases.json",
+            "/canary.json"
+        ],
         "the retry must not download the bundle twice"
     );
 }
@@ -660,6 +692,84 @@ fn apply_refuses_a_downgrade() {
     assert!(err.contains("downgrade"), "stderr={err}");
     assert!(err.contains("gpn_scheduler"), "names the file: {err}");
     assert!(update::current_version_dir(&ctx.state).is_none());
+}
+
+// -----------------------------------------------------------------------------
+// Canary gate (row 275)
+// -----------------------------------------------------------------------------
+
+// `--apply` is gated on a published proof that one node already ran the
+// release and served a job on it. These three tests pin the gate from the
+// binary's side: held without a proof, held on a proof for another version,
+// and the canary itself installing first.
+
+/// No published proof (the fleet's state before any node has run the release)
+/// => the node stays on its current version and says why, exit 3.
+#[test]
+fn apply_holds_when_no_canary_proof_is_published() {
+    let ctx = Ctx::new("apply-canary-missing");
+    ctx.seed_old();
+    let (feed, _bundle) = apply_feed();
+    let (code, out, err) = ctx.run(
+        &["--apply"],
+        // Nothing listens on port 1: the proof is unreadable, not absent-but-ok.
+        &[("GPN_CANARY_URL", "http://127.0.0.1:1/canary.json")],
+        &feed.url("/releases.json"),
+    );
+    assert_eq!(code, 3, "a hold is not an error: stdout={out} stderr={err}");
+    assert!(
+        err.contains("not the canary") && err.contains("no canary proof published for"),
+        "stderr must say the node is held for want of a proof: {err}"
+    );
+    assert_eq!(feed.hit_count("/gpn-linux.tar.gz"), 0, "nothing downloaded");
+    assert!(
+        update::current_version_dir(&ctx.state).is_none(),
+        "a held node must not flip `current`"
+    );
+}
+
+/// A proof for a *different* version is no proof: the fleet stays put.
+#[test]
+fn apply_holds_when_the_canary_proof_is_for_another_version() {
+    let ctx = Ctx::new("apply-canary-other");
+    ctx.seed_old();
+    let (feed, _bundle) = apply_feed();
+    feed.add("/canary.json", canary_proof("8.8.8"));
+    let (code, out, err) = ctx.run(&["--apply"], &[], &feed.url("/releases.json"));
+    assert_eq!(code, 3, "stdout={out} stderr={err}");
+    assert!(
+        err.contains("is for 8.8.8 not 9.9.9"),
+        "stderr must name both versions: {err}"
+    );
+    assert_eq!(feed.hit_count("/gpn-linux.tar.gz"), 0, "nothing downloaded");
+    assert!(update::current_version_dir(&ctx.state).is_none());
+}
+
+/// The canary itself installs first, before any proof exists - that is how the
+/// first proof ever gets produced.
+#[test]
+fn apply_canary_installs_without_waiting_for_a_proof() {
+    let ctx = Ctx::new("apply-canary-self");
+    ctx.seed_old();
+    let (feed, _bundle) = apply_feed();
+    let (code, out, err) = ctx.run(
+        &["--apply"],
+        &[
+            ("GPN_CANARY", "1"),
+            ("GPN_CANARY_URL", "http://127.0.0.1:1/canary.json"),
+        ],
+        &feed.url("/releases.json"),
+    );
+    assert_eq!(code, 0, "stdout={out} stderr={err}");
+    assert!(
+        out.contains("canary: this node installs 9.9.9 first"),
+        "stdout must say the node is the canary: {out}"
+    );
+    let supervisor = std::fs::read_to_string(ctx.target.join("gpn_node")).unwrap();
+    assert!(
+        supervisor.contains(&format!("gpn-build-v1 version={NEW_VERSION}")),
+        "{supervisor}"
+    );
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
