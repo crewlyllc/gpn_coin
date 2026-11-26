@@ -1,3 +1,27 @@
+## 21:45 PT — 0.3.80 §7b ticked (n/a, proven): no capability in this bundle, and the live ones still answer
+
+**A0 (CI).** `reset --hard origin/main` ⇒ HEAD `8eb6d932` (list rows 278/279). Full-40-char run query
+(`?head_sha=8eb6d932…`) ⇒ `total_count: 0` — the correct answer for a list/docs SHA, `ci.yml` paths-ignore.
+Nothing red, nothing waiting.
+
+**Box worked: §7b "every capability added in this bundle is discoverable from gpncoin.ai".** Ticked as
+**n/a with evidence**, not waved past: the five rows in 0.3.80 (277 lock, 273 soak, 274 telemetry, 275 canary
+gate, 276 alarms) are operator-side, and that was checked against the commits' own file lists —
+`git show --stat 4c1ed61e` ⇒ updater/canary files only; `07be732c` ⇒ `scripts/incident-alarm.py` + units.
+No chat/image/audio/fine-tune surface is touched, so no site page is owed.
+
+**Live surfaces polled anyway, because a dead redirect is the same defect.** `curl -sL` ⇒
+`/ai-inference` 200 / 32,446 B, `/chat` 200 / 6,259 B, `/ai` 200 / 102,514 B (bare `.html` 301s to the
+extension-less path — normal for the site). And the documented chat example still runs on the 0.3.80 AP:
+`POST :8092/v1/chat/completions` (`llama3.2:1b`) ⇒ `finish_reason: stop`, real settled job
+`1795671430654`, `payment: channel`, charge 24,782,121 — not a canned reply.
+
+**Still open on 0.3.80.** §10 row-DONE mark (887), §10b timing (893/897), §0b filing (117/118 — archive +
+INDEX row, doable only once the rest is ticked), §0e stranger lifecycle (177 — no clean Windows GPU guest;
+venue tracked as triage 256, recorded not claimed), row 273 soak (day 1 of 7, ticks 2026-12-02).
+
+No [TRIAGE] items this pass.
+
 ## 21:22 PT — 0.3.80 is LIVE ON TWO NODES: canary gate opened and proven, box 1 auto-updated to 0.3.80
 
 **What closed.** §5/§6/§7/§7b were ticked in the 20:58 entry. This pass closed §9 (4/4) and 2 of 3 of §10.
