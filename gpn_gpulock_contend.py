@@ -1,5 +1,5 @@
 import sys, json, threading, time, urllib.request
-sys.path.insert(0, "/home/jeremyg/.openclaw/workspace/projectmanager07")
+sys.path.insert(0, "/home/jeremyg/gpn-loop")
 from gpn_gpulock_live import chat, image, norm, AP
 
 def infer(max_tokens=3000, prompt="Write an extremely long, detailed 1500 word story about a lighthouse keeper and every ship he saw."):

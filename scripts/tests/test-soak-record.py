@@ -106,6 +106,29 @@ eq([doc5.index(f"### Day {n}") for n in (1, 2, 3)] ==
    sorted(doc5.index(f"### Day {n}") for n in (1, 2, 3)), True, "three days in ascending order")
 eq(doc5.count("### Day"), 3, "exactly three day sections")
 
+# ---- restart audit: planned stops vs a node that died on its own -------------
+# Real shapes, taken from the journal on 2026-11-26 (3 days, 13 events, 12 preceded by
+# systemd's Stopping line). A restart column that cannot tell these apart reads every
+# stop as a choice and hides a crash.
+planned = [
+    "2026-11-25 02:57:19 \U0001f4a4 Idle (3 peers), best: #361471",
+    "Stopping gpn-fleet.service - GPN fleet supervisor (node on the directive's target network)...",
+    "2026-11-25 02:57:19 Essential task `txpool-background` failed. Shutting down service.",
+]
+eq(sr.restart_audit(planned), (1, 1, 0), "a systemd stop is planned, not a crash")
+
+eq(sr.restart_audit(["2026-11-25 03:18:48 peer 12D3KooWP1 best=#361540 vs ours #361540",
+                     "2026-11-25 03:18:48 Essential task `txpool-background` failed. Shutting down service."]),
+   (1, 0, 1), "a termination with no Stopping line is unexplained — counted, not assumed away")
+
+eq(sr.restart_audit([]), (0, 0, 0), "no journal is zero of everything, not a false clean")
+eq(sr.restart_audit(["Stopping gpn-fleet.service ..."]), (0, 0, 0),
+   "a stop with no termination line is not a termination")
+# the two-line window is the measured one (every planned event sat 1-2 lines after the stop)
+eq(sr.restart_audit(["Stopping gpn-fleet.service ...", "a", "b",
+                     "Essential task `txpool-background` failed. Shutting down service."]),
+   (1, 0, 1), "a stop 4 lines earlier is outside the measured window")
+
 # ---- per-node telemetry (row 274) -------------------------------------------
 # The audit must be able to TREND, not just print prose: one small JSON per node
 # per day, and a report that flags a metric moving >25% week over week.

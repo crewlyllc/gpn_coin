@@ -322,6 +322,30 @@ def summarise_update_lines(lines):
     return fires, own
 
 
+def restart_audit(lines):
+    """(terminations, planned, unexplained) from a journal extract, in order.
+
+    A *termination* is the node's own `Essential task `<name>` failed. Shutting down service.`
+    line. It is counted PLANNED when systemd's `Stopping gpn-fleet.service` line appears in the
+    two lines before it: systemd stops the unit first and the node's txpool background task then
+    ends with `revalidation_queue::revalidate_view: ... error=Closed(..)`.
+
+    Measured 2026-11-26 over 3 days: 13 terminations, 12 carrying the preceding stop (the 13th
+    was an updater apply, which signals the node directly so journal ordering can put the node's
+    line first). Without this split the day line could only say "starts/stops happened", which
+    reads as restarts by choice and hides a node that died on its own. The unexplained count is
+    what the stability gate must read, so it is counted, never assumed away.
+    """
+    terminations = planned = 0
+    for i, line in enumerate(lines):
+        if "Essential task `" in line and "failed" in line:
+            terminations += 1
+            window = lines[max(0, i - 2):i]
+            if any("Stopping gpn-fleet.service" in w for w in window):
+                planned += 1
+    return terminations, planned, terminations - planned
+
+
 def newest_exit_record(path=None):
     """The newest record in the JSONL exit log, as (age_hours, record), or None."""
     path = path or EXIT_LOG
@@ -632,6 +656,12 @@ def main():
     if n_imports:
         lines.append(f"- imports in 24 h: **{n_imports}** blocks, longest gap between imports "
                      f"**{worst_gap:.0f} s** (ending {gap_at})")
+    term = journal(since, grep=r"Stopping |Started |Essential task")
+    n_term, n_planned, n_unexplained = restart_audit(term.splitlines())
+    lines.append(f"- node terminations in 24 h: **{n_term}** "
+                 f"({n_planned} immediately preceded by a systemd `Stopping`, "
+                 f"**{n_unexplained} unexplained**) — an unexplained count above 0 is a node that "
+                 f"died on its own and must be root-caused before the gate is called green")
     lines.append(f"- gpn-fleet.service: NRestarts={props.get('NRestarts','?')}, "
                  f"state={props.get('SubState','?')}, active since {props.get('ActiveEnterTimestamp','?')}, "
                  f"**{n_start} systemd starts / {n_stop} stops in 24 h** "

@@ -1,3 +1,41 @@
+## 02:4x PT — the soak's restart column could not tell a planned stop from a crash; it can now; 3 stale clone paths fixed; no version
+
+**A0:** `origin/main` HEAD `71686376` (soak/log docs) ⇒ `?head_sha=` **0 runs** (paths-ignore correct). The code run
+**45795600763** (`489bbec9`, "fix(282): a unit test must never append to the operator's exit log") is still
+`in_progress` (created 09:49:49Z, `DESKTOP-USBUADL` `busy=true`) — **no conclusion, nothing acted on, nothing waited on.**
+Next pass reads its conclusion; a `failure` there is the box.
+
+**Row 273 (only IN-PROGRESS row, soak day 2/7).** Day 3 is not due (`gpn-soak-record.timer` NEXT 09:11:36 PST, never
+fired yet), so this pass went at the *evidence quality* of the uptime column instead of re-reading the same numbers:
+
+- **What the journal actually says.** 13 `Essential task `txpool-background` failed. Shutting down service.` lines in 3 days
+  (2026-11-23 15:37 → 2026-11-25 21:05). For **12 of 13**, systemd's `Stopping gpn-fleet.service` sits 1–2 lines *before* the
+  node's line: the node is being stopped and its fork-aware txpool background task then ends
+  (`revalidation_queue::revalidate_view: Failed to update background worker error=Closed(..)`). The 13th (21:05:49) is the
+  0.3.80 apply — `gpn_update` signalled the node directly, so journal ordering puts the node's line first. **Read the SDK
+  instead of guessing:** `task_manager/mod.rs:283` wraps the essential task in `catch_unwind` and logs this text on *both*
+  `Ok(())` and `Err(_)`, and `fork_aware_txpool.rs:460-464` is a 5-way `tokio::select!` where any one subtask ending takes
+  the node down — so the message is not evidence of a panic, and was never evidence of a crash.
+- **The gap that mattered:** the day line counted `NRestarts` (0 — counts only *failed* units) plus starts/stops, so a node
+  that died on its own and a planned deploy restart read the same. Fixed in `scripts/soak-record.py`:
+  `restart_audit()` is classified from the journal *in order* and the day section now prints
+  `node terminations in 24 h: N (planned, unexplained)`.
+- Refreshed day 2 → height **366977**, effective **10.04 s** (139 blocks / 0.39 h), p50 **7.46 s** / p95 38.84 s, peers 3,
+  0 lines at 0 peers, imports 3,856/24 h longest gap 144 s, 0 bans, gate-6 strings 0, jobs 256/228/12, box 1 peers=2
+  height 366978. New line: **2 terminations (1 planned, 1 unexplained)** — the unexplained one is the 0.3.80 apply above.
+- Tests: `scripts/tests/test-soak-record.py` ⇒ **82 checks passed, 0 failed** (6 new checks: planned stop, bare termination,
+  empty journal, stop without termination, the measured 2-line window, and the ordering that makes them differ).
+
+**Row 283 (new, fixed on main, NEW — rides the next bundle).** Three shipped files still pointed at
+`~/.openclaw/workspace/projectmanager07`, the clone deleted on 2026-11-24: the `gpn-cadence-gate.service` template, which
+only runs on this host because of a hand-written `10-repo-path.conf` drop-in (a re-install would restore a
+`status=200/CHDIR` unit — the failure `gpn-oracle.service`'s drop-in records as 1,343 restarts); `build-spec42-wasm.sh`;
+and `gpn_gpulock_contend.py`'s `sys.path`. Fixed to `%h/gpn-loop` / `${GPN_REPO:-$HOME/gpn-loop}` / the clone path.
+Verified: `systemd-analyze verify --user` rc 0, `bash -n` ok, `py_compile` ok, `gpn_gpulock_live` imports.
+
+**Batch:** 278, 279 green, 283 new and fixed — **3 counted** (282 is hardening, still not counted). **No version opened,
+nothing bundled.** No [TRIAGE] item; 256 remains AWAITING-OWNER in `docs/NEEDS-TRIAGE.md`.
+
 ## 02:0x PT — soak day 2 refreshed on a fresh tree (14.57 s effective, box 1 level); CI for fix(282) still queued; no version
 
 **A0:** `origin/main` HEAD `489bbec9` ("fix(282): a unit test must never append to the operator's exit log") has run

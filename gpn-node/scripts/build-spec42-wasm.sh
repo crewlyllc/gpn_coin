@@ -4,7 +4,7 @@
 # when it exists, so it is moved aside for the duration of the build and
 # restored (hash-verified) no matter what happens.
 set -euo pipefail
-cd /home/jeremyg/.openclaw/workspace/projectmanager07/gpn-node
+cd "${GPN_REPO:-$HOME/gpn-loop}/gpn-node"
 
 CANON=runtime/gpn_runtime.compact.compressed.wasm
 BAK=/tmp/gpn_canonical_$(date +%s).wasm

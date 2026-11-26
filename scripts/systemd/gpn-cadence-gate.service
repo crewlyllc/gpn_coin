@@ -3,7 +3,11 @@ Description=GPN cadence gate (rows 217/218) — 100-block inter-block gap accept
 
 [Service]
 Type=oneshot
-WorkingDirectory=/home/jeremyg/.openclaw/workspace/projectmanager07
-ExecStart=/bin/bash /home/jeremyg/.openclaw/workspace/projectmanager07/scripts/cadence-gate-watch.sh
+# %h/gpn-loop is the single working clone (owner decision 2026-11-24); the old
+# ~/.openclaw/workspace/projectmanager07 path was deleted and made this unit fail with
+# status=200/CHDIR on every run. Live installs also carry a 10-repo-path.conf drop-in;
+# this template is what a re-install writes, so it must not point at a dead directory.
+WorkingDirectory=%h/gpn-loop
+ExecStart=/bin/bash %h/gpn-loop/scripts/cadence-gate-watch.sh
 # result persisted to ~/.gpn/cadence-gate.state (+ raw sample); no alerting here
 Nice=10
