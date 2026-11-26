@@ -239,10 +239,8 @@ pub fn default_path() -> PathBuf {
     // only for in-crate unit/bin tests; integration tests (`tests/`, which spawn
     // the real binary) must set `GPN_EXIT_LOG` themselves.
     if cfg!(test) {
-        return std::env::temp_dir().join(format!(
-            "gpn-test-last-exit-{}.json",
-            std::process::id()
-        ));
+        return std::env::temp_dir()
+            .join(format!("gpn-test-last-exit-{}.json", std::process::id()));
     }
     let home = std::env::var("USERPROFILE")
         .or_else(|_| std::env::var("HOME"))
