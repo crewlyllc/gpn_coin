@@ -135,8 +135,27 @@ def _day_number(section):
     return int(m.group(1)) if m else None
 
 
+# a section starts at any level-2/3 heading, so an operator note or a verdict
+# section written under the days is its own block — not the tail of the last day
+_SECTION_RE = re.compile(r"(?m)^(#{2,3}) ")
+
+
+def _split_blocks(text):
+    """Split into (head, [block, ...]) where every block keeps its heading line.
+
+    Splitting on `### Day ` alone made any note appended under a day part of that
+    day's section, so the next same-day refresh deleted it (measured 2026-11-26:
+    a 13:19Z rewrite ate two hand-written notes about the exit log and the
+    shutdown path). A block boundary is a heading, not a day.
+    """
+    parts = _SECTION_RE.split(text)
+    head = parts[0]
+    blocks = [parts[i] + " " + parts[i + 1] for i in range(1, len(parts) - 1, 2)]
+    return head, blocks
+
+
 def splice_day(existing_text, header, section):
-    """Keep the header and every day already recorded; replace only this day's.
+    """Keep the header, every day already recorded and any other section; replace only this day's.
 
     Idempotent for today (the recorder runs several times a day: timer + every loop
     pass) and *additive* across days. The first version kept only the header, so the
@@ -145,11 +164,8 @@ def splice_day(existing_text, header, section):
     """
     head = ""
     sections = []
-    if existing_text and "\n### Day " in existing_text:
-        head, rest = existing_text.split("\n### Day ", 1)
-        rest = "### Day " + rest
-        sections = ["### Day " + s for s in rest.split("\n### Day ")[1:]]
-        sections.insert(0, rest.split("\n### Day ")[0])
+    if existing_text and _SECTION_RE.search(existing_text):
+        head, sections = _split_blocks(existing_text)
         head = head.rstrip("\n")
     elif existing_text:
         head = existing_text.rstrip("\n")
@@ -158,21 +174,31 @@ def splice_day(existing_text, header, section):
 
     new = section.strip("\n")
     n_new = _day_number(new)
-    kept, replaced = [], False
+    # Three buckets, because only the days are renumbered: anything written above the
+    # first day (the baseline) stays on top, the days stay in ascending order, and
+    # anything written below them (operator notes, the day-7 verdict) stays below.
+    pre, days, post = [], [], []
+    seen_day, replaced = False, False
     for sec in sections:
-        if n_new is not None and _day_number(sec) == n_new:
-            kept.append(new)
+        sec = sec.strip("\n")
+        n = _day_number(sec)
+        if n is None:
+            (post if seen_day else pre).append(sec)
+            continue
+        seen_day = True
+        if n_new is not None and n == n_new:
+            days.append((n, new))
             replaced = True
         else:
-            kept.append(sec.strip("\n"))
+            days.append((n, sec))
     if not replaced:
-        kept.append(new)
-
-    def _order(sec):
-        n = _day_number(sec)
-        return n if n is not None else 10 ** 6
-
-    kept.sort(key=_order)
+        if n_new is None:
+            post.append(new)
+        else:
+            days.append((n_new, new))
+            replaced = True
+    days.sort(key=lambda t: t[0])
+    kept = pre + [d[1] for d in days] + post
     return head + "\n\n" + "\n\n".join(kept) + "\n"
 
 

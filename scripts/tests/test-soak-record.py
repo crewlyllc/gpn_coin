@@ -106,6 +106,26 @@ eq([doc5.index(f"### Day {n}") for n in (1, 2, 3)] ==
    sorted(doc5.index(f"### Day {n}") for n in (1, 2, 3)), True, "three days in ascending order")
 eq(doc5.count("### Day"), 3, "exactly three day sections")
 
+# ---- anything that is not a day is not the last day's tail -------------------
+# Measured 2026-11-26: a 13:19Z same-day refresh deleted two hand-written `### Note`
+# sections because the splitter only knew `### Day ` as a boundary. A refresh must
+# replace the day's numbers and touch nothing else.
+with_note = sr.splice_day(doc5, header, "### Day 3 — 2026-11-27 08:00 UTC\n\n- height: **501**")
+with_note += "\n### Note (2026-11-27) — a hand-written note\n\nkeep me\n"
+rewritten = sr.splice_day(with_note, header, "### Day 3 — 2026-11-27 09:00 UTC\n\n- height: **502**")
+eq("keep me" in rewritten, True, "a note under a day survives that day's rewrite")
+eq(rewritten.count("### Note"), 1, "the note is not duplicated")
+eq("- height: **502**" in rewritten, True, "the day is still refreshed")
+eq(rewritten.index("### Day 3") < rewritten.index("### Note"), True, "notes stay below the days")
+
+# a level-2 section written above the first day (the baseline) stays above them
+baseline = "## Written baseline, day 1\n\n- p50 13.4 s\n"
+layered = sr.splice_day(baseline + "\n" + doc5, header, "### Day 3 — 2026-11-27 10:00 UTC\n\n- height: **503**")
+eq(layered.index("## Written baseline") < layered.index("### Day 1"), True,
+   "a `##` section above the days is not sorted below them")
+eq("p50 13.4 s" in layered, True, "the baseline body survives")
+eq(layered.count("### Day"), 3, "still three days")
+
 # ---- restart audit: planned stops vs a node that died on its own -------------
 # Real shapes, taken from the journal on 2026-11-26 (3 days, 13 events, 12 preceded by
 # systemd's Stopping line). A restart column that cannot tell these apart reads every
