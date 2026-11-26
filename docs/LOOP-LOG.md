@@ -1,3 +1,44 @@
+## 11:0x PT — row 286: images/audio refused while a provider was online; fixed, cut as 0.3.82 (critical)
+
+**A0:** `origin/main` HEAD `7830a822` ⇒ CI run `45878215070` **pending** at 18:43Z — noted, not waited
+on, worked on regardless (the box was code, not a publish step).
+
+**Release state:** 0.3.81 published + filed; `releases.json` ⇒ 0.3.81, node `system_version` ⇒ 0.3.81.
+Row 273 (soak) day 2 of 7 recorded this pass (18:57Z refresh); batch had 2 NEW rows, but row 286 is a
+critical cut under the owner's 2026-11-25 policy ("AI does not work": images/audio), so 0.3.82 opens
+with 285 + 286.
+
+**Box worked — a live defect found by probing, filed as row 286.** `POST :8092/v1/images/generations`
+answered **503** `no diffusion provider serves the channel render endpoint` at 10:57 PT while the
+local diffusion provider was healthy; the same prompt two minutes later returned three `completed`
+PNGs (491,658 B each) `on channel 7`. Cause, measured in the journal: the AP's endpoint walk used
+`candidates.iter().take(MAX_ROUTE_ATTEMPTS)` (3), and two candidates (`5Fh75o8N`, `5FCwsMfV`) publish
+`channel_url: null` with a `pull://` status URL — structurally unprobeable, zero cost — yet they spent
+slots, so the reachable local box (ranked fourth) was never tried. The chat path already solves this
+(`failover`: "a structural refusal is not work").
+
+- Fix: `probe_media_routes()` in `gpn_scheduler.rs` — walks **every** candidate, structural skips are
+  free, `MAX_ENDPOINT_PROBES = 8` bounds real probes, route slots still bound real work. Image and
+  audio handlers both call it.
+- Test, fails before / passes after: on the old `take(3)` walk ⇒ `probed == []` / `assertion
+  left == right failed` (the local box never tried); after ⇒ routed. Second test: 12 dead endpoints
+  ⇒ exactly 8 probes. `cargo test --release --bin gpn_scheduler` ⇒ **116 passed / 0 failed**;
+  `cargo fmt --check` + CI's exact clippy allow-list clean.
+- Also filed: row 285 rides this release (`/jobs` ss58 account encoding, fixed 10:5x PT).
+
+**Bundled + cut:** 0.3.82, `bump-version.py patch` (15 manifests, 14 lockfile entries), CHANGELOG
+section (critical-cut rule cited), checklist `docs/releases/0.3.82.md` boxes 1–2–3 ticked with the
+evidence above. `test_versioning.py` ⇒ 36 tests OK.
+
+**Pushed once:** code + release bookkeeping at `eb538744` (CI run **45880574537**, pending — not
+waited on). Docs batch commit follows (this log + the checklist note).
+
+**Next run:** ask once for `45880574537`; on `success`, dispatch `scripts/release-cut.sh --version
+0.3.82` in the background, write the handle into §4, end the run.
+
+**Blockers / [TRIAGE]:** 256 unchanged (venue: GPU-P of box 1's 5070 Ti to GPN-209; GPN-209 still
+holds only the Intel UHD 630, box 4 off the tailnet). Nothing needs Jeremy.
+
 ## 10:5x PT — row 285: `/jobs` published one account as both `0x…` hex and ss58; fixed and A/B-proven
 
 **A0:** `origin/main` HEAD `a6343d03` (full sha) ⇒ runs for that sha **total_count 0** — docs-only
