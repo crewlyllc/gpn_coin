@@ -21,6 +21,8 @@ on:
 permissions:
   actions: write
   contents: write   # to publish the linux-latest GitHub Release asset
+  id-token: write     # Sigstore OIDC - required for build provenance
+  attestations: write # to store the provenance attestation against the repo
 
 # One release at a time: a second dispatch must never build/publish concurrently.
 concurrency:
@@ -98,6 +100,97 @@ jobs:
             echo "- canonical wasm: \`$CANON_SHA\` (untouched)"
           } >> "$GITHUB_STEP_SUMMARY"
 
+      # Provenance: the Windows lane has refused to publish an unsigned zip since
+      # 0.3.79; this lane published the linux tarball with no attestation at all
+      # until 0.3.82 (found while working the release checklist's §7 gate, which
+      # says a release must not be cut on an unattested asset). Same two
+      # mechanisms, one contract:
+      #   public repo  -> actions/attest-build-provenance (gh attestation verify)
+      #   private repo -> keyless cosign (Fulcio/Rekor), bundle beside the tarball
+      - name: Check attestation availability (repo visibility)
+        id: attest_gate
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          python3 - "$GITHUB_OUTPUT" <<'PY'
+          import json, os, sys, urllib.request
+
+          req = urllib.request.Request(
+              "https://api.github.com/repos/" + os.environ["GITHUB_REPOSITORY"],
+              headers={"Authorization": "Bearer " + os.environ["GH_TOKEN"],
+                       "Accept": "application/vnd.github+json",
+                       "User-Agent": "gpn-ci"})
+          d = json.load(urllib.request.urlopen(req, timeout=60))
+          vis = d.get("visibility")
+          method = "github" if vis == "public" else "cosign"
+          print("repo visibility: %s (private=%s)" % (vis, d.get("private")))
+          print("provenance method: %s" % method)
+          with open(sys.argv[1], "a") as f:
+              f.write("method=%s\n" % method)
+          PY
+
+      - name: Attest build provenance (linux tarball, public repo)
+        if: steps.attest_gate.outputs.method == 'github'
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: '${{ runner.temp }}/gpn-linux.tar.gz'
+
+      - name: Sign release artifact keyless (linux tarball, private repo)
+        if: steps.attest_gate.outputs.method == 'cosign'
+        run: |
+          set -euo pipefail
+          tgz="$RUNNER_TEMP/gpn-linux.tar.gz"
+          bundle="$tgz.bundle"
+          cosign="$RUNNER_TEMP/cosign"
+          if [ ! -x "$cosign" ]; then
+            curl -sSL -o "$cosign" https://github.com/sigstore/cosign/releases/download/v2.4.1/cosign-linux-amd64
+            chmod +x "$cosign"
+          fi
+          "$cosign" version
+          # Keyless: the job's OIDC token is exchanged with Fulcio for a
+          # short-lived cert; signature + cert + Rekor entry land in the bundle.
+          "$cosign" sign-blob --yes --bundle "$bundle" "$tgz"
+          [ -s "$bundle" ] || { echo "::error::cosign produced no bundle at $bundle"; exit 1; }
+          echo "signed: $bundle ($(stat -c%s "$bundle") bytes)"
+
+      - name: Provenance gate - refuse to publish an unsigned artifact
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          METHOD: ${{ steps.attest_gate.outputs.method }}
+        run: |
+          set -euo pipefail
+          tgz="$RUNNER_TEMP/gpn-linux.tar.gz"
+          bundle="$tgz.bundle"
+          sh=$(sha256sum "$tgz" | cut -d' ' -f1)
+          if [ "$METHOD" = "github" ]; then
+            python3 - "$sh" <<'PY'
+          import json, os, sys, urllib.request
+
+          sha = sys.argv[1]
+          url = "https://api.github.com/repos/%s/attestations/sha256:%s" % (
+              os.environ["GITHUB_REPOSITORY"], sha)
+          req = urllib.request.Request(url, headers={
+              "Authorization": "Bearer " + os.environ["GH_TOKEN"],
+              "Accept": "application/vnd.github+json",
+              "User-Agent": "gpn-ci"})
+          n = len(json.load(urllib.request.urlopen(req, timeout=60)).get("attestations") or [])
+          print("attestations for sha256:%s = %d" % (sha, n))
+          if n < 1:
+              sys.exit("no attestation exists for the artifact about to be published")
+          PY
+          else
+            [ -s "$bundle" ] || { echo "::error::no signature bundle for $tgz - refusing to publish an unattested artifact"; exit 1; }
+            bsz=$(stat -c%s "$bundle")
+            [ "$bsz" -ge 200 ] || { echo "::error::signature bundle is $bsz bytes - refusing to publish"; exit 1; }
+            ident="^https://github\.com/${GITHUB_REPOSITORY}/\.github/workflows/release-linux-selfhosted\.yml@.*$"
+            "$RUNNER_TEMP/cosign" verify-blob --bundle "$bundle" \
+              --certificate-identity-regexp "$ident" \
+              --certificate-oidc-issuer 'https://token.actions.githubusercontent.com' "$tgz"
+            echo 'keyless signature verified against this workflow identity'
+          fi
+          echo "provenance gate PASSED (method=$METHOD, sha256=$sh)"
+
       # 2026-11-08: the debug cache has filled the root filesystem four times
       # (2026-10-19 it halted the chain). The prune timer exists now, but a
       # release build is exactly when it grows - clean it as part of the build
@@ -124,3 +217,14 @@ jobs:
             --body "Rolling GPN Linux build. commit $GITHUB_SHA" \
             --file "$RUNNER_TEMP/gpn-linux.tar.gz" \
             --name gpn-linux.tar.gz
+          bundle="$RUNNER_TEMP/gpn-linux.tar.gz.bundle"
+          if [ -s "$bundle" ]; then
+            python3 scripts/ci/publish-release-asset.py \
+              --tag linux-latest \
+              --title "GPN linux (latest)" \
+              --body "Rolling GPN Linux build. commit $GITHUB_SHA" \
+              --file "$bundle" \
+              --name gpn-linux.tar.gz.bundle
+          else
+            echo 'signature: none published (GitHub-native attestation path)'
+          fi
