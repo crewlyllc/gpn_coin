@@ -1,3 +1,42 @@
+## 10:05 PT — box 1 self-updated to 0.3.81 with the full log sequence; §9 4/4, §10 3/3, 0.3.81 FILED (5 rows closed)
+
+**A0:** `origin/main` HEAD `cd510a8f` (full sha) ⇒ runs for that sha **total_count 0** — docs-only commit under
+`ci.yml` `paths-ignore`, so no run is expected and none is red. Continued to A.
+
+**Box worked — §9 box 3, the Windows per-step log** (dispatched last run as a wait, read once now). Box 1's
+`C:\gpn\update.log`, 2026-11-26 `09:52:37`→`09:56:01` PT, one cycle carrying every step:
+`09:52:41 check: -> update available: 0.3.81 (run gpn_update --apply)` → `update available - stopping GPN-Node before applying`
+→ `09:53:42 the node did not exit within 60 s - ending the worker tree (taskkill /T /F)` + six `SUCCESS: … terminated`
+→ `09:53:56 apply: downloading 0.3.81 (windows/x86_64, layout=bundle, 253.3 MB)` → `installed 0.3.81 at
+C:\gpn\data\update\versions\0.3.81` / `current -> versions/0.3.81   previous: 0.3.80` / `copied 61 binaries to C:\gpn\bin`
+→ `09:53:57 start (after apply): schtasks … node pid 60176` → `09:56:01 confirm: process=up rpc=yes 124s version=0.3.81`
+→ **`09:56:01 CONFIRMED: 0.3.81 is running (rpc http://127.0.0.1:9944) after 124 s`** → `update cycle complete`.
+`(Get-Process gpn-node).StartTime` ⇒ `11/26/2026 9:53:57 AM` (the new process) and
+`…\update\current\gpn-node.exe --version` ⇒ `gpn-node.exe 0.3.81`.
+**The contrast that proves row 278:** this cycle was *not* held (canary proof published 09:08:44) and therefore stopped the
+node — the earlier `08:57:51`/`09:00:05` cycles were held and logged `holding … (node NOT restarted)` with **no `taskkill`
+line** and `StartTime` still `8:04:47 AM`. Gate answered before the stop, only an actual install costs a restart.
+
+**§10 box 3 ticked** — `GPN-LIST.md`: rows **278, 279, 282, 283, 284 ⇒ COMPLETE 0.3.81 (2026-11-26)**, each with build sha
+`a57afde16b4c04862b4e92a6b79f81a92512f6a5` and its quoted evidence. **273 stays IN-PROGRESS** (day 2 of 7 recorded,
+`docs/soak-2026-11-25.md`, ticks 2026-12-02) — box carries the handle, not a tick.
+
+**Filed (the part that was skipped for 0.3.61/0.3.62):** `git mv docs/releases/0.3.81.md docs/releases/archive/0.3.81.md`
+and a row at the top of `docs/releases/INDEX.md` (`| 0.3.81 | 2026-11-26 | 278, 279, 282, 283, 284, 273 (soak IN-PROGRESS) |
+archive/0.3.81.md |`); both §0b boxes ticked with that evidence.
+
+**Release state:** `https://gpncoin.ai/releases.json` ⇒ `0.3.81`, `published_at 2026-11-26T16:28:55Z`; running node
+`system_version` on `127.0.0.1:9944` ⇒ `0.3.81`; box 1 CONFIRMED `0.3.81`. Every box in `archive/0.3.81.md` is ticked
+except 273's (time-bound) and §0e's stranger lifecycle (AWAITING-OWNER, item 256).
+
+**Blockers / [TRIAGE]:** item **256** (attach a GPU partition of box 1's 5070 Ti to guest GPN-209, or power box 4 back on)
+is still unanswered since 2026-11-24 — §0e cannot be run until a venue exists, so every release since 0.3.73 carries it.
+Recommendation stands: option A (box 1 is host-partitionable per `Get-VMHostPartitionableGpu`, no spend, minutes of risk to
+its node). Re-announced here rather than dropped.
+
+**Next run:** no release in flight ⇒ A0, then C if five NEW rows are waiting, else the next IN-PROGRESS row (273's daily
+record, or 256 once answered).
+
 ## 09:15 PT — canary self-updated to 0.3.81 (canary proof published), §9 3/4, §10 proven, rows 282/283/284 ticked
 
 **A0:** `origin/main` HEAD `7a4fd6a7` ⇒ runs for that full sha **total_count 0** (docs-only commit, expected under `ci.yml` `paths-ignore`). Nothing red.
