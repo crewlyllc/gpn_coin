@@ -1,3 +1,52 @@
+## 06:05 PT AUDIT — fixed 1 (disk, 14 G); needs-attention carried: AUDIT-2026-11-26a (attestation now 12 attempts in)
+
+**Disk first.** `df -h /` ⇒ `439G 320G 98G 77%` = **22.3 % free**, under the 25 % line ⇒ cleaned before anything else.
+`pgrep -x cargo` / `pgrep -x rustc` both empty, `lsof +D` empty on every candidate. Deleted:
+`/tmp/v379` 1.3 G, `/tmp/gpn-linux-0.3.78.tar.gz` 333 M, `/tmp/v379w` + `/tmp/winverify` + `/tmp/gpn-windows-0.3.78.zip` 242 M each,
+`/tmp/gpn-node.prev-1794629769` 103 M, `/tmp/gpn-node-0.3.78.exe` 71 M, `/tmp/o.1631195` 67 M, `/tmp/pwsh.tar.gz` 72 M
+(= **2.6 G** of Nov-21/25 verification copies, all re-downloadable), `~/gpn-work/gpn-agent/target/debug` **4.4 G** and
+`~/gpn-work-222/gpn-agent/target/debug` **7.0 G** (both stale clones, last touched Nov 23), `~/.cache/gpn-release-cut` 575 M.
+After: `439G 305G 112G 74%` ⇒ **112 G free, 25.5 %**. Left on purpose: `~/gpn-loop/gpn-agent/target/debug` 5.0 G (active clone —
+deleting buys a full rebuild on the next loop pass) and `~/gpn-loop/gpn-node/target/release` 3.9 G (artefact).
+
+**Top five consumers after the clean (measured, hidden paths included):** `~/.ci-cache` **94 G** (`find -mtime +7` ⇒ **0 files**,
+so the prune unit has nothing to take — left, owner says keep), `~/.cache/huggingface` **53 G** (models, keep), `~/.openclaw` **17 G**
+(`workspace` 15 G of which `shared` ~14 G, `plugin-runtime-deps` 1.5 G, `agents/main/sessions` **375 M / 177 files >30 d** — reported,
+not deleted per brief), `~/gpn-loop` **12 G**, `~/ollama` **8.1 G**. `/tmp` now **0.6 G**. `state/bin-snapshots` empty, `cron/runs` 34 M — untouched.
+
+**Units.** `systemctl --user list-units 'gpn*' --all` + `list-unit-files | grep gpn`: all 10 enabled units `active running`
+(accesspoint, diffusion, explorer, faucet, finetune, fleet, fleet-directive, oracle, provider, provider-heartbeat);
+`gpn-node.service` disabled by design (fleet runs the node). All 8 gpn timers `Result=success` (ap-topup, cadence-gate, deploy-drift,
+incident-alarm, ci-cache-prune, prune-ci-cache, soak-record, update). No enabled-but-dead unit ⇒ nothing to restart.
+
+**Chain.** `system_chain` ⇒ `GPN Public Testnet`; `system_version` ⇒ **0.3.80**; `system_health` ⇒ `peers 3, isSyncing false`;
+`system_peers` names 3 AUTHORITY peers all at #367812; header advanced #367810 → #367813 during the check, with
+`✅ Successfully mined block` at 06:04:55 and a self-heal divergence check logging `verdict: match` at #367319.
+`journalctl --user -u gpn-fleet -n 300 | grep -iE 'panic|Reason:|error|ban|Incompatible|taskkill|fail'` ⇒ **0 lines**.
+Ports: 9944/8092/8093/8099(loopback)/11434 all answer (`/v1/models` lists 5 models; `gpn-provider-heartbeat` :8093 answers
+JSON `{"error":"not found"}` on `/`).
+
+**Box 1 (SSH).** `(Get-Process gpn-node).Path` ⇒ `C:\gpn\data\update\current\gpn-node.exe`; `FileVersion` ⇒ **0.3.80**;
+live RPC ⇒ `VER=0.3.80`, `PEERS=2`.
+
+**Update + release record.** `~/.gpn/update/update-attempts.json` tail: 0.3.77/78/79/80 all `outcome: confirmed`, 0.3.80 at
+`1795669574` (attempts 1, empty reason). Release loop `openclaw cron runs --id feff1358…` ⇒ newest 3 entries `status: ok`
+(215 s / 145 s / 163 s, no errors). Consistency one machine deep and matching: `docs/releases/INDEX.md` row `0.3.80`,
+`docs/releases/archive/0.3.80.md` present, `GPN-LIST.md` row 280 `COMPLETE 0.3.80`, site `releases.json` ⇒ `0.3.80`,
+local node ⇒ `0.3.80`, box 1 ⇒ `0.3.80`. (`git rev-parse HEAD` = `61a8404f`, main; `0.3.81` exists only as a forward
+reference in row 283 — not a published version, so not a missing-record fault.) GitHub runner `DESKTOP-USBUADL` busy=True,
+`openclawassist` idle — nothing local in flight, and no service was restarted.
+
+**Resources.** `free -h` available **24 GiB** (fine) but **swap 2.0 Gi/2.0 Gi used, 408 Ki free** — named for the record;
+top RSS: openclaw-gateway 2.9 G, `gpn-node` 1.3 G. Load 2.88 / 2.87 / 3.03. GPU 1617/8188 MiB at 100 % (the miner).
+
+**Needs-attention (carried, not new):** AUDIT-2026-11-26a is unchanged and worsening — `gpn-provider` at 05:22:01 logged
+`[attest] GPU busy (util 100%, 1615/8188 MiB VRAM …) — NO measurement submitted` and `GPU still busy (utilization 100% > 10%)
+after 12 attempt(s) — next try in 3600s` (was 6 attempts at 00:0x). Last attested block 356917 vs head 367813 ⇒ ~10,900 blocks
+(~34 h). Jobs still served. Already in `docs/NEEDS-TRIAGE.md` line 191 with options A/B/C — still needs the owner's measurement-semantics call.
+
+**Verdict: fixed 1 (disk, 14 G reclaimed), everything else clean, one item still waiting on the owner.**
+
 ## 06:0x PT — 273: day 7 had no verdict tool — seven prose sections would have been read by hand; now one command emits a verdict per gate test
 
 **A0:** `origin/main` HEAD `259cde80` (soak doc/test change) — run `45831480465` **pending**, no conclusion. By the A0 rule that does not block, and this box needs no CI.
