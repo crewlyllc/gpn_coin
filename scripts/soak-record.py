@@ -654,6 +654,195 @@ def trend_report(directory=None, days=TREND_DAYS, threshold=TREND_THRESHOLD):
     return ("\n".join(lines), flags)
 
 
+# ---------- day-7 verdict (row 273: one verdict per STABILITY-GATE test) ----------
+# The recorder writes numbers; the gate asks six questions. Until the verdict was generated
+# from those numbers, day 7 would have been hand-written by reading seven sections — the exact
+# place where a stretch becomes a claim. Every verdict below quotes the day it came from, and
+# a test the soak does not measure says so instead of quietly counting as a pass.
+GATE_TESTS = [
+    (1, "Clean install, no prompt"),
+    (2, "Two unattended updates"),
+    (3, "Seven days peered"),
+    (4, "A job served by a remote node"),
+    (5, "Self-heal"),
+    (6, "No silent failures"),
+]
+
+_DAY_FIELDS = {
+    "height": r"^- height: \*\*(\d+)\*\*",
+    "eff": r"^- effective block interval[^:]*: \*\*([\d.]+) s\*\*",
+    "p50": r"p50 \*\*([\d.]+) s\*\*",
+    "p95": r"p95 \*\*([\d.]+) s\*\*",
+    "peers": r"^- peers now: \*\*(\d+)\*\*",
+    "peer_min": r"idle lines, min \*\*(\d+)\*\*",
+    "zero_peers": r"lines at 0 peers: \*\*(\d+)\*\*",
+    "imports": r"^- imports in 24 h: \*\*(\d+)\*\* blocks",
+    "gap": r"longest gap between imports \*\*(\d+) s\*\*",
+    "terminations": r"^- node terminations in 24 h: \*\*(\d+)\*\*",
+    "unexplained": r"\*\*(\d+) unexplained\*\*",
+    "starts": r"\*\*(\d+) systemd starts / (\d+) stops",
+    "jobs_att": r"^- jobs: attempted=(\d+)",
+    "jobs_ok": r"^- jobs: attempted=\d+, succeeded=(\d+)",
+    "jobs_fail": r"^- jobs: attempted=\d+, succeeded=\d+, failed=(\d+)",
+    "box1": r"^- box 1: (.+)$",
+    "update": r"^- update: (.+)$",
+    "gate6": r"^- gate 6 \(silent failures\) in 24 h: (.+)$",
+    "bans": r"^- `Reason:`/ban lines in 24 h: \*\*(\d+)\*\*",
+    "stamp": r"^### Day \d+ — (\d{4}-\d{2}-\d{2} \d{2}:\d{2} UTC)",
+}
+
+
+def parse_day(section):
+    """Read one recorded day section into numbers. Absent field => None, never 0."""
+    day = {"day": _day_number(section)}
+    for key, pat in _DAY_FIELDS.items():
+        m = re.search(pat, section, re.M)
+        if not m:
+            day[key] = None
+        elif key in ("starts", "gate6", "box1", "update", "stamp"):
+            day[key] = m.groups() if len(m.groups()) > 1 else m.group(1)
+        elif key in ("eff", "p50", "p95"):
+            day[key] = float(m.group(1))
+        else:
+            day[key] = int(m.group(1))
+    if day.get("gate6"):
+        day["gate6"] = {k: int(v) for k, v in re.findall(r"`([^`]+)` \*\*(\d+)\*\*", day["gate6"])}
+    return day
+
+
+def parse_days(text):
+    """Every `### Day n` section, ascending."""
+    _, blocks = _split_blocks(text or "")
+    days = [parse_day(b) for b in blocks if _day_number(b) is not None]
+    return sorted(days, key=lambda d: d["day"])
+
+
+def _distinct_versions(days):
+    """Versions a day claims the updater confirmed running, in order first seen."""
+    seen = []
+    for d in days:
+        for v in re.findall(r"confirmed (\S+) is running", d.get("update") or ""):
+            if v not in seen:
+                seen.append(v)
+    return seen
+
+
+def soak_verdict(days, required=7):
+    """One verdict per STABILITY-GATE test: (num, name, verdict, evidence).
+
+    verdict is PASS, FAIL, INCOMPLETE (the soak cannot answer yet) or NOT-COVERED (the
+    soak records nothing that bears on it — named with where the evidence does live).
+    """
+    days = [d for d in days if d.get("day")]
+    got = len(days)
+    nums = [d["day"] for d in days]
+    consecutive = nums == list(range(1, got + 1))
+    unexplained = sum(d.get("unexplained") or 0 for d in days)
+    zero_peers = sum(d.get("zero_peers") or 0 for d in days)
+    starved_days = [d["day"] for d in days if d.get("peer_min") == 0 or d.get("peers") == 0]
+    versions = _distinct_versions(days)
+    rollbacks = [d["day"] for d in days if "rolled back to" in (d.get("update") or "")]
+    g6_bad = []
+    for d in days:
+        for k, v in (d.get("gate6") or {}).items():
+            if v:
+                g6_bad.append(f"day {d['day']}: `{k}` {v}")
+    bans = sum(d.get("bans") or 0 for d in days)
+
+    out = []
+
+    # 3 — the soak's own question, so it is answered first and answers plainly.
+    if got < required:
+        v3 = ("INCOMPLETE", f"day {got} of {required} recorded"
+              + ("" if consecutive else f" (day numbers {nums} are not consecutive)"))
+    elif not consecutive:
+        v3 = ("FAIL", f"day numbers {nums} are not seven consecutive days")
+    elif unexplained:
+        v3 = ("FAIL", f"{unexplained} unexplained termination(s) across days "
+                       f"{[d['day'] for d in days]}")
+    elif zero_peers or starved_days:
+        v3 = ("FAIL", f"{zero_peers} journal line(s) at 0 peers; days with a 0-peer reading: "
+                       f"{starved_days or 'none'}")
+    else:
+        v3 = ("PASS", f"{got} consecutive days, {unexplained} unexplained terminations, "
+                       f"0 lines at 0 peers, peer min per day "
+                       f"{[d.get('peer_min') for d in days]}")
+
+    if len(versions) >= 2:
+        v2 = ("PASS", f"updater confirmed {len(versions)} distinct versions running: "
+                       f"{', '.join(versions)}"
+                       + (f"; rollback exercised on day(s) {rollbacks}" if rollbacks else
+                          "; rollback of a bad build not exercised in this soak"))
+    else:
+        v2 = ("INCOMPLETE", f"{len(versions)} distinct version(s) confirmed running "
+                            f"({', '.join(versions) or 'none recorded'}) — the gate asks for two")
+
+    if g6_bad:
+        v6 = ("FAIL", "; ".join(g6_bad) + (f"; {bans} `Reason:`/ban line(s)" if bans else ""))
+    elif got < required:
+        v6 = ("INCOMPLETE", f"clean so far ({got} of {required} days, 0 silent-failure strings)")
+    else:
+        v6 = ("PASS", f"{got} days: unfunded 0, incompatible pruning 0, update declined 0, "
+                       f"`Reason:`/ban lines 0")
+
+    out.append((3, "Seven days peered", v3[0], v3[1]))
+    out.append((2, "Two unattended updates", v2[0], v2[1]))
+    out.append((6, "No silent failures", v6[0], v6[1]))
+    out.append((1, "Clean install, no prompt", "NOT-COVERED",
+                "a soak measures a node already installed; the install half lives in "
+                "checklist §0e (`scripts/stranger-lifecycle.ps1`) and rows 104/106/208"))
+    out.append((4, "A job served by a remote node", "NOT-COVERED",
+                "the soak records job counts, not attribution; needs a provider id that is not "
+                "the AP's host (gate 4's own evidence, rows 275/276)"))
+    out.append((5, "Self-heal", "NOT-COVERED",
+                "a fork must be manufactured to test this; proven for the depth guard in row 194 "
+                "and the pause-clearing residual in row 262"))
+    return sorted(out, key=lambda t: t[0])
+
+
+def verdict_section(days, required=7, now=None):
+    """Markdown for the day's verdict block."""
+    now = now or datetime.now(timezone.utc)
+    rows = soak_verdict(days, required)
+    verdicts = [r[2] for r in rows]
+    failing = [r for r in rows if r[2] == "FAIL"]
+    uncovered = [r for r in rows if r[2] == "NOT-COVERED"]
+    pending = [r for r in rows if r[2] == "INCOMPLETE"]
+    if failing:
+        overall = "GATE RED — " + ", ".join(f"test {r[0]}" for r in failing)
+    elif pending:
+        overall = ("GATE NOT MET YET — still measuring: "
+                   + ", ".join(f"test {r[0]}" for r in pending)
+                   + ("; outside the soak: " + ", ".join(f"test {r[0]}" for r in uncovered)
+                      if uncovered else ""))
+    elif uncovered:
+        # every soaked test passes, but the soak cannot answer the rest: say exactly that
+        # rather than printing a green tick the numbers do not support.
+        overall = ("SOAK GREEN, GATE STILL OPEN — tests "
+                   + ", ".join(str(r[0]) for r in uncovered)
+                   + " need their own evidence (install / remote attribution / self-heal)")
+    else:
+        overall = "GATE GREEN — all six tests pass"
+    lines = [f"## Verdict — {now.strftime('%Y-%m-%d %H:%M UTC')} (day {len(days)} of {required})",
+             "", f"**{overall}**", "",
+             "| # | test | verdict | evidence |", "|---|---|---|---|"]
+    for num, name, verdict, evidence in rows:
+        lines.append(f"| {num} | {name} | **{verdict}** | {evidence} |")
+    lines.append("")
+    lines.append("Generated by `scripts/soak-record.py --verdict` from the day sections above; "
+                 "a NOT-COVERED row is not a pass and is not counted as one.")
+    return "\n".join(lines), overall
+
+
+def replace_verdict(text, section):
+    """Put one verdict block under the days, replacing any earlier one."""
+    head, blocks = _split_blocks(text or "")
+    kept = [b.strip("\n") for b in blocks
+            if not re.match(r"^## Verdict", b.strip("\n"))]
+    kept.append(section.strip("\n"))
+    return head.rstrip("\n") + "\n\n" + "\n\n".join(kept) + "\n"
+
+
 def main():
     global RPC
     ap = argparse.ArgumentParser()
@@ -664,8 +853,33 @@ def main():
     ap.add_argument("--telemetry-dir", default=TELEMETRY_DIR)
     ap.add_argument("--trend", action="store_true",
                     help="print the week-over-week trend from the telemetry files and exit")
+    ap.add_argument("--verdict", action="store_true",
+                    help="print the per-gate verdict from the recorded days and exit")
+    ap.add_argument("--write-verdict", action="store_true",
+                    help="with --verdict: also record it in the soak doc as the `## Verdict` block")
+    ap.add_argument("--doc", default=None, help="soak doc path (default: docs/soak-<start>.md)")
     args = ap.parse_args()
     RPC = args.rpc
+
+    if args.verdict:
+        st0 = load_state()
+        doc0 = args.doc or os.path.join(args.root, "docs",
+                                        f"soak-{st0.get('start_date', '')}.md")
+        if not os.path.exists(doc0):
+            print(f"no soak doc at {doc0}", file=sys.stderr)
+            return 2
+        text0 = open(doc0).read()
+        days0 = parse_days(text0)
+        section0, overall0 = verdict_section(days0, args.days)
+        print(section0)
+        if args.write_verdict:
+            tmp0 = doc0 + ".tmp"
+            with open(tmp0, "w") as f:
+                f.write(replace_verdict(text0, section0))
+            os.replace(tmp0, doc0)
+            print(f"\nwrote verdict to {doc0}", file=sys.stderr)
+        return 0 if overall0.startswith("GATE GREEN") else 1
+
 
     if args.trend:
         text, flags = trend_report(args.telemetry_dir)

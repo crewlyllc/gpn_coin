@@ -361,6 +361,117 @@ eq(sr.day_index(__import__("datetime").datetime(2026, 11, 25, tzinfo=__import__(
                 __import__("datetime").datetime(2026, 12, 1, tzinfo=__import__("datetime").timezone.utc)),
    7, "seven days after the start is day 7")
 
+# ---- day-7 verdict (row 273: one verdict per STABILITY-GATE test) ------------
+# Day 7 must not be hand-written from seven prose sections; these fixtures are why.
+def _day(n, *, unexplained=0, zero_peers=0, peer_min=3, peers=3,
+         gate6=None, update="`gpn-update.service` (24 h, 1 fire(s)): confirmed 0.3.80 is running",
+         bans=0):
+    g6 = gate6 if gate6 is not None else {"unfunded": 0, "Incompatible pruning modes": 0,
+                                         "update declined": 0}
+    return (f"### Day {n} — 2026-11-{24 + n:02d} 09:00 UTC\n\n"
+            f"- height: **{1000 + n}**\n"
+            "- effective block interval since previous record (83 blocks in 0.29 h): **12.60 s**\n"
+            "- authored interval over the last 200 blocks: p50 **10.61 s**, p95 **41.04 s**\n"
+            f"- peers now: **{peers}**, isSyncing=False; journal 24 h: 900 idle lines, "
+            f"min **{peer_min}** / max 3, lines at 0 peers: **{zero_peers}**\n"
+            "- imports in 24 h: **3790** blocks, longest gap between imports **144 s** (ending 08:17 UTC)\n"
+            f"- node terminations in 24 h: **{unexplained}** (0 adjacent to a systemd `Stopping`, "
+            f"**{unexplained} unexplained**) — prose\n"
+            "- gpn-fleet.service: NRestarts=0, state=running, active since x, "
+            "**2 systemd starts / 2 stops in 24 h**\n"
+            "- jobs: attempted=256, succeeded=228, failed=12 (AP :8092/jobs)\n"
+            f"- update: {update}\n"
+            f"- `Reason:`/ban lines in 24 h: **{bans}**\n"
+            "- gate 6 (silent failures) in 24 h: "
+            + ", ".join(f"`{k}` **{v}**" for k, v in g6.items()) + "\n"
+            "- box 1: peers=2 syncing=False height=1001\n")
+
+
+d = sr.parse_day(_day(3))
+eq(d["day"], 3, "parse_day reads the day number")
+eq(d["height"], 1003, "parse_day reads the height")
+eq(d["eff"], 12.6, "parse_day reads the effective interval as a float")
+eq(d["p50"], 10.61, "parse_day reads p50")
+eq(d["zero_peers"], 0, "parse_day reads the 0-peer line count")
+eq(d["unexplained"], 0, "parse_day reads the unexplained terminations")
+eq(d["jobs_ok"], 228, "parse_day reads succeeded jobs from the same line")
+eq(d["gate6"]["unfunded"], 0, "parse_day reads the gate-6 counts as numbers")
+eq(d["starts"], ("2", "2"), "parse_day keeps starts and stops")
+eq(sr.parse_day("### Day 4 — x\n\n- height: **9**\n").get("p50"), None,
+   "a field the section does not carry is None, not 0")
+
+seven = sr.parse_days("# Soak\n\n" + "\n\n".join(_day(n) for n in range(1, 8)))
+eq(len(seven), 7, "parse_days finds all seven days")
+eq([x["day"] for x in seven], list(range(1, 8)), "days come back ascending")
+
+v = {r[0]: r[2] for r in sr.soak_verdict(seven)}
+eq(v[3], "PASS", "seven clean consecutive days pass test 3")
+eq(v[6], "PASS", "seven clean days pass test 6")
+eq(v[1], "NOT-COVERED", "the soak does not claim the clean-install test")
+eq(v[4], "NOT-COVERED", "the soak does not claim remote-job attribution")
+eq(v[5], "NOT-COVERED", "the soak does not claim self-heal")
+
+eq({r[0]: r[2] for r in sr.soak_verdict(seven[:6])}[3], "INCOMPLETE",
+   "six of seven days is INCOMPLETE, not a pass")
+eq({r[0]: r[2] for r in sr.soak_verdict(seven)[:8]}[6], "PASS", "gate 6 covered by seven days")
+
+# a defect in the numbers must fail the gate, and the evidence must name the day
+bad3 = sr.soak_verdict(sr.parse_days("\n\n".join([_day(n) for n in range(1, 7)] + [_day(7, unexplained=1)])))
+row = [r for r in bad3 if r[0] == 3][0]
+eq(row[2], "FAIL", "one unexplained termination fails test 3")
+eq("1 unexplained" in row[3], True, "the failure evidence quotes the count")
+
+zero = sr.soak_verdict(sr.parse_days("\n\n".join(_day(n) for n in range(1, 8)).replace(
+    "min **3** / max 3, lines at 0 peers: **0**", "min **0** / max 3, lines at 0 peers: **4**", 1)))
+eq([r for r in zero if r[0] == 3][0][2], "FAIL", "a 0-peer day fails test 3 even over seven days")
+
+g6 = sr.soak_verdict(sr.parse_days("\n\n".join(
+    [_day(n) for n in range(1, 8)][:6]
+    + [_day(7, gate6={"unfunded": 2, "Incompatible pruning modes": 0, "update declined": 0})])))
+row = [r for r in g6 if r[0] == 6][0]
+eq(row[2], "FAIL", "a non-zero gate-6 string fails test 6")
+eq("day 7" in row[3] and "unfunded" in row[3], True,
+   "the gate-6 failure names the day and the string")
+
+# test 2 counts distinct confirmed versions, because the gate asks for two updates
+one = sr.soak_verdict(seven)
+eq([r for r in one if r[0] == 2][0][2], "INCOMPLETE",
+   "one confirmed version is not two unattended updates")
+two = sr.soak_verdict(sr.parse_days("\n\n".join(
+    [_day(n) for n in range(1, 5)]
+    + [_day(5, update="`gpn-update.service`: confirmed 0.3.81 is running")]
+    + [_day(n) for n in range(6, 8)])))
+eq([r for r in two if r[0] == 2][0][2], "PASS", "two distinct confirmed versions pass test 2")
+
+jump = sr.soak_verdict(sr.parse_days("\n\n".join(_day(n) for n in range(1, 8)).replace(
+    "### Day 4 ", "### Day 9 ", 1)))
+eq([r for r in jump if r[0] == 3][0][2], "FAIL", "seven sections that skip a day number fail test 3")
+
+# overall wording must never print a green tick the numbers cannot support
+sec, overall = sr.verdict_section(seven)
+eq(overall.startswith("GATE NOT MET YET"), True,
+   "one confirmed version keeps the overall verdict unmet, even with 3 and 6 passing")
+seven2 = sr.parse_days("\n\n".join(
+    [_day(n) for n in range(1, 5)]
+    + [_day(5, update="`gpn-update.service`: confirmed 0.3.81 is running")]
+    + [_day(n) for n in range(6, 8)]))
+sec2, overall2 = sr.verdict_section(seven2)
+eq(overall2.startswith("SOAK GREEN, GATE STILL OPEN"), True,
+   "all soaked tests passing is not 'gate green' while 1/4/5 are uncovered")
+eq("tests 1, 4, 5" in overall2, True, "the open tests are named in the overall verdict")
+eq("| 3 | Seven days peered | **PASS**" in sec2, True, "the table carries the pass row")
+sec_bad, overall_bad = sr.verdict_section(sr.parse_days("\n\n".join(
+    [_day(n) for n in range(1, 7)] + [_day(7, unexplained=2)])))
+eq(overall_bad.startswith("GATE RED"), True, "a FAIL makes the overall verdict red")
+
+# the verdict block is one block: writing it twice must not stack, and days survive
+base = "# Soak 2026-11-25\n\nprotocol\n\n" + "\n\n".join(_day(n) for n in range(1, 3))
+one_write = sr.replace_verdict(base, "## Verdict — a\n\nold")
+two_writes = sr.replace_verdict(one_write, "## Verdict — b\n\nnew")
+eq(two_writes.count("## Verdict"), 1, "a re-written verdict replaces the earlier one")
+eq("## Verdict — b" in two_writes, True, "the newest verdict is the one kept")
+eq(two_writes.count("### Day "), 2, "the day sections survive a verdict write")
+
 if fails:
     print("\n".join(fails))
     print(f"{checks - len(fails)} passed, {len(fails)} failed")

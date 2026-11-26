@@ -23,4 +23,17 @@ out=$(/usr/bin/python3 "$repo/scripts/soak-record.py" 2>&1)
 rc=$?
 printf '%s %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$out" >> "$log"
 echo "$out"
+
+# The gate asks six questions and the day sections are prose; generate the verdict block
+# from them on every recorded day, so day 7 is read off numbers rather than hand-written.
+# Its exit code is 1 whenever the gate is not green yet (all of days 1-6), so it is logged
+# and deliberately NOT propagated: a not-yet-green gate is the normal state of a soak.
+if [ "$rc" -eq 0 ]; then
+  verdict=$(/usr/bin/python3 "$repo/scripts/soak-record.py" --verdict --write-verdict 2>&1)
+  vrc=$?
+  printf '%s verdict rc=%s %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$vrc" \
+    "$(printf '%s' "$verdict" | tail -1)" >> "$log"
+  echo "$verdict" | head -3
+fi
+
 exit "$rc"
