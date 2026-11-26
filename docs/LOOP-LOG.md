@@ -1,3 +1,34 @@
+## 03:2x PT — all three queued fixes re-proven by running their own tests (not by reading commits); CI still has no conclusion; soak day 3 not due
+
+**A0:** `origin/main` HEAD `cdf7a54c` (loop-log only) ⇒ `?head_sha=` **0 runs** (paths-ignore correct). The code run
+**`45803757268`** (`437f97b0`) is still **`pending`** since 10:42:04Z — 45 min at 11:27Z, `updated_at` unchanged, i.e. still
+queued behind the Windows runner. **No conclusion ⇒ nothing acted on, nothing waited on** (well under the 90-min
+stale-build line). Next pass reads it.
+
+**Only IN-PROGRESS row is 273 (soak, day 2/7).** Day 3 is not due: `gpn-soak-record.timer` NEXT **09:11:36 PST**, LAST `-`
+(Persistent). Nothing to write yet, so the pass went at evidence for the three queued fixes — and re-proved each by
+executing its own tests on this HEAD rather than trusting the row's commit message.
+
+- **278** (Windows updater stops the node before the canary gate): `cargo test --test gpn_update_cli` ⇒ **31 passed / 0 failed**
+  (incl. `check_holds_exit_5_when_no_canary_proof_is_published`, `check_canary_itself_is_not_held`);
+  `scripts/tests/test-update-shutdown.ps1` under pwsh 7.4.6 ⇒ **RESULT: PASS (all checks)** incl. section K
+  (`it runs before the stop line`, `it does not stop the node`, `it does not install anything`, `it exits 0`).
+  **Trap recorded:** the first run used `--release` and reported `running 0 tests / ok` — the file opens with
+  `#![cfg(debug_assertions)]` (it signs manifests with a throwaway key the binary only honours in debug), so a green
+  `--release` run of that target proves *nothing*. Debug is the only mode with teeth.
+- **279** (`network.json` spec 54 vs chain 55): `scripts/tests/test-check-spec-version.sh` ⇒ **PASS=6 FAIL=0**;
+  `scripts/check-spec-version.sh` ⇒ `OK`; live `state_getRuntimeVersion` ⇒ **specVersion 55**, `network.json` ⇒ 55.
+- **283** (three files on the deleted clone): `systemd-analyze verify --user scripts/systemd/gpn-cadence-gate.service`
+  ⇒ **rc 0**; `bash -n gpn-node/scripts/build-spec42-wasm.sh` ⇒ ok; `py_compile gpn_gpulock_contend.py` ⇒ ok;
+  `grep -rn` for the deleted path ⇒ only the row's own explanatory comment in the unit file.
+
+**Live:** `system_version` ⇒ **0.3.80**; head **#367,153** (`0x59a2e`); `system_health` ⇒ `peers 3, isSyncing false`;
+`gpn-incident-alarm` ⇒ `peers=3 height=367153 jobs_seen=256` / `ok: no incident conditions`.
+
+**Batch:** 278, 279, 283 = **3 of 5** real; 282 hardening (not counted); 273 soak in flight; 256 AWAITING-OWNER (venue,
+`NEEDS-TRIAGE.md`). **No version opened, nothing bundled, nothing pushed as code this pass** (this entry is docs-only).
+No new [TRIAGE] item.
+
 ## 02:5x PT — queued fix 282 re-verified independently (12/12, live log untouched); CI has no conclusion; soak day 3 not due
 
 **A0:** `origin/main` HEAD `661ad742` (soak + loop-log docs) ⇒ `?head_sha=` **0 runs** (`paths-ignore` correct).
