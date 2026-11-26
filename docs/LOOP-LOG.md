@@ -1,3 +1,36 @@
+## 19:30 PT — [TRIAGE] A0 linux leg GREEN (the red step 8 now passes); Windows build still running; §0e venue still needs a decision
+
+**A0 (CI).** Run **45743326550** (head `77b1c93f`, carrying the CLI-fixture fix `73f8db8a`) — asked once
+this pass, not polled:
+- `Build + unit tests (linux)` **`completed success`** — this is the leg that was red in 45738389392, and it
+  passed **step 8 `Test gpn_update CLI (debug - throwaway signing key)`**, the exact step that had
+  11 of 24 tests failing on the canary hold message. So the fixture fix is confirmed **on CI**, not just
+  in a local `cargo test`.
+- `fmt + clippy` success · `secret-scan` success · `macos` / GPU two-node / dependency audit `skipped` by design.
+- `Build + unit tests (windows, self-hosted)` still `in_progress` at step 7/8 `Build + test gpn-agent (release)`,
+  started `02:39:43Z` = 47 min. Normal Windows cold build; **not** waited on, run not cancelled (under 90 min).
+- Run conclusion is therefore still `null`; §4's last box stays unticked until the run reports `success`.
+
+**Boxes worked.** First unticked box is §0e's stranger lifecycle — a venue decision, carried as triage item
+**256**. Re-measured the venue this pass instead of quoting last run: box 4 `ssh rc=255` / `SOCKSv5 General
+SOCKS server failure` (still off the tailnet); box 3 answers but is a live node; box 1 `Get-VM GPN-209` Running,
+`Get-VMHostPartitionableGpu` shows `VEN_10DE&DEV_2C05 … ValidPartitionCounts {32}` (the 5070 Ti *is*
+host-partitionable) but the guest's adapter is still `VEN_8086&DEV_9BC5` (Intel iGPU, compute 0). Nothing changed,
+so 256 is not re-argued — it is re-announced here because it is now the only thing standing between 0.3.80 and
+its last two build/publish sections.
+Ticked §0e's third box honestly ("if the lifecycle cannot be run, say so and why") with those measurements.
+
+**Self-check of previous ticks.** `gpn-incident-alarm.timer` fired 19:19:18 PT ⇒ `peers=3 height=365310
+jobs_seen=256` / `ok: no incident conditions`; `gpn-soak-record.timer` next fire 2026-11-26 09:10 PT, day-1
+telemetry present (`~/.gpn/telemetry/2026-11-25.json`, 673 B). Row 274/276 evidence still holds.
+
+**No failures this pass** — nothing red, so nothing to diagnose.
+
+**[TRIAGE] item 256** — the one question: *may the loop attach a GPU partition of box 1's RTX 5070 Ti to the
+Hyper-V guest GPN-209?* A: attach it now (no spend, minutes of risk to box 1's live mining node, unblocks the
+lifecycle gate this release) · B: do it in a quiet window you name · C: leave box 1 alone, power box 4 back on
+when convenient. Recommend **A** after the cut. Options and evidence are in `docs/NEEDS-TRIAGE.md`.
+
 ## 18:59 PT — A0: the fix's run is building on both runners, nothing red, no box tickable yet
 
 **A0 (CI).** Run **45743326550** (head `77b1c93f`, the push that carries the CLI-fixture fix `73f8db8a`)
