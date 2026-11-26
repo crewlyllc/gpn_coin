@@ -8,6 +8,30 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 versions are [Semantic Versioning](https://semver.org/spec/v2.0.0.html), with
 the GPN-specific meaning of each level documented in `docs/updates.md`.
 
+## [0.3.82] - 2026-11-26
+
+Bumped from 0.3.81 (`scripts/bump-version.py patch`). A **critical** cut under the batch policy
+(owner, 2026-11-25): image and audio requests could be refused with "service unavailable" while a
+working media provider was online, which is the "AI does not work" rule, so it does not wait for a
+batch of five. Row 285 rides along.
+
+### Fixed
+- **Images and speech no longer refuse while a media provider is online** (row 286). The endpoint
+  walk behind `POST /v1/images/generations` and `POST /v1/audio/speech` took the **first three
+  providers in queue order** and probed those; a `pull://` box that published no `channel_url`
+  cannot be dialled (nothing to probe, zero cost) yet consumed one of those three slots. Measured
+  on 0.3.81: a prompt whose candidate list began with one failing probe and two such boxes answered
+  503 `no diffusion provider serves the channel render endpoint`; two minutes later the same
+  request returned three completed PNGs from the local diffusion provider on channel 7. The walk
+  now visits every candidate, skips structural refusals for free and budgets **real probes**
+  (`MAX_ENDPOINT_PROBES = 8`), so a reachable provider is reached whatever its rank.
+- **`GET /jobs` and `GET /job/{id}` publish accounts as ss58** (row 285). The chain read renders
+  `JobProvider`/`JobRequestor` as 32-byte hex by design (providers compare against
+  `signer_address_hex()`), and the AP published that string beside the store's ss58 lease, so 214
+  of 256 job rows carried an account a caller could not join to `GET /providers`. The HTTP
+  boundary now canonicalises them; the in-agent hex form is untouched, and historical hex leases
+  render ss58 with no data migration.
+
 ## [0.3.81] - 2026-11-26
 
 Bumped from 0.3.80 (`scripts/bump-version.py patch`). Batch release (owner policy 2026-11-25: five

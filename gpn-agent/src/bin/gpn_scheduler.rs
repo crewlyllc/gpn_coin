@@ -2382,6 +2382,17 @@ struct RouteCandidate {
 /// How many providers one request may try before giving up (item #70).
 const MAX_ROUTE_ATTEMPTS: usize = 3;
 
+/// How many media-channel **probes** one request may make
+/// (`/v1/images/generations`, `/v1/audio/speech`).
+///
+/// A probe is a bounded HTTP call (`probe_channel_endpoint`, 2.5 s), so the
+/// budget is on probes and not on candidates: a box with no dialable endpoint
+/// costs nothing and must not consume a slot (row 286 — on 2026-11-26 10:57 PT
+/// two `pull://` boxes that published no `channel_url` ate the first three
+/// slots, the reachable local diffusion provider was fourth, and a caller was
+/// told "image service unavailable" while it was serving the next request).
+const MAX_ENDPOINT_PROBES: usize = 8;
+
 /// **The one way any AI request finds providers** (queue item #70).
 ///
 /// Shared by `/v1/chat/completions`, `POST /jobs` (text, image, video, ML and
@@ -3938,6 +3949,49 @@ fn image_channel_endpoint(status_url: &str) -> Option<String> {
 /// which has no `status_url` to derive anything from — then the `status_url`
 /// derivation above. Both are probed before a request is accepted, so a stale
 /// or unreachable published value costs one failed probe, never a dead render.
+/// Probe candidates' media endpoints and keep the ones that answer.
+///
+/// Returns `(routes, skipped)` where each skip is `(address, endpoint)`, the
+/// endpoint being `None` when nothing dialable could be derived at all. Order
+/// is preserved, so a caller can report candidates in the order it tried them.
+///
+/// Only a real probe counts against [`MAX_ENDPOINT_PROBES`]; a structural skip
+/// (a `pull://` box with no published `channel_url`) is free. That is the same
+/// rule `failover` applies to pull-only boxes — budget bounds *work*, and a
+/// candidate that cannot be dialled is not work.
+fn probe_media_routes<F>(
+    candidates: &[RouteCandidate],
+    mut probe: F,
+) -> (Vec<ImageRoute>, Vec<(String, Option<String>)>)
+where
+    F: FnMut(&str) -> bool,
+{
+    let mut routes: Vec<ImageRoute> = Vec::new();
+    let mut skipped: Vec<(String, Option<String>)> = Vec::new();
+    let mut probes = 0usize;
+    for cand in candidates {
+        if routes.len() >= MAX_ROUTE_ATTEMPTS || probes >= MAX_ENDPOINT_PROBES {
+            break;
+        }
+        let endpoint = image_endpoint_for(&cand.provider);
+        let Some(endpoint) = endpoint else {
+            skipped.push((cand.provider.address.clone(), None));
+            continue;
+        };
+        probes += 1;
+        if probe(&endpoint) {
+            routes.push(ImageRoute {
+                provider_addr: cand.provider.address.clone(),
+                status_url: cand.provider.status_url.clone(),
+                channel_endpoint: Some(endpoint),
+            });
+        } else {
+            skipped.push((cand.provider.address.clone(), Some(endpoint)));
+        }
+    }
+    (routes, skipped)
+}
+
 fn image_endpoint_for(p: &Provider) -> Option<String> {
     if let Some(published) = p.channel_url.as_deref() {
         let local_only = url_host(published)
@@ -7646,34 +7700,21 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     // request and queue on the first box that answers: a caller
                     // gets an immediate, honest 503 (listing why every candidate
                     // was skipped) instead of a `202` that silently dies 30 s later.
+                    //
+                    // Every candidate is walked, and only a real probe counts
+                    // against the budget: a box with no dialable endpoint is a
+                    // free structural skip (row 286).
+                    let (routes, probe_skips) = probe_media_routes(&candidates, |endpoint| {
+                        gpn_agent::hub_ap::probe_channel_endpoint(endpoint)
+                    });
                     let mut skipped: Vec<String> = Vec::new();
-                    let mut routes: Vec<ImageRoute> = Vec::new();
-                    for cand in candidates.iter().take(MAX_ROUTE_ATTEMPTS) {
-                        let endpoint = image_endpoint_for(&cand.provider);
-                        let reachable = endpoint
-                            .as_deref()
-                            .map(gpn_agent::hub_ap::probe_channel_endpoint)
-                            .unwrap_or(false);
-                        if reachable {
-                            routes.push(ImageRoute {
-                                provider_addr: cand.provider.address.clone(),
-                                status_url: cand.provider.status_url.clone(),
-                                channel_endpoint: endpoint,
-                            });
-                        } else {
-                            let ep = endpoint
-                                .clone()
-                                .unwrap_or_else(|| "<unresolved>".to_string());
-                            eprintln!(
-                                "[images] candidate {} does not serve the channel render \
-                                 endpoint ({ep}) — trying the next provider",
-                                cand.provider.address
-                            );
-                            skipped.push(format!(
-                                "{}: no channel render endpoint at {ep}",
-                                cand.provider.address
-                            ));
-                        }
+                    for (addr, endpoint) in probe_skips {
+                        let ep = endpoint.unwrap_or_else(|| "<unresolved>".to_string());
+                        eprintln!(
+                            "[images] candidate {addr} does not serve the channel render \
+                             endpoint ({ep}) — trying the next provider"
+                        );
+                        skipped.push(format!("{addr}: no channel render endpoint at {ep}"));
                     }
                     if routes.is_empty() {
                         let msg = format!(
@@ -8069,26 +8110,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     // Speech is served by the same media channel as renders
                     // (one GPU, one job at a time), so the same endpoint probe
                     // decides which candidates can actually take it.
+                    // Same walk as the image path: structural skips are free,
+                    // only real probes are budgeted (row 286).
+                    let (routes, probe_skips) = probe_media_routes(&candidates, |endpoint| {
+                        gpn_agent::hub_ap::probe_channel_endpoint(endpoint)
+                    });
                     let mut skipped: Vec<String> = Vec::new();
-                    let mut routes: Vec<ImageRoute> = Vec::new();
-                    for cand in candidates.iter().take(MAX_ROUTE_ATTEMPTS) {
-                        let endpoint = image_endpoint_for(&cand.provider);
-                        let reachable = endpoint
-                            .as_deref()
-                            .map(gpn_agent::hub_ap::probe_channel_endpoint)
-                            .unwrap_or(false);
-                        if reachable {
-                            routes.push(ImageRoute {
-                                provider_addr: cand.provider.address.clone(),
-                                status_url: cand.provider.status_url.clone(),
-                                channel_endpoint: endpoint,
-                            });
-                        } else {
-                            skipped.push(format!(
-                                "{}: no channel render endpoint",
-                                cand.provider.address
-                            ));
-                        }
+                    for (addr, _endpoint) in probe_skips {
+                        skipped.push(format!("{addr}: no channel render endpoint"));
                     }
                     if routes.is_empty() {
                         let msg = format!(
@@ -11812,6 +11841,95 @@ mod tests {
             "models": p.models
         }));
         p
+    }
+
+    /// Row 286: the media walk must not spend its three route slots on boxes it
+    /// cannot probe. Measured 2026-11-26 10:57 PT on 0.3.81: the first three
+    /// candidates were one failed probe plus two `pull://` boxes that published
+    /// no `channel_url`, so the working local diffusion provider (fourth) was
+    /// never tried and the caller got `image service unavailable` — while the
+    /// same request two minutes later returned three completed PNGs on channel 7.
+    #[test]
+    fn a_media_provider_behind_unprobeable_candidates_is_still_routed() {
+        let mut pull_a = prov_caps("pull-a", "pull://a", 5, "sd-turbo", &["ImageGeneration"]);
+        pull_a.channel_url = None;
+        let mut remote_loopback =
+            prov_caps("remote", "pull://b", 5, "sd-turbo", &["ImageGeneration"]);
+        remote_loopback.channel_url = Some("http://127.0.0.1:8095/channel/job".into());
+        let mut pull_c = prov_caps("pull-c", "pull://c", 5, "sd-turbo", &["ImageGeneration"]);
+        pull_c.channel_url = None;
+        let mut local = prov_caps(
+            "local",
+            "http://127.0.0.1:8093",
+            5,
+            "sd-turbo",
+            &["ImageGeneration"],
+        );
+        local.channel_url = Some("http://127.0.0.1:8095/channel/job".into());
+
+        let reg = vec![pull_a, remote_loopback, pull_c, local];
+        let cands = route_candidates(
+            &reg,
+            JobKind::Image,
+            &RouteNeeds {
+                model: "sd-turbo".into(),
+                ..Default::default()
+            },
+        );
+        assert_eq!(cands.len(), 4, "all four are eligible to serve images");
+
+        let mut probed: Vec<String> = Vec::new();
+        let (routes, skipped) = probe_media_routes(&cands, |ep| {
+            probed.push(ep.to_string());
+            true
+        });
+
+        assert_eq!(
+            probed,
+            vec!["http://127.0.0.1:8095/channel/job"],
+            "only the local box has a dialable endpoint, so it is the only probe"
+        );
+        assert_eq!(routes.len(), 1);
+        assert_eq!(routes[0].provider_addr, "local");
+        assert_eq!(
+            skipped.len(),
+            3,
+            "every skip is still reported to the caller"
+        );
+    }
+
+    #[test]
+    fn the_media_walk_budgets_probes_not_candidates() {
+        // Eight probes is the budget; a ninth candidate past it is not probed,
+        // so a registry full of dead endpoints cannot stall one request.
+        let reg: Vec<Provider> = (0..12)
+            .map(|i| {
+                prov_caps(
+                    &format!("p{i}"),
+                    &format!("http://10.0.0.{i}:8090"),
+                    5,
+                    "sd-turbo",
+                    &["ImageGeneration"],
+                )
+            })
+            .collect();
+        let cands = route_candidates(
+            &reg,
+            JobKind::Image,
+            &RouteNeeds {
+                model: "sd-turbo".into(),
+                ..Default::default()
+            },
+        );
+        assert_eq!(cands.len(), 12);
+        let mut probes = 0usize;
+        let (routes, skipped) = probe_media_routes(&cands, |_ep| {
+            probes += 1;
+            false
+        });
+        assert_eq!(probes, MAX_ENDPOINT_PROBES);
+        assert!(routes.is_empty());
+        assert_eq!(skipped.len(), MAX_ENDPOINT_PROBES);
     }
 
     /// Item 272: the AP answers `not ready` only when **every** candidate is a
