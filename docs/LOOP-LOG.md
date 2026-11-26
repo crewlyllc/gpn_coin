@@ -1,3 +1,28 @@
+## 16:45 PT — 0.3.82: windows leg still queued (measured cause: box 1 running CI's windows cargo test); soak day 2 re-recorded at 23.73 h
+
+**A0.** `origin/main` HEAD `9df2a554` is docs-only ⇒ `?head_sha=` `total_count: 0` (expected, `paths-ignore`).
+The run that matters is the build sha `50c9e9b8`: CI run `45908365338` `pending` with **0 jobs** — not red,
+and the reason is not a fault: `ci.yml` `concurrency: group ci-${{ github.ref }}`, and the older same-ref
+run `45902079672` (sha `bad49d12`) is still `in_progress` on `Build + unit tests (windows, self-hosted)`
+(job `140205413986`, started 22:46:09Z, step 7 `Build + test gpn-agent (release)` running ~55 min, steps
+1–6 green). Serialization within one commit, by design.
+
+**§7 box 2 (`release-cut.sh`) — cannot run yet, box 3b/273 advanced instead.**
+`Windows binaries` run `45908380728` (sha `50c9e9b8`) ⇒ `queued` at 23:39Z (38 min); runners API
+`DESKTOP-USBUADL online busy=true` and the occupier is the CI windows job above. 38 min < the 90-minute
+stale threshold ⇒ no cancel, no re-dispatch; the linux half remains verified (`45908378111`
+completed/success, `cosign verify-blob` `Verified OK`, digests match the API). `release-cut.sh` refuses
+two-commit bundles, so it stays refused, correctly.
+
+**§3b 273 (soak) — day 2 re-recorded with a full 23.73 h window** (`scripts/soak-record.py`, height
+**370027**): 5540 blocks / 23.73 h ⇒ **15.42 s/block** vs the 13.4 s baseline, authored p50 **8.39 s** /
+p95 **42.87 s**, peers 3, 0 lines at 0 peers, imports 3781, longest import gap 151 s, 1 termination
+adjacent to a systemd `Stopping` / 0 unexplained, NRestarts=0, jobs 256 attempted / 227 ok, update
+`confirmed 0.3.81 is running`, gate-6 counts 0/0/0, box 1 peers 2 at height 370027. File
+`docs/soak-2026-11-25.md`; box 273 cannot tick before 2026-12-02.
+
+No blockers, no [TRIAGE].
+
 ## 15:21 PT — 0.3.82 §7: linux rebuild at `50c9e9b8` verified by hand; windows rebuild still queued on box 1
 
 **A0.** `origin/main` HEAD `b90c23d3` is docs-only ⇒ `?head_sha=` `total_count: 0` (expected, `paths-ignore`).
