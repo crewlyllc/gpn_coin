@@ -1,3 +1,33 @@
+## 14:10 PT — 0.3.82 §7 gate: the Linux lane had no provenance at all — fixed, rebuild dispatched, run ended
+
+**A0 (HEAD `e57b5f83`, docs).** `?head_sha=e57b5f83…` ⇒ **total_count 0** — expected under
+`ci.yml` `paths-ignore`; the code sha `eb538744` answered `success` (45880574537). Nothing red.
+
+**§7 box 1 (attestation before cut) — found the cause, fixed it.** Running the check by hand
+exposed a real gap, not a formality: `release-linux-selfhosted.yml` published `gpn-linux.tar.gz`
+with **no attestation step whatsoever** (windows has had the cosign/github gate since 0.3.79).
+Commit **`bad49d12`** adds the same two-mechanism contract to the linux lane: visibility probe
+(private ⇒ cosign keyless, public ⇒ `attest-build-provenance`), keyless `sign-blob` ⇒
+`gpn-linux.tar.gz.bundle`, a gate step that refuses to publish on a missing/short bundle or a
+`verify-blob` failure, and the bundle published next to the tarball. Local proof run here: no
+bundle ⇒ rc 1 `::error::no signature bundle … refusing to publish`; 50-byte bundle ⇒ rc 1
+`::error::signature bundle is 50 bytes`; visibility step against the real repo ⇒
+`repo visibility: private (private=True)` / `provenance method: cosign`. YAML parses; the
+heredocs flatten correctly.
+
+**Dispatched, then ended the run (no waiting).** `release-linux-selfhosted.yml` run
+**`45902084529`** at 22:01Z on sha `bad49d12`. The box stays unticked until the new tarball is
+downloaded and verified by hand. Note for the next run: that rebuild changes the linux digest, so
+§5/§6's linux evidence must be re-checked against the new bytes before `release-cut.sh`.
+
+**Soak (row 273, box cannot tick before 2026-12-02).** Day 2 refreshed at 22:02Z: height 369634,
+5147 blocks / 22.09 h ⇒ **15.45 s/block**, authored p50 9.27 s / p95 50.60 s, peers 3, 0 lines at
+0 peers, 1 termination adjacent to a systemd `Stopping` / **0 unexplained**, jobs 256/227 ok,
+update line `confirmed 0.3.81 is running`, gate-6 counts 0/0/0. `--verdict` rewritten: test 3/2/6
+INCOMPLETE, tests 1/4/5 NOT-COVERED.
+
+Tally: 28/56. Next run: check run `45902084529`, verify the attested linux asset by hand, then cut.
+
 ## 13:42 PT — 0.3.82 §6 CLOSED: strings + `--version` verified on the published artifacts (both platforms)
 
 **A0 (HEAD `9e1d9c5a`, docs).** `?head_sha=9e1d9c5a…` ⇒ total_count 1, **CI in_progress** (21:24Z) —
