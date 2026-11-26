@@ -8,6 +8,38 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 versions are [Semantic Versioning](https://semver.org/spec/v2.0.0.html), with
 the GPN-specific meaning of each level documented in `docs/updates.md`.
 
+## [0.3.81] - 2026-11-26
+
+Bumped from 0.3.80 (`scripts/bump-version.py patch`). Batch release (owner policy 2026-11-25: five
+fixes, or one critical): rows 278, 279, 282, 283 and 284 are the five waiting fixes, so they ride
+one version and one fleet restart instead of five.
+
+### Changed
+- **The update hold is evaluated before the node is stopped** (row 278): the canary gate,
+  `GPN_AUTO_UPDATE` policy and retry backoff moved out of `--apply` into one `release_hold()`
+  function, and `--check` runs it too, so a node that is not the canary no longer pays a
+  `taskkill /T /F` of the whole process tree plus a restart on every hourly check for a decision
+  that needs no file unlocked. `--check` gains exit 5 (“a newer release exists but this node is
+  held”); the generated `install.ps1` wrapper logs `holding … (node NOT restarted)` and exits 0
+  before `Stop-NodeTree`.
+- **`network.json` `spec_version` 54 → 55** (row 279), matching the runtime and the live chain, with
+  a note in `network_registry.rs` that raising this floor is what declares older nodes incompatible;
+  `scripts/check-spec-version.sh` now hard-fails on any registry/runtime divergence instead of
+  passing 54-vs-55 clean.
+
+### Fixed
+- **A unit test can no longer append to the operator's real `~/.gpn/last-exit.json`** (row 282):
+  `exit_report::default_path()` returns `$TMP/gpn-test-last-exit-<pid>.json` under `cfg!(test)`.
+  The updater reads that file to classify a failed start, so a test run could previously be quoted
+  as the reason a real update rolled back (32 such records were written on 2026-11-25/26).
+- **Three shipped files no longer point at the deleted `~/.openclaw/workspace/projectmanager07`
+  clone** (row 283): the cadence-gate unit template, `build-spec42-wasm.sh` and
+  `gpn_gpulock_contend.py` now resolve `~/gpn-loop`, so reinstalling the shipped unit no longer
+  restores one that fails `status=200/CHDIR` on every fire.
+- **The soak recorder no longer deletes a `### Note` written under a day section** (row 284): a
+  section boundary is now any `##`/`###` heading, and `splice_day` keeps notes above and below the
+  days, so a same-day refresh cannot eat the explanations of that day's numbers (it had eaten two).
+
 ## [0.3.80] - 2026-11-25
 
 Bumped from 0.3.79 (`scripts/bump-version.py patch`). Batch release (owner policy 2026-11-25: five
