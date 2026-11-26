@@ -1,3 +1,37 @@
+## 19:45 PT — A0: linux leg GREEN on 45743326550 (both earlier reds fixed); Windows leg 60 min in; no box tickable
+
+**A0 (CI).** Run **45743326550** (head `77b1c93f`) asked **once**: `in_progress`, `run_started_at 02:34:31Z`.
+Jobs: `Build + unit tests (linux)` **completed success** — step 8 `Test gpn_update CLI (debug - throwaway
+signing key)`, the step that was red at 02:2xZ, **passes**, so both prior local fixes (the `canary`/`canary_url`
+fixture and the CLI hold-message fixture) are now green *on CI*. `fmt + clippy` success · `secret-scan` success ·
+macOS / GPU two-node / dependency audit `skipped` by design. `Build + unit tests (windows, self-hosted)` still
+step 7 `Build + test gpn-agent (release)` since `02:39:43Z` = **60 min** — under the 90-minute stale-run rule, so
+not cancelled and not waited on. Conclusion still `null`; §4 box 4 stays unticked by its own wording.
+
+**Docs-SHA half of §4 box 3 re-confirmed on HEAD:** `33dcb3a2` touches only `docs/LOOP-LOG.md` and
+`docs/releases/0.3.80.md`; full-sha query ⇒ `total_count: 0`. Expected, not a red flag.
+
+**Boxes worked: none tickable, and why (measured, not assumed).**
+- §0e box 1 — still `AWAITING-OWNER` on triage **256**. Narrowed it further instead of re-arguing: `box3.sh` ⇒
+  `DESKTOP-DPJR60M / WindowsVersion 2009 / Windows 10 Pro`, `Get-VM` lists **no guests**, and
+  `Get-VMHostPartitionableGpu` **does not exist on Win10 Pro** (GPU-P is Server/Win11-Enterprise), so box 3
+  can neither host a clean guest nor partition a GPU — and its own node is live, so it cannot be wiped.
+  Recorded in `docs/NEEDS-TRIAGE.md` 256. The question is unchanged: box 1 / GPN-209 partition (A) vs powering
+  box 4 back on (C).
+- §3b row 273 (seven-day soak) — day 1/7 recorded at 23:39Z; day 2 is the 09:10 PT timer run, so a second
+  reading today would overwrite day 1. Not touched.
+- §5's SSH evidence box — box 1 carries the live Windows release job right now, so SSH verification yields per
+  the ordering rule rather than racing the build.
+
+**Self-check.** `gpn-incident-alarm` fired 19:35/19:36/19:37 PT ⇒ `peers=3 height=365380 jobs_seen=256` /
+`ok: no incident conditions` each time. `gpn-soak-record.timer` next fire 2026-11-26 09:10 PT; day-1 telemetry
+`~/.gpn/telemetry/2026-11-25.json` (673 B) present. Row 274/276 evidence still holds.
+
+**No failures this pass** — nothing red to diagnose.
+**Next run:** ask once for 45743326550's `conclusion`. `success` ⇒ tick §4 box 4, then dispatch §5's two platform
+builds on the same SHA with run ids written into the boxes and **end the run**. `failure` ⇒ read the failing
+step's log, quote the line, classify, fix, push once.
+
 ## 19:30 PT — [TRIAGE] A0 linux leg GREEN (the red step 8 now passes); Windows build still running; §0e venue still needs a decision
 
 **A0 (CI).** Run **45743326550** (head `77b1c93f`, carrying the CLI-fixture fix `73f8db8a`) — asked once

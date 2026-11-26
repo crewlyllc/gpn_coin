@@ -181,3 +181,9 @@ It needs box 4 powered on first: box 4 is **not in the tailnet at all** — box 
       `scripts/stranger-lifecycle.ps1` cannot pass during release N at all (`:362` — "step 5 needs two
       published versions"), so the 256 gate is now scoped to validate 0.3.78 → 0.3.79 and the venue
       must be ready before 0.3.79 publishes, not before this cut.
+      **Narrowed again 2026-11-26 03:40Z, by measurement:** box 3 is not a venue either — `box3.sh` ⇒
+      `CsName DESKTOP-DPJR60M / WindowsVersion 2009 / OsName Microsoft Windows 10 Pro`, `Get-VM` lists
+      no guests, and `Get-VMHostPartitionableGpu` does not exist on Windows 10 Pro (GPU-P is a
+      Server/Win11-Enterprise feature), so box 3 can neither host a clean guest nor partition a GPU;
+      and its own node is live, so it cannot be wiped. The venue question is therefore unchanged and
+      still asks only about box 1 / GPN-209 (option A) versus powering box 4 back on (option C).
