@@ -1,3 +1,25 @@
+## 17:0x PT — box 3 of 0.3.80: §3 seed parity, green (no seed changed in this batch)
+
+**A0 (CI):** HEAD `07be732c` (row 276) ⇒ run **45730513852** `status: pending`, `conclusion: null`. Noted,
+not waited on. Docs push `1a51945c` ⇒ `total_count: 0` (paths-ignore working, as expected).
+
+**Box worked — §3 "Seed lists still agree".** This release changes no seed; the box is that every surface
+still carries the one canonical seed and nothing divergent.
+- `bash scripts/tests/test-autostart-installers.sh` ⇒ `all autostart/installer assertions passed` (includes
+  `bash -n install.sh` and the run-a-node docs pointing at the installer).
+- `node --test website/tests/access-points.test.js` ⇒ 10/10 · `nodes-directory.test.js` ⇒ 9/9 ·
+  `referral.test.js` ⇒ 1/1 (combined 20 pass, 0 fail). access-points is the real parity gate: it fails the
+  build when any published multiaddr disagrees with `network.json`'s seed list (port and `/p2p/` id).
+- Seed census by value: `12D3KooWAFtUNxc6RgC9rq5uSHXd5XUncEcPqp77UU98oN6hSVFo` appears 92× across
+  `network.json`, `scripts/gpn-autostart.sh`, `scripts/run-windows.cmd`, `run-windows-provider.ps1`, the site
+  pages and the Rust network tables. The one near-miss `…hSVFp` is a unit-test fixture against TEST-NET-3
+  (`provider_heartbeat.rs:1079`), not a published seed. `network.json`: 1 bootstrap seed, 2 bootnodes
+  (dns4 + ip4), `bootstrap_urls = https://gpncoin.ai/seeds.json` — served by the Worker from that file.
+
+Committed `1a51945c`, pushed to main. Remaining unticked: 273 (soak, day 1/7, time-gated to 2026-12-02),
+then §4 (push/CI observe), §5 builds, §6 scan, §7 cut, §8 stranger verify, §9 deploy, §10 prove.
+Next box: §4, or §5 once the pending CI for `07be732c` concludes.
+
 ## 16:4x PT — box 4 of 0.3.80: row 276, three incident alarms (peers / block / job success), injected and delivered
 
 **A0 (CI):** HEAD `4c1ed61e` (the row-275 canary commit) ⇒ run **45728549405** `status: pending`, `conclusion: null`.
