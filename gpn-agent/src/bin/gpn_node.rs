@@ -5427,6 +5427,10 @@ mod tests {
             update_spread_secs: 0,
             update_restart: true,
             update_check: true,
+            // Row 275: a test config is not a canary and defers to the
+            // published proof like any ordinary node.
+            canary: false,
+            canary_url: update::CANARY_STATE_URL.to_string(),
             min_version_enforce: true,
             standby: false,
             config_path: None,

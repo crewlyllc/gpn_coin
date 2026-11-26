@@ -1,3 +1,44 @@
+## 17:5x PT — 0.3.80 §0e: stranger-path failure messages audited (box ticked); A0 read a RED and fixed it
+
+**A0 (CI) — the run on the code SHA went red, and it was ours.** `origin/main` HEAD `c13f410e` (docs-only)
+⇒ `total_count: 0` (paths-ignore, expected). The code sha `07be732c` ⇒ run **45730513852**: step 12
+`Clippy - gpn-agent (warnings as errors)` ⇒
+`error[E0063]: missing fields `canary` and `canary_url` in initializer of `Config`` at
+`src/bin/gpn_node.rs:5392:9`, then `could not compile `gpn-agent` (bin "gpn_node") test`.
+- **Cause, in mechanism terms:** row 275's commit `4c1ed61e` added the two `Config` fields and wired
+  `Config::load`, but not the `test_config()` fixture — a **test-only** target, so it only breaks under
+  `--all-targets`. That commit's own CI run (45728549405) was **cancelled while still queued, 0 jobs
+  created**, so nothing had ever compiled the bin's test target until this run. My earlier local
+  `cargo test --lib` could not have caught it either: `--lib` never builds bin test binaries.
+- **Fix:** `canary: false` + `canary_url: update::CANARY_STATE_URL.to_string()` in `test_config()`.
+- **Narrowest checks:** `cargo test --bin gpn_node --no-run` ⇒ `Executable unittests
+  src/bin/gpn_node.rs` (builds clean); CI's exact flag set `cargo clippy --release --all-targets … -D
+  warnings` ⇒ **EXIT=0**; `cargo test --release --bin gpn_node update_identity_is_per_node` ⇒
+  `1 passed; 0 failed; 33 filtered out`. One push.
+
+**Box worked — §0e "every step failure names a cause a stranger can act on".** Audited all four stranger
+steps by message source, not by claim:
+- **register**: the six pool-boundary codes `Custom(1)`…`Custom(6)` each map to their own actionable
+  sentence in `onboard.rs:665-735` (difficulty target / missing fingerprint / free entry spent / GPU
+  fingerprint already used / per-block cap / 24 h cooldown), plus a string-path split of the same six at
+  `:738-800`. Tests assert each sentence **and** that none claims "bad signature", and that an unknown
+  code is reported unknown rather than mapped onto an old reason. Run: `cargo test --lib onboard::` ⇒
+  **18 passed, 0 failed**.
+- **install**: `install.sh:154,175,179,187` carry the failing cause inline (`snapshot metadata failed
+  verification: <tail>`, …); a fast-sync failure falls back to full sync instead of aborting (`:69`).
+- **serve**: `llm/infer.rs:29-36` names the probed URL, both installers, the two commands and the
+  consequence ("still mines, but cannot serve LLM jobs"), warned once per condition.
+- **self-update**: `declined_text()` renders `update declined until <time> (last: <reason>)`, pinned by
+  `the_decline_line_names_the_time_and_the_reason`.
+- Not ticked: box 177 (lifecycle on a clean Windows guest) — box 1's runner was running the Windows CI
+  job, and the lifecycle installs + self-updates, so it yields to a build. Said so in the checklist
+  rather than claiming it.
+
+Still unticked: §4 box 4 (needs a **green** code-SHA run — the push above starts one), 273 (soak day
+1/7, time-gated to 2026-12-02), §5 builds, §6 scan, §7 cut, §8 stranger verify, §9 deploy, §10 prove.
+Next pass: read the new code-SHA run's conclusion. Green ⇒ tick §4 box 4, dispatch both release builds,
+write the handles, end the run.
+
 ## 17:2x PT — 0.3.80 §4 push/CI boxes: three ticked on evidence, the code-SHA conclusion left open
 
 **A0 (CI):** `origin/main` HEAD `c13f410e` (docs-only) ⇒ `total_count: 0`, expected under
