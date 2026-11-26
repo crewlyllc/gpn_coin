@@ -1,3 +1,34 @@
+## 10:22 PT — row 273 day 2 re-recorded and the +14.5 % drift explained block by block (no release in flight)
+
+**A0:** `origin/main` HEAD `4cd5e3ff` (full sha) ⇒ runs for that sha **total_count 0** — docs-only commit
+under `ci.yml` `paths-ignore`, so nothing is red and nothing is waiting. Continued to A.
+
+**Release state:** 0.3.81 is published, filed (`docs/releases/archive/0.3.81.md` + INDEX row) and reported by the
+running node; nothing is in flight. `NEW` rows waiting = **1** (256), so the batch rule keeps the next version
+closed — no bundling this run.
+
+**Box worked — row 273, the soak's day-2 record (the only IN-PROGRESS row).**
+- Recorder re-run against the live node ⇒ `### Day 2 — 2026-11-26 18:17 UTC`, height **368748**, effective
+  **15.50 s/block** (4261 blocks / 18.35 h), authored p50 **11.75 s** / p95 50.97 s, peers **3**, unexplained node
+  terminations **0**, gate-6 counts `unfunded`/`pruning`/`update declined` = **0/0/0**, box 1 peers=2 at #368750.
+  `gpn-soak-record.timer` healthy: last fire 09:10:14 PST, next 2026-11-27 09:07:27 PST.
+- A drift number is not a cause, so it was measured: every authored timestamp over the **last 749 blocks** (not a
+  sample) ⇒ mean 16.54 s, **p50 12.03 s** (below the 13.4 s reference — the chain is not uniformly slow),
+  **16.0 % of blocks >30 s**, and those 120 blocks hold **66.7 of the 107 min** of excess. The worst, 139.8 s
+  before `#368645`, is the journal's own `sealer: still searching template 0x8170…0732 after 100.7s (355 nonce
+  window(s) searched, GPU healthy, submit not yet attempted)`. Our node authored **131 of 769** blocks (17 %) in
+  that window ⇒ the tail is the miners' hashrate spread, not a fault on this host; no ban/`Reason:` lines, peers 3.
+- Written as `### Note (2026-11-26 10:2x PT)` in `docs/soak-2026-11-25.md` (after the day sections, so the
+  recorder's same-day refresh keeps it) and as day-2 evidence on row 273 in `GPN-LIST.md`. **273 stays
+  IN-PROGRESS** — day 3 of 7 lands 2026-11-27, verdict 2026-12-02.
+
+**[TRIAGE] — item 256 unchanged and still unanswered since 2026-11-24:** §0e (`scripts/stranger-lifecycle.ps1`)
+cannot run without a clean Windows guest that can serve a GPU job, so every release since 0.3.73 carries that box
+unticked. Options as filed: (A) attach a partition of box 1's 5070 Ti to guest GPN-209 — `Get-VMHostPartitionableGpu`
+answers, no spend, minutes of risk to box 1's node; (B) power box 4 back on; (C) retire the live half and keep the
+unit-level proof. Recommendation still A.
+
+**Next run:** A0, then row 273's day-3 record (timer fires 09:07 PT) — or 256 immediately if a venue is chosen.
 ## 10:05 PT — box 1 self-updated to 0.3.81 with the full log sequence; §9 4/4, §10 3/3, 0.3.81 FILED (5 rows closed)
 
 **A0:** `origin/main` HEAD `cd510a8f` (full sha) ⇒ runs for that sha **total_count 0** — docs-only commit under
