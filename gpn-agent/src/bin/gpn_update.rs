@@ -960,6 +960,49 @@ fn run_apply(o: &Options, report: &mut Report) -> u8 {
         return EXIT_UPDATE_AVAILABLE;
     }
 
+    // Row 275: canary gate. A non-canary node does NOT install a release until a
+    // published proof says one node already ran it AND served a job on it. A
+    // missing or unreadable proof is a HOLD, not an error: the node stays healthy
+    // on its current version and retries on the next tick. Exit `3` is the honest
+    // code — a newer release exists and was deliberately not applied.
+    let canary = update::canary_mode(non_empty_env("GPN_CANARY").as_deref());
+    if !canary {
+        let url =
+            non_empty_env("GPN_CANARY_URL").unwrap_or_else(|| update::CANARY_STATE_URL.to_string());
+        let proof = match fetch(&url) {
+            Ok(body) => match update::parse_canary_state(&body) {
+                Ok(st) => Some(st),
+                Err(e) => {
+                    report.note = Some(format!("the canary proof at {url} is unreadable: {e}"));
+                    None
+                }
+            },
+            Err(e) => {
+                report.note = Some(format!(
+                    "no canary proof readable at {url}: {}",
+                    e.message()
+                ));
+                None
+            }
+        };
+        if let update::CanaryGate::Hold(why) =
+            update::canary_gate(proof.as_ref(), &m.version, false)
+        {
+            let msg = format!(
+                "{} is available, but this node is not the canary — {why}",
+                m.version
+            );
+            report.error = Some(msg.clone());
+            emit_error(o, report, &msg);
+            return EXIT_UPDATE_AVAILABLE;
+        }
+    } else if !o.quiet && !o.json {
+        println!(
+            "  canary: this node installs {} first, before the rest of the fleet",
+            m.version
+        );
+    }
+
     let asset = match update::select_asset(&m, update::platform_os(), update::platform_arch()) {
         Ok(a) => a,
         Err(e) => {

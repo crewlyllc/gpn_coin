@@ -1,3 +1,33 @@
+## 16:24 PT — box 3 of 0.3.80: row 275, the canary gate (one node proves a release before the fleet gets it)
+
+**A0 (CI):** HEAD `42d6407a` (the row-256 filing commit) is docs-only ⇒ `GET /actions/runs?head_sha=42d6407ad31b78f09dd62df969923ebaa620f8ea`
+⇒ **total_count: 0** — `paths-ignore` behaving, nothing red, nothing waited on.
+
+**Box worked — 275 (canary rollout).** Built as a **published state file**, not a manifest field: the manifest's canonical text is
+what every deployed node hashes, so adding a field there would make the manifest fail verification on nodes already in the field.
+
+- **Test first:** `cargo test --lib update::tests::canary` failed to compile — `cannot find type CanaryGate in this scope` (my new tests
+  named the API before it existed). Then: `cargo test --lib update::` ⇒ **119 passed, 0 failed**.
+- **Change:** `update::canary_gate` holds the fleet on a missing proof, a proof for another version, `ok:false`, or *confirmed but no job
+  served*; `GPN_CANARY=1` short-circuits (the canary never waits for its own proof). Wired into **`gpn_update --apply`** (the path this
+  fleet actually uses, `gpn-update.timer`) and into `gpn_node::update_once` (the end-user supervisor, which also skips the install spread
+  when it is the canary). Proof built by `scripts/canary-report.py` from `system_version` on the RUNNING node + a `Completed` job for that
+  provider at `/jobs`; published by `scripts/canary-publish.sh` to `website/canary.json`, which refuses anything not green.
+- **Script tests:** `test-canary-publish.sh` ⇒ **15 passed, 0 failed**; `test-canary-report.py` ⇒ **13 passed, 0 failed**.
+- **Live, real binary, signed 0.3.81 manifest served locally with a deliberately dead asset URL (so nothing could be installed):**
+  no proof ⇒ `0.3.81 is available, but this node is not the canary — no canary proof published for 0.3.81 — holding until one node has run
+  it`, **rc 3**; proof for 0.3.80 ⇒ `the published canary proof is for 0.3.80 not 0.3.81 — holding`, rc 3; failed canary ⇒ `the canary FAILED
+  on 0.3.81 (confirm: process=down rpc=no 10s) — staying on the current version`, rc 3; green proof ⇒ past the gate, download attempted
+  (`HTTP 404`, rc 1); `GPN_CANARY=1` ⇒ `canary: this node installs 0.3.81 first, before the rest of the fleet`, gate skipped.
+- **Live on our own data:** `canary-report.py --job-id 6342` ⇒ `0.3.79 confirmed by the running node (system_version)` + `job #6342 is
+  Completed for 0x664c6e12…` ⇒ green; `canary-publish.sh --dry-run` ⇒ `canary proof for 0.3.79 is green`.
+- **State now:** `https://gpncoin.ai/canary.json` ⇒ **HTTP 404**, i.e. the gate is CLOSED until a canary proves 0.3.80. Rollout: set
+  `GPN_CANARY=1` in this host's `~/.gpn/fleet/run-fleet.sh` after 0.3.80 publishes, then publish the proof — box 1 and the rest stay on
+  0.3.79 until it is green. A failed canary leaves the fleet untouched, which is the property the row asked for.
+
+Tick evidence is inline in `docs/releases/0.3.80.md` box 275. Row 275 stays IN-PROGRESS until 0.3.80 is published and a node reports it.
+Next box: 276 (three incident alarms).
+
 ## 15:57 PT — box 3 of 0.3.80: row 274, per-node telemetry JSON + a week-over-week trend the audit can act on
 
 **A0 (CI):** HEAD `7d20ac72` is docs-only ⇒ `GET /actions/runs?head_sha=7d20ac724a7833e1e43c0b5aa8261fddba9daab0`

@@ -3700,6 +3700,145 @@ pub fn now_unix() -> u64 {
         .unwrap_or(0)
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Canary gate (row 275)
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// The problem this solves: every node pulls a new release inside its own
+// jittered window, so a bad release reaches the WHOLE fleet before anybody has
+// proven it runs. The fix is one designated node (the canary) updating first
+// and the rest holding on the old version until that node's success is
+// published somewhere they can read.
+//
+// The proof is a small JSON file served next to the manifest:
+//
+//   {"version":"0.3.80","ok":true,"job_served":true,"confirmed_at":1700000000}
+//
+// Rules, all of them conservative — a node that cannot read the proof holds:
+//   * missing file                      ⇒ HOLD
+//   * file names another version        ⇒ HOLD (says nothing about this one)
+//   * `ok:false`                        ⇒ HOLD (and quote the canary's reason)
+//   * `ok:true` but `job_served:false`  ⇒ HOLD (confirmed, but idle)
+//   * `ok:true` and `job_served:true`   ⇒ GO
+//
+// The canary node itself is never gated by a proof it is supposed to produce.
+
+/// Where the published canary proof lives by default (`GPN_CANARY_URL`).
+pub const CANARY_STATE_URL: &str = "https://gpncoin.ai/canary.json";
+
+/// Is this node the canary? Explicit opt-in only (`GPN_CANARY=1` / `canary = true`).
+pub fn canary_mode(raw: Option<&str>) -> bool {
+    match raw {
+        Some(v) => matches!(
+            v.trim().to_ascii_lowercase().as_str(),
+            "1" | "true" | "yes" | "on"
+        ),
+        None => false,
+    }
+}
+
+/// The published proof that the canary survived a release.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CanaryState {
+    /// The release this proof is about. A proof for another version is no
+    /// proof at all, so the gate refuses it.
+    pub version: String,
+    /// True once the canary is RUNNING the new version.
+    #[serde(default)]
+    pub ok: bool,
+    /// True once the canary has actually served a job on the new version.
+    #[serde(default)]
+    pub job_served: bool,
+    /// Unix seconds the canary confirmed the new version was up.
+    #[serde(default)]
+    pub confirmed_at: u64,
+    /// Unix seconds the canary failed (0 = did not fail).
+    #[serde(default)]
+    pub failed_at: u64,
+    /// The canary's own failure text, quoted to the fleet when `ok` is false.
+    #[serde(default)]
+    pub reason: String,
+}
+
+/// The gate's answer for one node and one target version.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CanaryGate {
+    /// May download and install the target version.
+    Go,
+    /// Must stay on the current version; the string says why (log it verbatim).
+    Hold(String),
+}
+
+/// Parse a published canary proof. Refuses anything without a version, and
+/// every field defaults to the conservative value (`false`).
+pub fn parse_canary_state(body: &[u8]) -> Result<CanaryState, UpdateError> {
+    let st: CanaryState =
+        serde_json::from_slice(body).map_err(|e| UpdateError::BadJson(e.to_string()))?;
+    if st.version.trim().is_empty() {
+        return Err(UpdateError::BadJson("canary state has no version".into()));
+    }
+    Ok(st)
+}
+
+/// Decide whether a node may install `target` yet.
+///
+/// `is_canary` short-circuits: the canary is the one producing the proof, so it
+/// must never wait for one.
+pub fn canary_gate(state: Option<&CanaryState>, target: &str, is_canary: bool) -> CanaryGate {
+    if is_canary {
+        return CanaryGate::Go;
+    }
+    let Some(st) = state else {
+        return CanaryGate::Hold(format!(
+            "no canary proof published for {target} — holding until one node has run it"
+        ));
+    };
+    if st.version.trim() != target.trim() {
+        return CanaryGate::Hold(format!(
+            "the published canary proof is for {} not {target} — holding",
+            st.version.trim()
+        ));
+    }
+    if !st.ok {
+        let why = if st.reason.trim().is_empty() {
+            "the canary failed and published no reason".to_string()
+        } else {
+            st.reason.trim().to_string()
+        };
+        return CanaryGate::Hold(format!(
+            "the canary FAILED on {target} ({why}) — staying on the current version"
+        ));
+    }
+    if !st.job_served {
+        return CanaryGate::Hold(format!(
+            "the canary is running {target} but has not served a job yet — holding"
+        ));
+    }
+    CanaryGate::Go
+}
+
+/// `<state_dir>/canary.json` — this node's own report (canary mode only).
+pub fn canary_report_path(state_dir: &Path) -> PathBuf {
+    state_dir.join("canary.json")
+}
+
+pub fn read_canary_report(state_dir: &Path) -> Option<CanaryState> {
+    let body = std::fs::read(canary_report_path(state_dir)).ok()?;
+    serde_json::from_slice(&body).ok()
+}
+
+/// Write the canary's own report atomically (a half-written proof would be
+/// published as a broken one).
+pub fn write_canary_report(state_dir: &Path, st: &CanaryState) -> Result<(), UpdateError> {
+    std::fs::create_dir_all(state_dir)?;
+    let body = serde_json::to_vec_pretty(st).map_err(|e| UpdateError::Io(e.to_string()))?;
+    let target = canary_report_path(state_dir);
+    let tmp = PathBuf::from(format!("{}.tmp-{}", target.display(), std::process::id()));
+    std::fs::write(&tmp, &body)?;
+    std::fs::rename(&tmp, &target)?;
+    Ok(())
+}
+
 /// Set a boolean key in a TOML document, preserving everything else.
 ///
 /// Used by `--setup` to persist the auto-update answer without rewriting an
@@ -6580,5 +6719,123 @@ mod tests {
             assert_eq!(r.attempts, i + 1, "the count grows across boots too");
         }
         let _ = std::fs::remove_dir_all(&dir);
+    }
+    // ── canary gate (row 275) ───────────────────────────────────────────────
+    //
+    // One node (the canary) updates first and proves itself; the rest of the
+    // fleet HOLDS on the old version until that proof is published. The proof
+    // is a small JSON file served next to the manifest:
+    //   {"version":"0.3.80","ok":true,"job_served":true,"confirmed_at":...}
+    // A missing file, a file for another version, `ok:false`, or "confirmed but
+    // no job served yet" all mean HOLD.
+
+    #[test]
+    fn canary_mode_is_an_explicit_opt_in() {
+        for on in ["1", "true", "TRUE", "yes", "on"] {
+            assert!(canary_mode(Some(on)), "{on:?} must enable canary mode");
+        }
+        for off in ["0", "false", "off", "", "no", "canary"] {
+            assert!(
+                !canary_mode(Some(off)),
+                "{off:?} must NOT enable canary mode"
+            );
+        }
+        assert!(!canary_mode(None), "a node is not a canary by default");
+    }
+
+    fn ok_state(v: &str, job_served: bool) -> CanaryState {
+        CanaryState {
+            version: v.to_string(),
+            ok: true,
+            job_served,
+            confirmed_at: 1_700_000_000,
+            failed_at: 0,
+            reason: String::new(),
+        }
+    }
+
+    #[test]
+    fn the_fleet_holds_until_the_canary_proves_itself() {
+        // No published state at all ⇒ hold, and say which version is blocked.
+        match canary_gate(None, "0.3.80", false) {
+            CanaryGate::Hold(why) => assert!(
+                why.contains("0.3.80"),
+                "the hold must name the version, got {why:?}"
+            ),
+            CanaryGate::Go => panic!("no canary state must hold the fleet"),
+        }
+        // A state for a DIFFERENT version says nothing about this one.
+        match canary_gate(Some(&ok_state("0.3.79", true)), "0.3.80", false) {
+            CanaryGate::Hold(why) => assert!(why.contains("0.3.79") && why.contains("0.3.80")),
+            CanaryGate::Go => panic!("a state for another version must hold"),
+        }
+        // Confirmed, but no job served on the new version yet ⇒ still hold.
+        match canary_gate(Some(&ok_state("0.3.80", false)), "0.3.80", false) {
+            CanaryGate::Hold(why) => assert!(
+                why.to_ascii_lowercase().contains("job"),
+                "the hold must name the missing job, got {why:?}"
+            ),
+            CanaryGate::Go => panic!("confirmed-but-idle canary must hold"),
+        }
+        // Confirmed and a job served ⇒ the fleet may go.
+        assert_eq!(
+            canary_gate(Some(&ok_state("0.3.80", true)), "0.3.80", false),
+            CanaryGate::Go
+        );
+    }
+
+    #[test]
+    fn a_failed_canary_holds_the_rest_on_the_old_version() {
+        let failed = CanaryState {
+            version: "0.3.80".into(),
+            ok: false,
+            job_served: false,
+            confirmed_at: 0,
+            failed_at: 1_700_000_500,
+            reason: "confirm: process=down rpc=no 10s".into(),
+        };
+        match canary_gate(Some(&failed), "0.3.80", false) {
+            CanaryGate::Hold(why) => assert!(
+                why.contains("confirm: process=down"),
+                "the hold must quote the canary's failure, got {why:?}"
+            ),
+            CanaryGate::Go => panic!("a failed canary must never release the fleet"),
+        }
+    }
+
+    #[test]
+    fn the_canary_itself_is_not_gated_by_its_own_proof() {
+        assert_eq!(canary_gate(None, "0.3.80", true), CanaryGate::Go);
+        let failed = CanaryState {
+            version: "0.3.80".into(),
+            ok: false,
+            ..ok_state("0.3.80", false)
+        };
+        assert_eq!(canary_gate(Some(&failed), "0.3.80", true), CanaryGate::Go);
+    }
+
+    #[test]
+    fn a_canary_report_round_trips_and_is_conservative_to_parse() {
+        let dir = td("canary-report");
+        let st = CanaryState {
+            confirmed_at: 1_700_000_123,
+            ..ok_state("0.3.80", true)
+        };
+        write_canary_report(&dir, &st).unwrap();
+        assert_eq!(read_canary_report(&dir).as_ref(), Some(&st));
+        let _ = std::fs::remove_dir_all(&dir);
+
+        // Anything that is not a canary success must parse to something the
+        // gate HOLDS on — never to an accidental "go".
+        assert!(parse_canary_state(b"not json").is_err());
+        let minimal: CanaryState = serde_json::from_str(r#"{"version":"0.3.80"}"#).unwrap();
+        assert!(
+            !minimal.ok && !minimal.job_served,
+            "defaults are false, not true"
+        );
+        assert!(matches!(
+            canary_gate(Some(&minimal), "0.3.80", false),
+            CanaryGate::Hold(_)
+        ));
     }
 }

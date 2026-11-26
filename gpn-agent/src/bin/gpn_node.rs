@@ -164,6 +164,11 @@ struct FileConfig {
     update_restart: Option<bool>,
     /// Fetch the manifest at all (`GPN_UPDATE_CHECK=0` for air-gapped hosts).
     update_check: Option<bool>,
+    /// This node is the fleet canary: it updates FIRST and the rest hold
+    /// until its success is published (`GPN_CANARY=1` / `canary = true`).
+    canary: Option<bool>,
+    /// Where the published canary proof is read from (`GPN_CANARY_URL`).
+    canary_url: Option<String>,
     /// Enforce `min_version` by refusing to mine/announce (`GPN_MIN_VERSION_ENFORCE`).
     min_version_enforce: Option<bool>,
     /// Serve the local dashboard (`--gui` / `GPN_GUI=1`). Loopback only.
@@ -223,6 +228,10 @@ struct Config {
     update_restart: bool,
     /// Whether to fetch the manifest at all (off = air-gapped).
     update_check: bool,
+    /// This node is the canary: it updates first, never waits for a proof.
+    canary: bool,
+    /// URL of the published canary proof (row 275).
+    canary_url: String,
     /// Whether `min_version` is enforced (emergency escape hatch, default on).
     min_version_enforce: bool,
     /// Set at startup when this build is below `min_version`: sync, don't
@@ -1831,6 +1840,16 @@ impl Config {
             update_check: env_bool("GPN_UPDATE_CHECK")
                 .or(file.update_check)
                 .unwrap_or(true),
+            // ── Canary rollout (row 275) ───────────────────────────────────
+            // Off by default: exactly ONE node in the fleet sets this. A node
+            // that is a canary skips the install spread and is never gated by
+            // a proof it is supposed to produce; every other node HOLDS on the
+            // old version until the canary's success is published.
+            canary: update::canary_mode(env_str("GPN_CANARY").as_deref())
+                || file.canary.unwrap_or(false),
+            canary_url: env_str("GPN_CANARY_URL")
+                .or(file.canary_url)
+                .unwrap_or_else(|| update::CANARY_STATE_URL.to_string()),
             min_version_enforce: env_bool("GPN_MIN_VERSION_ENFORCE")
                 .or(file.min_version_enforce)
                 .unwrap_or(true),
@@ -2732,6 +2751,62 @@ fn download_and_stage(
     Ok(pending)
 }
 
+fn fetch_canary_state(cfg: &Config) -> Option<update::CanaryState> {
+    let client = match http_client(Duration::from_secs(15)) {
+        Ok(c) => c,
+        Err(e) => {
+            log_event("update", &format!("canary: no HTTP client ({e}) — holding"));
+            return None;
+        }
+    };
+    let resp = match client.get(&cfg.canary_url).send() {
+        Ok(r) => r,
+        Err(e) => {
+            log_event(
+                "update",
+                &format!(
+                    "canary: could not read {} ({e}) — holding on the current version",
+                    cfg.canary_url
+                ),
+            );
+            return None;
+        }
+    };
+    if !resp.status().is_success() {
+        log_event(
+            "update",
+            &format!(
+                "canary: {} -> HTTP {} (no proof published yet) — holding on the current version",
+                cfg.canary_url,
+                resp.status()
+            ),
+        );
+        return None;
+    }
+    match resp.bytes() {
+        Ok(body) => match update::parse_canary_state(&body) {
+            Ok(st) => Some(st),
+            Err(e) => {
+                log_event(
+                    "update",
+                    &format!(
+                        "canary: the proof at {} is not readable ({e}) — holding",
+                        cfg.canary_url
+                    ),
+                );
+                None
+            }
+        },
+        Err(e) => {
+            log_event(
+                "update",
+                &format!("canary: proof body failed to read ({e}) — holding"),
+            );
+            None
+        }
+    }
+}
+
 /// One full check cycle (used at startup-with-auto-update and on a timer).
 ///
 /// `seed` is the node's fleet-spread seed and `spread` the configured install
@@ -2762,7 +2837,39 @@ fn update_once(
         return Ok(());
     }
 
-    let delay = update::spread_delay(spread, seed, &m.version);
+    // Row 275: canary rollout. The canary installs first; every other node
+    // HOLDS on its current version until one node's success is published —
+    // running the target version AND having served a job on it. This is the
+    // whole point of the row: a bad release must not reach the fleet in one
+    // window, and a FAILED canary must leave everyone where they are.
+    if !cfg.canary {
+        let proof = fetch_canary_state(cfg);
+        match update::canary_gate(proof.as_ref(), &m.version, cfg.canary) {
+            update::CanaryGate::Go => log_event(
+                "update",
+                &format!("canary proof for {} is green — installing", m.version),
+            ),
+            update::CanaryGate::Hold(why) => {
+                log_event("update", &format!("canary hold: {why}"));
+                return Ok(());
+            }
+        }
+    }
+
+    // The canary never waits out the fleet spread — it IS the proof everyone
+    // else is waiting for, so a delay here only lengthens the whole rollout.
+    let delay = if cfg.canary {
+        log_event(
+            "update",
+            &format!(
+                "canary: {0} is available — updating first, before the fleet",
+                m.version
+            ),
+        );
+        Duration::ZERO
+    } else {
+        update::spread_delay(spread, seed, &m.version)
+    };
     if delay > Duration::ZERO {
         log_event(
             "update",
@@ -3536,6 +3643,65 @@ fn ollama_models(ollama_url: &str) -> Vec<String> {
     out
 }
 
+/// Did the previous status tick see a job running? Used to notice the moment a
+/// job FINISHES (the yield flag goes away), which is the only signal an idle
+/// tick can give that work was actually served.
+static CANARY_JOB_WAS_RUNNING: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+/// Maintain this node's canary proof (row 275).
+///
+/// Only runs in canary mode. The proof says two things and both must be true
+/// before the fleet is released: the canary is RUNNING the new version
+/// (`ok`, stamped the first tick after the restart) and the canary has SERVED A
+/// JOB on it (`job_served`, set when the GPU yield flag goes from held to
+/// released). Publishing the file is `scripts/canary-publish.sh`; this function
+/// only ever writes the local report, so a node that can't publish says nothing
+/// rather than lying to the fleet.
+fn canary_tick(cfg: &Config, job_running: bool) {
+    use std::sync::atomic::Ordering;
+    if !cfg.canary {
+        return;
+    }
+    let dir = cfg.update_dir();
+    let me = env!("CARGO_PKG_VERSION");
+    let prev = update::read_canary_report(&dir);
+    let mut st = match &prev {
+        // A report for the version we are running: keep its history.
+        Some(p) if p.version.trim() == me => p.clone(),
+        // First tick on a new version: this IS the confirmation.
+        _ => {
+            log_event(
+                "update",
+                &format!(
+                    "canary: confirmed running {me} — proof will be publishable once a job is served"
+                ),
+            );
+            update::CanaryState {
+                version: me.to_string(),
+                ok: true,
+                job_served: false,
+                confirmed_at: update::now_unix(),
+                failed_at: 0,
+                reason: String::new(),
+            }
+        }
+    };
+    let was_running = CANARY_JOB_WAS_RUNNING.swap(job_running, Ordering::SeqCst);
+    if was_running && !job_running && !st.job_served {
+        st.job_served = true;
+        log_event(
+            "update",
+            &format!("canary: served a job on {me} — the proof is now green (publish it to release the fleet)"),
+        );
+    }
+    if prev.as_ref() != Some(&st) {
+        if let Err(e) = update::write_canary_report(&dir, &st) {
+            log_event("update", &format!("canary: could not write the proof: {e}"));
+        }
+    }
+}
+
 /// The JSON document behind `GET /api/status`.
 fn status_doc(cfg: &Config, shared: &Shared) -> serde_json::Value {
     use serde_json::json;
@@ -3580,6 +3746,9 @@ fn status_doc(cfg: &Config, shared: &Shared) -> serde_json::Value {
     let (gpu, vram) = gpu_summary();
     // One GPU, one job: the provider holds this flag for a job's whole duration.
     let job_running = gpn_agent::gpu_yield::yield_flag_path().exists();
+    // Row 275: the canary proves itself in two steps — running the new version,
+    // then serving a job on it. This sees both from the same status tick.
+    canary_tick(cfg, job_running);
     let job = if job_running {
         json!({"kind": "ai job", "id": null, "model": ""})
     } else {
