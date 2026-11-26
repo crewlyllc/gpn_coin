@@ -2197,6 +2197,23 @@ fn hex_to_ss58(hex_addr: &str) -> Option<String> {
     Some(sp_core::sr25519::Public::from_raw(bytes).to_ss58check())
 }
 
+/// Render an account the way every other public surface does (ss58).
+///
+/// `GET /jobs` mixed two encodings of one account in a single object: `provider`
+/// came from the chain read (`ChainClient::get_job_state` → `0x…` hex) while
+/// `lease_provider` came from the assignment store (ss58), so a caller could not
+/// join a job row to `GET /providers` (ss58) — measured 2026-11-26: 214 of 256
+/// rows in the `?limit=256` window carried hex, and `0x664c6e12…` /
+/// `0xa077b8c2…` are the same accounts as `5ENqSp5Q…` / `5Fh75o8N…`. Empty is
+/// not an address, so it never becomes one.
+fn published_account(a: Option<&str>) -> Option<String> {
+    let s = a?.trim();
+    if s.is_empty() {
+        return None;
+    }
+    Some(hex_to_ss58(s).unwrap_or_else(|| s.to_string()))
+}
+
 /// The full job-type capability set a node serves *by design*. Used when a
 /// provider's `/status` omits `capabilities[]` (older heartbeat): assume it is
 /// equipped for everything rather than silently dropping its job types. Note
@@ -9300,11 +9317,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     "chain JobState",
                                     client.get_job_state(id)
                                 ) {
-                                    let lease = leases.get(&id).cloned();
+                                    // Both fields are published in ss58 (see
+                                    // `published_account`): the chain read hands
+                                    // back a `0x…` key while the store holds ss58.
+                                    let lease =
+                                        published_account(leases.get(&id).map(String::as_str));
                                     // `provider` is the on-chain truth when it
                                     // exists, else the lease the AP wrote. They
                                     // agree once the job is accepted.
-                                    let provider = prov.clone().or_else(|| lease.clone());
+                                    let provider = published_account(prov.as_deref())
+                                        .or_else(|| lease.clone());
                                     jobs.push(json!({
                                         "id": id,
                                         "state": state,
@@ -9337,7 +9359,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     ) {
                         Some((state, price, req_, prov)) => {
                             clear_create_pending(idn);
-                            json!({"id":idn,"state":state,"price_base":price.to_string(),"requestor":req_,"provider":prov})
+                            json!({
+                                "id":idn,
+                                "state":state,
+                                "price_base":price.to_string(),
+                                "requestor": published_account(req_.as_deref()),
+                                "provider": published_account(prov.as_deref())
+                            })
                         }
                         // The create is in the pool but not yet in a block: report the
                         // real state instead of a confusing 404 (the caller got this id
@@ -10834,6 +10862,26 @@ mod tests {
         );
         assert_eq!(hex_to_ss58("not-hex"), None);
         assert_eq!(hex_to_ss58("0xdeadbeef"), None);
+    }
+
+    /// One account, one encoding. `GET /jobs` used to publish `provider` in the
+    /// chain read's `0x…` hex while `lease_provider` was ss58, so no caller could
+    /// join a job to `GET /providers`; measured 2026-11-26 on the live AP, 214 of
+    /// 256 rows in the `?limit=256` window carried hex (`0x664c6e12…` is
+    /// `5ENqSp5Q…`). Every published account is now ss58, and an absent address
+    /// stays absent rather than becoming the empty string.
+    #[test]
+    fn published_accounts_are_ss58_not_chain_hex() {
+        let hex = "0x664c6e12d0eff26c646b764f733f0468d44deea02f856ab9f1b629af06993d01";
+        let ss58 = "5ENqSp5Q65bxfgryZExQDRnV1rEW1qb2UBztvswLamkoUrqj";
+        assert_eq!(published_account(Some(hex)), Some(ss58.to_string()));
+        assert_eq!(
+            published_account(Some(ss58)),
+            Some(ss58.to_string()),
+            "an ss58 address passes through unchanged"
+        );
+        assert_eq!(published_account(None), None);
+        assert_eq!(published_account(Some("  ")), None);
     }
 
     #[test]

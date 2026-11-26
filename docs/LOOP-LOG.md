@@ -1,3 +1,46 @@
+## 10:5x PT — row 285: `/jobs` published one account as both `0x…` hex and ss58; fixed and A/B-proven
+
+**A0:** `origin/main` HEAD `a6343d03` (full sha) ⇒ runs for that sha **total_count 0** — docs-only
+commit under `ci.yml` `paths-ignore`. Nothing red, nothing in flight, nothing waited on.
+
+**Release state:** 0.3.81 published + filed (`archive/0.3.81.md`, INDEX row), `releases.json` ⇒ 0.3.81,
+running node `system_version` ⇒ `0.3.81`. NEW rows = 1 (256), so the batch rule keeps the next version
+closed; 273 cannot advance (day 3 lands with the 09:07 PT timer on 2026-11-27).
+
+**Box worked — a live defect found by probing, filed as row 285.** `GET :8092/jobs?limit=256` on the
+running AP ⇒ **214 of 256 rows carry `provider` as 32-byte hex** while `lease_provider` is ss58, and
+`GET /job/6600` ⇒ `requestor: 0xa8d73283…`. Decoded, the hex keys are the same accounts `/providers`
+lists in ss58 (`0x664c6e12…` = `5ENqSp5Q65bx…`, `0xa077b8c2…` = `5Fh75o8NnKMd…`), so the field a caller
+needs to join a job to a provider was unusable. Cause, read in the code: `ChainClient::get_job_state`
+renders `JobProvider`/`JobRequestor` via `account_id_to_string` — hex **by design**, because the
+providers compare against `signer_address_hex()` — and the scheduler published that string verbatim
+next to the store's ss58 lease.
+
+- Fix (`gpn-agent/src/bin/gpn_scheduler.rs`): new `published_account()` canonicalises at the **HTTP
+  boundary only** — `/jobs` (`provider`, `lease_provider`) and `/job/{id}` (`provider`, `requestor`) —
+  via the existing `hex_to_ss58`. The in-agent hex form is untouched, so provider-side identity
+  comparisons and `account_id_to_string`'s contract are unchanged. Historical hex leases (805 in the
+  store) now render ss58 on the way out without a data migration.
+- **Test, fails before / passes after:** `published_accounts_are_ss58_not_chain_hex` — with the helper
+  reverted to a pass-through it fails exactly as measured (`left: Some("0x664c6e12…")`,
+  `right: Some("5ENqSp5Q65bx…")`), and passes with the fix.
+- **A/B, same store, same second, two processes:** old build `:8092` ⇒
+  `"provider":"0x664c6e12…"`; new build `:18092` ⇒ `"provider":"5ENqSp5Q65bx…"`, both fields agreeing
+  and every other field byte-identical; `/job/6599` `requestor` went `0xa8d73283…` → `5Ft5q2AV…`.
+  (First A/B attempt showed no change because `cargo test --bin` had built the **test harness, not the
+  binary** — the TOOLS.md note; `cargo build --release --bin gpn_scheduler` then proved it.)
+- `cargo test --release --bin gpn_scheduler` ⇒ **114 passed / 0 failed**; `cargo fmt --check` clean;
+  clippy with CI's exact allow-list and `-D warnings` clean.
+
+**Pushed once:** tree `gpn-agent/src/bin/gpn_scheduler.rs` + row 285 + this log. CI run created — not
+waited on (next run asks once for its conclusion). Row 285 stays `NEW`: it ships when a batch fills.
+
+**Blockers / [TRIAGE]:** 256 unchanged (venue: GPU-P of box 1's 5070 Ti to GPN-209, re-measured this
+run — GPN-209 still holds only the Intel UHD 630 adapter; box 4 still off the tailnet, `ssh rc=255`).
+Nothing else needs Jeremy.
+**Next run:** A0, then soak day 3 after the 09:07 PT timer; keep filling the batch (256, 285).
+
+
 ## 10:22 PT — row 273 day 2 re-recorded and the +14.5 % drift explained block by block (no release in flight)
 
 **A0:** `origin/main` HEAD `4cd5e3ff` (full sha) ⇒ runs for that sha **total_count 0** — docs-only commit
