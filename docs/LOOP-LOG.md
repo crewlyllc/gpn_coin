@@ -1,3 +1,37 @@
+## 23:5x PT — row 280: the macOS release lane stops lying (red 15/15 while every release used it)
+
+**A0 (CI).** `fetch && reset --hard origin/main` ⇒ HEAD `ddc5ab84`. Run `45777831509` (that sha) `pending`,
+run `45774396984` (`2f863ada`) `in_progress` — neither is a conclusion, so neither was waited on.
+
+**A red that no box owned.** `GET /actions/workflows/release-unix.yml/runs?per_page=15` ⇒ **15/15 `failure`**,
+every one 4-8 s long (`45752714912` 04:03:02→04:03:08Z back to `43799452807` on 2026-11-16). Job
+`139684044676` `build (macos-latest)`: `runner_name: null`, `steps: []`, and `GET /actions/jobs/…/logs`
+⇒ 404 `BlobNotFound` — the job is created and never acquired, because this account's GitHub-hosted
+runners are billing-blocked (already written at `release-unix.yml:29-33`). Classified **environment**,
+not our code; the defect is that the lane reported a platform failure for a platform the site already
+labels "not published yet", and every release cut kept going through it.
+
+**Fix + proof.** `if: vars.GPN_MACOS_BUILD == '1'` on the only job, with the measurement and the flip
+procedure above it. Pushed `283d94e7`, dispatched `release-unix.yml` ⇒ run `45779532058`, job
+`build` `completed/skipped`, `steps: []`, run `conclusion: skipped`. Not red, and stated as skipped
+rather than as a macOS build failure. CI run `45779525403` (the workflow edit) is `pending` — the
+next run asks once. Row 280 ⇒ **COMPLETE 2026-11-26** (no binary changed, so no version applies).
+
+**No version opened.** `NEW` rows stand at 2 after this (256 venue AWAITING-OWNER, 278, 279 both
+source-complete and waiting on a build), under the five-fix batch threshold and not critical, so per
+the 2026-11-25 batch rule nothing was bundled.
+
+**Row 273 (soak).** Cannot advance this run: `systemctl --user list-timers gpn-soak-record.timer` ⇒
+`Thu 2026-11-26 09:11:36 PST`, i.e. day 2 is ~9 h away; `docs/soak-2026-11-25.md` day 1 already holds
+the baseline (p50 11.38 s / p95 42.99 s, peers min 1, 0 `Reason:` bans).
+
+**Row 279 evidence re-checked, not claimed.** `network.json` in tree now `spec_version: 55` (fix
+`2f863ada`); `https://gpncoin.ai/network.json` is a 404, so the file is only ever the embedded copy
+(`network_registry.rs` `include_str!`) — the live half still needs a build that carries it.
+
+**Blockers / [TRIAGE]:** none new. Item 256 (which machine carries the stranger-lifecycle GPU steps)
+stays AWAITING-OWNER with the 03:40Z narrowing: box 1/GPU-P vs powering box 4 back on.
+
 ## 23:3x PT — row 278 source complete: the Windows updater asks the gate before it kills the node
 
 **A0 (CI).** `fetch && reset --hard origin/main` ⇒ HEAD `3ec1a89` (loop-log docs commit). Run `45774396984`
