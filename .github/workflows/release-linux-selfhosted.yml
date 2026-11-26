@@ -102,7 +102,7 @@ jobs:
 
       # Provenance: the Windows lane has refused to publish an unsigned zip since
       # 0.3.79; this lane published the linux tarball with no attestation at all
-      # until 0.3.82 (found while working the release checklist's §7 gate, which
+      # until 0.3.82 (found while working the release checklist's section 7 gate, which
       # says a release must not be cut on an unattested asset). Same two
       # mechanisms, one contract:
       #   public repo  -> actions/attest-build-provenance (gh attestation verify)
