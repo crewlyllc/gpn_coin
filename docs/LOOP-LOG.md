@@ -1,3 +1,18 @@
+## 08:45 PT — §7 release-cut verified from its log and ticked; §7b site surfaces stamped 0.3.81
+
+**A0:** `origin/main` HEAD `327b5e55` ⇒ run `45860000191` **status `pending`, conclusion null** — noted and not waited on (build in flight, other work available).
+
+**Box worked — §7 `release-cut`** (dispatched 16:27Z last run, run ended immediately as the rule requires). Read the log once:
+- `/tmp/release-cut-0.3.81.log` ends `released 0.3.81 — https://gpncoin.ai/releases.json`, `release-lock: released (0.3.81)`, commit `51e2c4a2`, push `fb0706dd..51e2c4a2`.
+- Step 6 verified the live surfaces: linux `302ed0c2…` / 349,107,797 B and windows `4d126f03…` / 253,300,100 B both anonymous GET 206; stranger check on `releases.json` = 0.3.81; both renamed mirror assets present in `crewlyllc/gpn_coin`.
+- Also ticked in the same block (same evidence): `network.json latest_version = 0.3.81`; `releases.json` served 0.3.81 at **16:40:22Z and 16:40:33Z**.
+
+**Box worked — §7b surfaces.** Found real drift: `website/docs/run-a-node.html` and `website/docs/downloads.html` still stamped `release 0.3.80`, and `docs/downloads.md` was stale at **0.3.79**. All three re-stamped to 0.3.81 / spec 55 / block 368,382 / 08:41 PT — each saying explicitly that the *command walkthrough* was last run end-to-end on the previous build, because these are verification records, not version pointers, and I did not re-run the walkthrough. Ticked "gpncoin.ai serves the new version" (no `website/seeds.json` exists — N/A clause), "both surfaces agree" (site 0.3.81 == GitHub 0.3.81 == `~/.ci-cache/gpn-node-target/release/gpn-node --version` ⇒ `gpn-node 0.3.81`), "capability discoverable" (N/A: 0.3.81 is fixes only), and the docs-stamp box.
+
+**Note for next run:** `~/.local/bin/gpn-node --version` still says `0.3.80` — that is §9's deploy box, not a surface mismatch. §9's first box needs box 1's 09:00 PT `update.log` self-update check.
+
+Commit `fc70222b`. No [TRIAGE] items — no owner decision was needed.
+
 ## 08:00 PT — CI for the release SHA read once: `success` (box ticked); windows build still in flight
 
 **A0:** `origin/main` HEAD `0acd211b` (docs-only checklist commit) ⇒ `?head_sha=0acd211b9b8f…` **total_count 0**, expected under `ci.yml` `paths-ignore`. Nothing red.
