@@ -1,3 +1,15 @@
+## 08:00 PT — CI for the release SHA read once: `success` (box ticked); windows build still in flight
+
+**A0:** `origin/main` HEAD `0acd211b` (docs-only checklist commit) ⇒ `?head_sha=0acd211b9b8f…` **total_count 0**, expected under `ci.yml` `paths-ignore`. Nothing red.
+
+**Box worked — §4 "the run that matters is the one for this SHA"** (left unticked last run because run `45838033526` was still in flight at 14:41Z). One query, no polling:
+- `GET /actions/runs/45838033526` ⇒ name `CI`, head_sha `a57afde16b4c04862b4e92a6b79f81a92512f6a5`, **status `completed`, conclusion `success`**, `run_started_at` 14:20:35Z, `updated_at` 15:41:59Z. The windows + linux `Test gpn-agent` legs that were pending at 14:41Z finished green.
+- Code SHA ⇒ conclusion must be `success`; it is. Box ticked with that quote inline.
+
+**Not acted on — next box is a build/publish box whose run is in flight:** windows artifact run `45841494923` (`a57afde1`) reads `in_progress` since 14:41:09Z (78 min at 15:59Z — under the 90-min stale threshold), so §5 windows / §5 attestation / §6-§7 stay unticked. Next run asks once for its conclusion.
+
+**No [TRIAGE] items.**
+
 ## 07:45 PT — §3b 279 ticked (spec floor 54→55, guard now hard-fails); windows build still queued behind CI
 
 **A0:** `origin/main` HEAD `bfc80d20` (docs-only checklist commit) ⇒ `?head_sha=bfc80d20de91…` **total_count 0**, expected under `ci.yml` `paths-ignore`. Nothing red.
