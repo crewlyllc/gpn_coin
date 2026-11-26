@@ -1,3 +1,31 @@
+## 00:4x PT — A0 has no conclusion (queued behind a normal Windows build); soak day 2 already recorded; batch still 4 of 5
+
+**A0:** `origin/main` HEAD `c40518b1` ⇒ **0 runs** (docs-only, `paths-ignore` correct). The previous code commit
+`d959e921` (row 281) has run **45782127928**, still `pending`/`queued` at 08:39Z — it is behind run **45774396984**
+(`2f863ada`), whose `Build + unit tests (windows, self-hosted)` job has been inside `Build + test gpn-agent
+(release)` since 08:13Z. 87 min elapsed on that run and ~30 min on the actual cargo step: a 40–75 min Windows
+release build at the start of its window, not a stall. No conclusion ⇒ nothing to act on, nothing cancelled,
+nothing waited on. Linux job on the same run already passed (08:04Z); fmt+clippy and secret-scan green.
+
+**273 (only IN-PROGRESS row, seven-day soak):** day 1 `23:57Z` and day 2 `06:40Z` are both written in
+`docs/soak-2026-11-25.md`; day 3 is a new calendar day, so there is nothing to record this pass.
+`gpn-soak-record.timer` is enabled with its next fire today 09:11 PST (17:11Z) — the recorder will write day 3
+unattended and the last manual reading wins if the loop also runs it. The day-1/day-2 update lines carry the
+correction written last run (the `corrupt-key` record was the test's, real outcome `confirmed 0.3.80` in 24 s).
+
+**Queued rows re-verified in tree (no version opened — batch is 4 of 5: 278, 279, 280, 281):**
+- 279: `bash scripts/tests/test-check-spec-version.sh` ⇒ `PASS=6 FAIL=0`, incl. `real repo passes: source
+  spec_version=55 network.json spec_version=55 OK` and both divergence cases failing as required.
+- 278: `pwsh -File scripts/tests/test-update-shutdown.ps1` ⇒ `RESULT: PASS (all checks)`, incl. all seven §K
+  assertions (`does not stop the node`, `runs before the stop line`, `exits 0 (a hold is not a failure)`).
+
+**Health (unchanged, no new row):** `/` 98 G free / 77 %; `system_health` peers 3, isSyncing false; spec 55;
+`gpn-fleet`/`gpn-accesspoint`/`gpn-provider`/`gpn-provider-heartbeat` all active; **0** warning-level entries in
+24 h from the AP, fleet and provider journals. `https://gpncoin.ai/canary.json` ⇒ `0.3.80 ok:true job 6595`;
+`releases.json` ⇒ `0.3.80` and both asset URLs answer **200** (HEAD, followed to release-assets CDN).
+
+**No [TRIAGE] item this run.** Nothing needs a decision; the only thing the batch waits for is a fifth fix.
+
 ## 00:2x PT — row 281: a test was writing fake `corrupt-key` records into the production exit log
 
 **A0:** `origin/main` HEAD `b6deb5d3` has **0 CI runs** (`head_sha=` query, full sha) — the previous commit is
