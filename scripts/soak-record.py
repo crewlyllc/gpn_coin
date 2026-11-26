@@ -10,7 +10,9 @@ stranger could re-run:
   * authored-timestamp p50/p95 over the last --window blocks (cadence detail)
   * peers / isSyncing now, peers seen across the last 24 h of the journal
   * restart count and start times for gpn-fleet.service in the last 24 h
-  * update outcomes for the day (update.log / last-exit.json)
+  * update outcomes for the day -- the update unit's own journal (the only honest
+    source), with `last-exit.json` reported separately and labelled as a *node*
+    exit report, because tests and manual runs write there too (row 281)
   * jobs attempted/succeeded from ~/.gpn/assignments.json + AP :8092/jobs
   * every `Reason:` / ban line the journal emitted in the window
   * box 1 (the second soak machine) via scripts/box1.sh, recorded as
@@ -274,20 +276,112 @@ def jobs_numbers():
     return attempted, succeeded, failed
 
 
+UPDATE_UNIT = "gpn-update.service"
+EXIT_LOG = os.path.expanduser("~/.gpn/last-exit.json")
+
+
+SYSTEMD_NOISE = re.compile(
+    r"^(Starting |Finished |.*Consumed .*CPU time|.*: (Succeeded|Deactivated|Main process exited)|"
+    r"-- )")
+
+
+def update_journal_lines(unit=UPDATE_UNIT, hours=24):
+    """The update unit's own output in the window, or None when there is no journal.
+
+    This is the only source that answers "did the update work?": each fire prints either
+    `up to date` or `confirmed <version> is running` / a refusal. `last-exit.json` cannot
+    answer it -- it records node *start failures*, and any caller may write there (row 281:
+    a test wrote 32 fake `corrupt-key` records and two soak days quoted them as the update
+    outcome).
+    """
+    try:
+        out = subprocess.run(
+            ["journalctl", "--user", "-u", unit, "--since", f"{hours} hours ago",
+             "--no-pager", "-o", "cat"],
+            capture_output=True, text=True, timeout=20)
+    except Exception:  # noqa: BLE001
+        return None
+    if out.returncode != 0:
+        return None
+    lines = [l.strip() for l in out.stdout.splitlines() if l.strip()]
+    return lines or None
+
+
+def summarise_update_lines(lines):
+    """(fires, the updater's own lines) from a unit journal extract.
+
+    systemd's `Starting`/`Finished` lines say a fire happened, not what it decided; the
+    updater's own lines (`confirmed 0.3.80 is running`, `up to date`, `holding`, `error:`)
+    are the outcome. Both are kept, separately, so "fired 24 times" cannot be mistaken for
+    "did anything".
+    """
+    if not lines:
+        return 0, []
+    fires = sum(1 for l in lines if l.startswith("Starting "))
+    own = [l for l in lines if not SYSTEMD_NOISE.match(l)]
+    return fires, own
+
+
+def newest_exit_record(path=None):
+    """The newest record in the JSONL exit log, as (age_hours, record), or None."""
+    path = path or EXIT_LOG
+    if not os.path.exists(path):
+        return None
+    age_h = (time.time() - os.stat(path).st_mtime) / 3600.0
+    best = None
+    try:
+        with open(path, encoding="utf-8", errors="replace") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    rec = json.loads(line)
+                except ValueError:
+                    continue
+                if not isinstance(rec, dict):
+                    continue
+                key = rec.get("ts_unix") or 0
+                if best is None or key >= best[0]:
+                    best = (key, rec)
+    except Exception:  # noqa: BLE001
+        return (age_h, None)
+    return (age_h, best[1] if best else None)
+
+
 def update_outcome():
+    """Day's update outcome, then any node exit report -- labelled, never conflated."""
     bits = []
-    for p in ("~/.gpn/update/update.log", "~/.gpn/last-exit.json"):
-        path = os.path.expanduser(p)
-        if os.path.exists(path):
-            try:
-                st = os.stat(path)
-                age_h = (time.time() - st.st_mtime) / 3600.0
-                if age_h <= 24:
-                    tail = subprocess.run(["tail", "-3", path], capture_output=True,
-                                          text=True, timeout=15).stdout.strip().replace("\n", " | ")
-                    bits.append(f"`{os.path.basename(path)}` ({age_h:.1f}h old): {tail[:300]}")
-            except Exception as e:  # noqa: BLE001
-                bits.append(f"{p}: unreadable ({e})")
+    lines = update_journal_lines()
+    if lines:
+        fires, own = summarise_update_lines(lines)
+        if own:
+            bits.append(f"`{UPDATE_UNIT}` (24 h, {fires} fire(s)): " + " | ".join(own[-3:])[:300])
+        else:
+            bits.append(f"`{UPDATE_UNIT}` (24 h, {fires} fire(s)): no version change "
+                        f"(every fire ended 'up to date')")
+    log = os.path.expanduser("~/.gpn/update/update.log")
+    if os.path.exists(log):
+        try:
+            age_h = (time.time() - os.stat(log).st_mtime) / 3600.0
+            if age_h <= 24:
+                tail = subprocess.run(["tail", "-3", log], capture_output=True,
+                                      text=True, timeout=15).stdout.strip().replace("\n", " | ")
+                if tail:
+                    bits.append(f"`update.log` ({age_h:.1f}h old): {tail[:300]}")
+        except Exception as e:  # noqa: BLE001
+            bits.append(f"update.log: unreadable ({e})")
+    newest = newest_exit_record()
+    if newest:
+        age_h, rec = newest
+        if age_h <= 24:
+            if rec:
+                detail = str(rec.get("detail") or "")[:160]
+                bits.append(f"node exit report (NOT an update result) "
+                            f"`last-exit.json` ({age_h:.1f}h old, {rec.get('ts','?')}, "
+                            f"kind={rec.get('kind','?')}): {detail}")
+            else:
+                bits.append(f"`last-exit.json` ({age_h:.1f}h old): no parseable record")
     return bits or ["no update activity in the last 24 h"]
 
 

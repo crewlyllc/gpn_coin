@@ -195,6 +195,70 @@ try:
 finally:
     shutil.rmtree(tmpdir, ignore_errors=True)
 
+# ---- update line: the journal is the update outcome, last-exit.json is not (row 281) ----
+# Two soak days quoted a fake `corrupt-key` record (written by a TEST) as "the update
+# outcome". The recorder must say what the update unit did, and label any exit report
+# as a node exit report so the two can never be read as one thing again.
+tmpdir = tempfile.mkdtemp(prefix="soak-update-")
+try:
+    exit_log = os.path.join(tmpdir, "last-exit.json")
+    with open(exit_log, "w", encoding="utf-8") as f:
+        f.write('{"ts":"2026-11-25T15:33:35Z","ts_unix":1795630415,"code":3,'
+                '"kind":"corrupt-key","detail":"older fake record"}\n')
+        f.write('{"ts":"2026-11-26T08:03:49Z","ts_unix":1795689829,"code":3,'
+                '"kind":"corrupt-key","detail":"keystore /tmp/tmp.pSZHHdyHwe/data/keystore.json"}\n')
+    real_exit, real_journal = sr.EXIT_LOG, sr.update_journal_lines
+    try:
+        sr.EXIT_LOG = exit_log
+        sr.update_journal_lines = lambda *a, **k: [
+            "Starting gpn-update.service - GPN signed-release updater (one check + apply)...",
+            "  confirm: process=up rpc=yes 24s version=0.3.80",
+            "  confirmed 0.3.80 is running",
+            "Finished gpn-update.service - GPN signed-release updater (one check + apply)."]
+        got = sr.update_outcome()
+        joined = "; ".join(got)
+        eq("gpn-update.service" in joined, True, "the update outcome quotes the update unit")
+        eq("confirmed 0.3.80 is running" in joined, True, "the update outcome carries the real result line")
+        eq("1 fire(s)" in joined, True, "the outcome counts the fires, so 'fired' != 'did something'")
+        eq("Starting gpn-update.service" in joined, False,
+           "systemd's Starting line is not quoted as the outcome")
+        eq("NOT an update result" in joined, True,
+           "the node exit report is labelled as one, not as the update outcome")
+        eq(joined.index("gpn-update.service") < joined.index("corrupt-key"), True,
+           "the update unit is stated before any node exit report")
+        eq("older fake record" in joined, False, "only the newest exit record is quoted")
+
+        # a day of fires that changed nothing must not read as an outcome it did not have
+        sr.update_journal_lines = lambda *a, **k: [
+            "Starting gpn-update.service - GPN signed-release updater (one check + apply)...",
+            "Finished gpn-update.service - GPN signed-release updater (one check + apply).",
+            "gpn-update.service: Consumed 1.2s CPU time.",
+            "Starting gpn-update.service - GPN signed-release updater (one check + apply)...",
+            "Finished gpn-update.service - GPN signed-release updater (one check + apply)."]
+        quiet = "; ".join(sr.update_outcome())
+        eq("2 fire(s)" in quiet, True, "quiet fires are counted")
+        eq("up to date" in quiet, True, "quiet fires are described as up to date, not as a change")
+    finally:
+        sr.EXIT_LOG, sr.update_journal_lines = real_exit, real_journal
+
+    # no journal available (not a systemd host) => say nothing rather than invent
+    try:
+        sr.EXIT_LOG = os.path.join(tmpdir, "absent.json")
+        sr.update_journal_lines = lambda *a, **k: None
+        eq(sr.update_outcome(), ["no update activity in the last 24 h"],
+           "no journal and no log is 'no activity', not a claim")
+    finally:
+        sr.EXIT_LOG, sr.update_journal_lines = real_exit, real_journal
+
+    # newest record wins even when the file is out of order
+    got = sr.newest_exit_record(exit_log)
+    eq(got[1]["detail"].startswith("keystore /tmp/tmp.pSZHHdyHwe"), True,
+       "newest_exit_record picks the newest ts_unix, not the last line")
+    eq(sr.newest_exit_record(os.path.join(tmpdir, "nope.json")), None,
+       "a missing exit log is None, not an exception")
+finally:
+    shutil.rmtree(tmpdir, ignore_errors=True)
+
 # ---- verdict wording --------------------------------------------------------
 eq(sr.day_index(__import__("datetime").datetime(2026, 11, 25, tzinfo=__import__("datetime").timezone.utc),
                 __import__("datetime").datetime(2026, 11, 25, 23, tzinfo=__import__("datetime").timezone.utc)),

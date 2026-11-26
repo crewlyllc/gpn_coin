@@ -1,3 +1,39 @@
+## 01:0x PT — row 273: the soak's "update outcome" was quoting a test's exit record; the collector now reads the update unit's journal
+
+**A0:** `origin/main` HEAD `d7123c5e` ⇒ **0 runs** (docs-only, `paths-ignore` correct). The previous code commit
+`d959e921` has run **45782127928**, still `queued` at 08:58Z behind run 45774396984 (`2f863ada`, success 07:18Z→).
+No conclusion ⇒ nothing to act on, nothing waited on, nothing cancelled.
+
+**First IN-PROGRESS row is 273 (seven-day soak).** Day 3 is due at the 09:11 PST timer fire, so the row had no
+new numbers to take — and working it exposed a defect in its own instrument. `update_outcome()` read
+`~/.gpn/update/update.log` (absent on this host) and then tailed `~/.gpn/last-exit.json` **raw**, so whatever
+the newest record was became "the update outcome". Row 281 proved that file is written by things that are not
+the updater: soak days 1 and 2 both printed a `corrupt-key` record naming `/tmp/tmp.XXXX/data/keystore.json`
+as that day's update result. Tomorrow's fire would have printed it a third time — the day-1/2 correction was a
+prose patch on the document, not a fix in the collector.
+
+Fix (`scripts/soak-record.py`): the outcome now comes from the update unit's own journal —
+`journalctl --user -u gpn-update.service --since '24 hours ago'`, summarised as fire count plus the updater's
+own lines (`confirm: process=up rpc=yes 24s version=0.3.80`, `confirmed 0.3.80 is running`), with systemd's
+`Starting`/`Finished`/`Consumed` noise excluded so "fired 20 times" cannot be read as "did something". Any
+exit record is quoted separately under the literal label **`node exit report (NOT an update result)`**, newest
+record only (parsed by `ts_unix`, not by last line — the file is append-only but not guaranteed ordered).
+
+**Evidence:** `scripts/tests/test-soak-record.py` ⇒ `77 checks passed, 0 failed` (new: journal is the stated
+source, a `corrupt-key` record never appears as the outcome, quiet fires read `up to date`, newest-record
+selection). Live: `update_outcome()` on this host ⇒
+`` `gpn-update.service` (24 h, 20 fire(s)): confirm: process=up rpc=no 0s | confirm: process=up rpc=yes 24s
+version=0.3.80 | confirmed 0.3.80 is running `` + the `NOT an update result` exit report. Day 2 re-recorded
+with the honest line (`recorded day 2 at height 366613`), doc now reads
+`- update: \`gpn-update.service\` (24 h, 20 fire(s)): … confirmed 0.3.80 is running; node exit report (NOT an
+update result) …`.
+
+**No version opened** — batch policy: two real fixes source-done in tree (278, 279), soak still running; that
+is 2 of the 5 this batch waits for. Nothing critical (peering, discovery, chat/images/audio all healthy:
+`system_version` ⇒ `0.3.80`, peers 3, `isSyncing=false`, spec 55, AP journal clean since 00:00Z).
+
+**No [TRIAGE] item this run.**
+
 ## 00:4x PT — A0 has no conclusion (queued behind a normal Windows build); soak day 2 already recorded; batch still 4 of 5
 
 **A0:** `origin/main` HEAD `c40518b1` ⇒ **0 runs** (docs-only, `paths-ignore` correct). The previous code commit
