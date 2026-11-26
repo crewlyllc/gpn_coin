@@ -1,3 +1,46 @@
+## 04:0x PT — cleaned 32 fake `corrupt-key` records out of the operator's real `~/.gpn/last-exit.json`; proved 282's guard on the real file (808 `--lib` green, file not recreated)
+
+**A0:** `origin/main` HEAD `02174f49` (loop-log only) ⇒ `?head_sha=` **0 runs** (paths-ignore correct).
+The code run for `cd05e348` (the fmt fix from the 03:4x pass) is **`45812605736`, `status=pending`**
+since 11:39:51Z — queued behind the Windows runner, no conclusion ⇒ **not waited on** (rule: act only
+on a conclusion). Next pass reads it.
+
+**Checklist state unchanged:** 0.3.80 published, node answers `system_version` ⇒ `0.3.80`. Both unticked
+boxes are unworkable this pass by their own terms — §0e stranger-lifecycle is AWAITING-OWNER (triage 256)
+and 273 soak is day 3 of 7 with the timer **NEXT 09:11:36 PST**, so there is nothing to write yet.
+
+**What this pass actually fixed (the real find):** the production
+`~/.gpn/last-exit.json` still held **32 records, all 32 fake** — three per leaking run, `pid`/`version`
+from test binaries, details `'nonsense' is not a valid SS58 account`, `invalid signer URI: InvalidPhrase`,
+and `keystore '/tmp/tmp.*/data/keystore.json' … EOF while parsing a string`, spanning
+2026-11-25T15:33Z → 2026-11-26T08:03:49Z. Zero genuine node exits were in the file. The updater *reads
+the last line of that file* to classify a failed start (`update::last_exit_summary`,
+`StartFailureContext.last_exit`), so any real failure today would have been quoted as
+`corrupt-key` with a `/tmp/tmp.*` path — the exact harm 281/282 described, still sitting in the input.
+
+- Classified every row before touching it: `fake=True` for all 32 (temp-dir keystore path, `nonsense`,
+  `InvalidPhrase`); no real record existed to preserve.
+- Archived rather than deleted: `~/.gpn/last-exit.fake-tests-2026-11-26.json` (14,547 B, unchanged mtime),
+  and the live path is now **absent** — which the updater handles explicitly (`or ""` ⇒
+  `last-exit.json has no usable record`).
+
+**Proved 282's guard on the real file, not by reading the commit:** with the poisoned file removed,
+`cargo test --lib firstrun` ⇒ **38 passed / 0 failed**, then the full suite ⇒ **808 passed / 0 failed,
+14 ignored, 62.32 s** — and `ls ~/.gpn/last-exit.json` still **does not exist** afterwards. Before this
+fix, one `--lib` run appended three records. 281's script half is on `main` too
+(`scripts/tests/test-wallet-provision.sh:36` `export GPN_EXIT_LOG="$tmp/last-exit.json"`) and the 08:03Z
+records predate `489bbec9` (09:49Z), so the leak is closed on both paths.
+
+**Timeline check (so the row is not reopened on its own residue):** newest fake record `08:03:49Z`,
+fix committed `489bbec9` at `09:49:43Z` — every fake record is older than the fix.
+
+**Live health (probed):** peers **3**, isSyncing=false, height **367312**
+(`0x59ad8`); `gpn-incident-alarm` 03:58:39Z and 03:59:49Z both `ok: no incident conditions`
+(`peers=3 height=367312 jobs_seen=256`); `system_version` ⇒ `0.3.80`.
+
+**Batch:** still 3 countable fixes ready (278, 279, 283); 282 is the invariant guard and is not counted.
+Batch waits — no version opened.
+
 ## 03:4x PT — A0 caught a real red: `fmt + clippy` failed on run 45803757268 (`exit_report.rs:239`); fixed with `cargo fmt`, pushed `cd05e348`
 
 **A0:** `origin/main` HEAD was `8ccd9160` (loop-log only) ⇒ `?head_sha=` **0 runs** (paths-ignore correct).
