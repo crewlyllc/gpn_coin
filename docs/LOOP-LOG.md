@@ -1,3 +1,19 @@
+## 12:17 PT — 0.3.82 A0/§4: CI still building on box 1 (75 min, progressing), no dispatch yet
+
+**A0 (HEAD).** `origin/main` = `e794d2e5` (docs-only triage commit) ⇒ `?head_sha=e794d2e5e55f112927f50d003284a1144788ba18` **total_count 0** — expected under `ci.yml` `paths-ignore`, not a red flag. Nothing red at HEAD.
+
+**§4 release-cut box (the one that gates everything).** Asked once for run **`45880574537`** (`eb5387448d49a8cb6a4133fd4fa2cc0c3e7c029a`) ⇒ `status in_progress`, `conclusion null`, age **75 min** (created 19:02:20Z) — under the 90 min stale threshold, so **not cancelled, not replaced**.
+
+Both other legs already green: `fmt + clippy` 19:12:28Z, `secret-scan` 19:13:45Z, `Build + unit tests (linux)` 19:13:47→19:40:40Z (27/27 steps).
+
+Windows leg is **progressing, not hung**: step 6 `Build + test gpn-node (release)` **success** 19:11:52→19:51:08Z (**39m16s**), step 7 `Build + test gpn-agent (release)` `in_progress` since 19:51:08Z (**26 min**). Runners API: `DESKTOP-USBUADL online busy=true`, `openclawassist online busy=false` — single-slot contention on a cold cargo release build, which the §11 budget calls normal (40–75 min).
+
+**Boxes ticked:** none — §4's dispatch box stays gated on that conclusion; §5–§7 all depend on it. No `~/.gpn/release-in-flight` marker exists (no cut already under way) and this box was not dispatched.
+
+**Blockers / [TRIAGE]:** none. Nothing needs a decision — the run simply needs to finish.
+
+**Next run:** ask `45880574537`'s `conclusion` once. `success` ⇒ `scripts/release-cut.sh --version 0.3.82` **in the background**, write the run id into the §4 box, end the run. `failure` ⇒ quote the failing step line, classify, fix, push once. If it is still `in_progress` and age >90 min, cancel and dispatch a fresh run instead of waiting.
+
 ## 12:14 PT AUDIT — fixed 1 (disk 84% → 74%), everything else clean
 
 **Disk first (the reason this ran).** `df -h /` before: `/dev/sdb3 439G 348G 69G 84%`,
