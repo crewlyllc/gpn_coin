@@ -1,3 +1,33 @@
+## 13:05 PT — 0.3.82 §5: linux build landed and verified; windows build still building (25 min in) — run ended, no wait
+
+**A0 (HEAD `9b62de64`, docs).** `?head_sha=9b62de64…` ⇒ **total_count 0** — expected under `ci.yml`
+`paths-ignore`; the code sha `eb538744` already answered `success` (45880574537). Nothing red.
+
+**§5 linux leg — ticked with the artifact, not the job colour.** Run **`45892755516`** ⇒ `completed /
+success` 20:40:40→20:54:13Z (8 real steps: canonical WASM, build, package `layout=bundle`, reclaim
+debug profile, publish). Asset `gpn-linux.tar.gz` **349,013,949 B**,
+`sha256:9f13c68d2be5a1ac31efdb9fc59fb4bf7ec3734c5284f300dac41af2e0d5a2f7` (20:54:09Z). Downloaded the
+**published** asset through the API (`Accept: application/octet-stream`) ⇒ `sha256sum` identical to the
+API digest; extracted ⇒ `gpn-node --version` ⇒ **`gpn-node 0.3.82`**.
+
+**§5 SSH evidence box — ticked.** `scripts/box1.sh` (read-only, while the windows job held the runner:
+`DESKTOP-USBUADL online busy=true`) ⇒ `(Get-Process gpn-node).Path` = `C:\gpn\data\update\current\gpn-node.exe`,
+pid 29808, `--version` ⇒ `0.3.81`. Neither bundled item is Windows-specific code (285 = AP `/jobs`
+encoding, 286 = media-probe budget, both in `gpn_scheduler`), so no Windows per-item dispatch was needed.
+
+**§6 scan pre-computed for the next run** (on the downloaded linux bundle, sha `eb538744`): the 286
+literals `no channel render endpoint` / `no channel render endpoint at` appear **2 / 1** times in
+`gpn_scheduler` and **0** times in `gpn-node` and `gpn_llm_provider` — exactly the binary the change
+touches. `--version` matches (above). §6 left unticked to respect the checklist order (the §5 windows box
+and the two attestation boxes are still open).
+
+**Windows build `45892758345`:** in_progress, step 10/23 `build node` at 25 min — genuinely progressing,
+well under the 90 min stale threshold. Not waited on, not cancelled.
+
+**Boxes ticked:** §5 SSH evidence · §5 linux build. **Blockers / [TRIAGE]:** none.
+**Next run:** ask once for `45892758345`; on `success` tick the windows + attestation boxes (cosign
+bundle path — repo is private/User-owned), then §6 (numbers above), then `release-cut.sh`.
+
 ## 20:41 PT — 0.3.82 §4: CI green (45880574537 success) — both release builds DISPATCHED, run ended
 
 **A0 (HEAD).** `origin/main` = `617c4838` (docs) ⇒ `?head_sha` **total_count 0** (paths-ignore, expected).
