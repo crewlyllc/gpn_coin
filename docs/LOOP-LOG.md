@@ -1,3 +1,27 @@
+## 02:0x PT — soak day 2 refreshed on a fresh tree (14.57 s effective, box 1 level); CI for fix(282) still queued; no version
+
+**A0:** `origin/main` HEAD `489bbec9` ("fix(282): a unit test must never append to the operator's exit log") has run
+**45795600763**, `pending`/`None` since 09:49:49Z — **no conclusion ⇒ nothing acted on, nothing waited on**. It is a
+real code commit (not docs), so the next pass reads its conclusion; a `failure` there is next run's box.
+
+**Row 273 (only IN-PROGRESS row, soak day 2/7).** Day 3 is not due: `gpn-soak-record.timer` NEXT = Thu 09:11:36 PST
+(7 h away) and has **never fired yet** (LAST `-`), so every reading so far is a manual pass. The recorder was re-run
+(idempotent per date) ⇒ day 2 now reads:
+- height **366838**, effective interval since previous record (75 blocks / 0.30 h) **14.57 s** — *down* from 15.06 s
+  one pass ago; the 13.4 s baseline note stays as a flag, not drift, until a full-day reading
+- authored interval over last 200 blocks p50 **10.83 s** / p95 **49.55 s** (p50 faster than the 13.4 s reference; p95 is
+  the historic 40–150 s mining tail)
+- peers 3, 0 journal lines at 0 peers, 0 `Reason:`/ban lines, imports 3806/24 h longest gap 144 s, NRestarts=0
+- jobs 256 attempted / 228 succeeded / 12 failed; update `confirmed 0.3.80 is running` (24 s)
+- **box 1 level** at 366838 (peers=2, syncing=False) — it was 1 block ahead an hour ago, now equal
+- telemetry `~/.gpn/telemetry/2026-11-26.json` written; `--trend` ⇒ `insufficient: 2 consecutive day(s) of 7`
+- one number moved for a reason worth naming: `disk_free_gb` **98.9 GB** vs 53.2 GB at 06:5xZ — disk was freed, not lost;
+  no alarm, recorded here so the trend line is not misread as a probe change.
+
+**Batch:** 278, 279 still NEW and green (re-verified last pass: `test-check-spec-version.sh` 6/6, `test-update-shutdown.ps1`
+PASS); 282 is hardening and explicitly not counted. **2 of 5 — no version opened, nothing bundled.** No [TRIAGE] item;
+256 (lifecycle venue: GPU partition on box 1 vs box 4) remains AWAITING-OWNER in `docs/NEEDS-TRIAGE.md`.
+
 ## 01:5x PT — exit-log leak: the class row 281 fixed for the script was still open for `cargo test`; soak day 2 refreshed
 
 **A0:** `origin/main` HEAD `0ce61ee8` (a docs/soak+log commit) ⇒ `GET /actions/runs?head_sha=` returns **0 runs** —
