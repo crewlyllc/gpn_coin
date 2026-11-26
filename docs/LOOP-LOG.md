@@ -1,3 +1,32 @@
+## 04:4x PT — nothing to bundle (batch 4 of 5); traced main's only red CI run to a fmt failure that `cd05e348` already fixed and proved it green locally
+
+**A0:** `origin/main` HEAD `2c9dc137` (docs only) ⇒ `?head_sha=2c9dc13729f0fd02150cb62efe2be1ec2aa2bbe0` **total_count 0** —
+correct for a docs SHA under `ci.yml` `paths-ignore`. No conclusion to act on, no run waited for.
+
+**The one red in the queue, chased to its cause rather than reported as "CI is red":** run `45803757268`
+(sha `437f97b0`, the soak-collector commit) is `completed/failure`, and the failing job is `fmt + clippy` at
+step 9 `rustfmt (check)` — log line `45803757268` job `fmt + clippy`: `Diff in
+…/gpn-agent/src/exit_report.rs:239`. That is the row-282 test-path guard landing unformatted, not a logic
+failure: steps 10-12 (`rustfmt (check, agent)`, both clippy jobs) are `skipped`, and the `secret-scan` job in
+the same run is `success`. The fix commit `cd05e348` ("fmt: exit_report.rs default_path under cfg!(test)") is an
+ancestor of HEAD, and its own run `45812605736` is `pending` behind the runner (windows job `DESKTOP-USBUADL`
+`busy=True` on `437f97b0`'s `Build + test gpn-agent (release)`), so the superseding run exists and is queued —
+nothing to dispatch. Local proof on this HEAD instead of waiting: `cargo fmt --all -- --check` in `gpn-agent`
+⇒ **rc 0**, in `gpn-node` ⇒ **rc 0**.
+
+**Checklist state (0.3.80, archived):** its two unticked boxes are unchanged and neither is workable this pass —
+§0e `stranger-lifecycle.ps1` is **AWAITING-OWNER** on a venue (measured again 03:2xZ: box 4 ssh rc=255, box 3
+a live 0.3.77/0.3.78 node, box 1's guest on Intel UHD 630 while the 5070 Ti is host-partitionable ⇒ GPU config
+of the live mining box is Jeremy's call), and 273 (soak) is **day 2 of 7**, next section due at the timer's
+`Thu 2026-11-26 09:11:36 PST` fire (verified `enabled`+`active`); day numbering is by date (`(today-start)+1`,
+`soak-record.py:463`) and a same-day re-run replaces its section instead of adding one, so today's earlier 10:40Z
+record cannot double-count.
+
+**Batch:** still 278, 279, 282, 283 = **4 of 5** real fixes ready; per the 2026-11-25 batch rule no version was
+opened and nothing NEW was bundled. Fleet probe while here: `:9944` ⇒ `specVersion 55`, `peers 3`,
+`isSyncing false`; `:8092` `/health` answers; 6 h of `gpn-fleet` and `gpn-accesspoint` journals carry no
+`error`/`fail`/`panic` outside the known clean-shutdown lines.
+
 ## 04:2x PT — no open checklist, batch at 4 of 5, so nothing was bundled; disproved a "23 node crashes" reading of the fleet journal (they are all clean shutdowns, timestamp-identical to systemd `Stopping`)
 
 **A0:** `origin/main` HEAD `cbeafdf9` (docs only: `GPN-LIST.md`, `docs/LOOP-LOG.md`, `docs/soak-2026-11-25.md` —
