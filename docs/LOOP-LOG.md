@@ -1,3 +1,16 @@
+## 07:24 PT — linux 0.3.81 artifact built, downloaded and verified; §5 linux + §6 ticked; windows still queued
+
+**A0:** `origin/main` HEAD `3b09a78901a39accd14c621082ad211919f45a20` (previous run's checklist commit, docs-only) ⇒ runs for that sha **total_count 0** — expected under `ci.yml` `paths-ignore`, nothing to act on.
+
+**Asked once, acted on the conclusion:** linux build run **`45841491261`** (`a57afde1`) ⇒ **completed / success** (14:41:08Z → 15:08:52Z), all 10 steps green including `package (layout=bundle…)` and `publish GitHub Release (rolling 'linux-latest')`. Windows run **`45841494923`** ⇒ still `queued` behind CI `45838033526`, whose windows job `Build + unit tests (windows, self-hosted)` has been `in_progress` since 14:20:46Z (~1 h, under the 90-min build threshold; the other four CI jobs are `success`/`skipped`). Not waited on; no dispatch made this pass.
+
+**Ticked:**
+- §5 `release-linux-selfhosted.yml` — asset `gpn-linux.tar.gz` **349,107,797 B**, API `updated_at` 2026-11-26T15:08:47Z, sha256 `302ed0c2…dfbf166`; downloaded once and re-hashed to the same string.
+- §6 both boxes — extracted `gpn-node` (108,066,208 B) + `gpn_update` (13,100,680 B) from that tarball: `strings -a` ⇒ `workspace/projectmanager07` **0 hits** in both (row 283), `release_hold` + `evaluate the whole install decision (policy, canary proof…` present in `gpn_update` (row 278); `network.json` ⇒ `latest_version 0.3.81, spec_version 55`, `test-check-spec-version.sh` ⇒ `PASS=6 FAIL=0`; `./gpn-node --version` ⇒ `gpn-node 0.3.81`.
+
+**Still open:** windows build box (queued handle `45841494923`), §5 attestation boxes (need the windows zip digest), §4 CI-success box (run still in flight), 273 soak (day 3), 279/282/283/284 rows (fixes on `main`, evidence boxes to collect next), §0e stranger lifecycle (AWAITING-OWNER, triage 256). No new version opened — batch policy unchanged. No [TRIAGE] item this pass.
+
+**Next run:** ask once for `45841494923`; if queued still, check `/actions/runners` `busy` before concluding anything; if success, tick the windows box and work attestation with the digest from `releases.json`.
 ## 06:59 PT — 0.3.81 box 278 ticked with local proof; §5 builds left in flight
 
 **A0:** `origin/main` HEAD `5282bfa6` (docs-only) ⇒ runs for that sha **total_count 0**, expected. The three in-flight runs on `a57afde1` — CI `45838033526` (in_progress), linux `45841491261` (in_progress), windows `45841494923` (queued) — read once, ~18 min old, not waited on (all under the 90-min build threshold; §5–§7 waits are allowed only past 90 min).
