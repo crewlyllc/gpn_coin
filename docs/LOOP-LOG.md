@@ -1,3 +1,31 @@
+## 14:45 PT — 0.3.82 §7: windows rebuild still queued behind a CI build on the single-slot box-1 runner; run ended, nothing else blocked
+
+**A0 (HEAD `3579e224`, docs).** `?head_sha=3579e22495ede19441f573ea28a20b302aab2471` ⇒ **total_count 0** —
+expected under `ci.yml` `paths-ignore` for a docs-only SHA. Nothing red.
+
+**§7 windows asset (run `45904624707`, sha `bad49d12`) — still `queued`, and the reason is contention,
+not a fault.** `GET /actions/runners` ⇒ `DESKTOP-USBUADL online busy=True`; the job holding it is CI run
+**`45897921756`** (sha `9e1d9c5`), job `Build + unit tests (windows, self-hosted)` started 21:24:28Z,
+step `Build + test gpn-agent (release)` still in progress at 22:43Z (79 min — inside a normal release
+build, under the 90 min stale threshold). That CI run's other jobs are already green: `fmt + clippy`
+success, `Build + unit tests (linux)` success, secret-scan success. So the windows release build is
+queued behind legitimate build-priority work; no cancel, no dispatch.
+
+**First unticked box is 273 (soak) and it is time-bound** — day 2 of 7 already recorded today at 22:02Z;
+it cannot tick before 2026-12-02. The next box that can move is §7 box 2 (`release-cut.sh`), which needs
+the windows zip from run `45904624707` verified by hand first. Nothing to do but pick it up when the asset
+exists.
+
+**Production health while waiting** (read-only, 0.3.81): `system_version` ⇒ `0.3.81`; `system_health` ⇒
+`peers=3, isSyncing=false`; `GET :8092/providers` ⇒ **5 rows, all `healthy: true`, 4 carrying
+`git_sha a57afde`**, 0 placeholder/`address:""` rows — row 239's dedupe still holding on a second day.
+
+Tally: 30/56. Next run: if `45904624707` is `completed/success`, download the zip + bundle, check digest
+against the API, `cosign verify-blob` with the windows workflow identity, `strings` for the 285/286
+literals, `gpn-node --version` on the extracted exe, update §5/§6 windows notes, then re-run
+`release-cut.sh --version 0.3.82`. If it is still queued behind `45897921756`, do not cancel — check again
+next run.
+
 ## 14:2x PT — 0.3.82 §7: linux lane now attested and verified; cut refused on two SHAs (correctly), windows rebuild dispatched
 
 **A0 (HEAD `fb3fc750`, docs).** `?head_sha=fb3fc750…` ⇒ **total_count 0** — expected under
