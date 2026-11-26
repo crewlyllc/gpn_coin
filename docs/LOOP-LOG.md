@@ -1,3 +1,53 @@
+## 00:0x PT AUDIT — fixed 1 (31 G); needs-attention: provider attestation blocked by the miner's own GPU
+
+**Disk first (85 % → 77 %).** `/dev/sdb3` 439 G: `Avail 67 G / Use 85 %` ⇒ **under the 25 % line**, cleaned before
+anything else. Deleted `~/gpn-loop/gpn-agent/target/debug` = **31 G** (checked first: `pgrep -x cargo`/`rustc`
+empty, no `/proc/*/cmdline` referenced the tree). After: **98 G free, 77 %, 22.3 %**. `~/gpn-loop` 38 G ⇒ 6.9 G.
+
+**Deliberately left, with numbers.** Top five consumers after the clean: `~/.ci-cache` **99 G**
+(`gpn-agent-target` 78 G + `gpn-node-target` 21 G; prune unit itself logged `cache now 90 GiB` at Nov 25
+04:20, so the 0.3.80 build added ~9 G — owner says keep), `~/.cache` **54 G** (`huggingface` 53 G — models, keep),
+`~/.openclaw` **17 G** (`workspace/shared` 15 G, `agents/main/sessions` 373 M/586 files, `cron/runs` 34 M,
+`plugin-runtime-deps` 1.5 G — none touched), `~/ollama` **8.1 G**, `/tmp` **3.3 G**. `~/.cache/gpn-release-cut`
+575 M from the Nov 25 cut is re-downloadable but `<1 G` and recent — left. `state/bin-snapshots` empty.
+Note `~/gpn-loop/gpn-node/target` holds only `release/` (3.9 G) — untouched.
+
+**Units.** `systemctl --user list-units 'gpn*'` + `list-unit-files`: every enabled gpn unit `active` — accesspoint,
+diffusion, explorer, faucet, finetune, fleet, fleet-directive, oracle, provider, provider-heartbeat (`is-active`
+⇒ all `active`). No enabled-but-dead unit. `gpn-node.service` disabled (fleet runs the node).
+
+**Chain.** `system_chain` ⇒ `GPN Public Testnet`; `system_version` ⇒ **0.3.80**; `system_health` ⇒
+`peers 3, isSyncing false`; blocks advancing live in the journal #366386 → #366389 in 30 s, imports 113 ms,
+no panic/`Reason:`/taskkill in the last 300 `gpn-fleet` lines (grep returned 0). Ports 9944/8092/8093/8099/11434
+all LISTEN; `/v1/models` lists 5 models.
+
+**Box 1 (SSH).** `(Get-Process gpn-node).Path` ⇒ `C:\gpn\data\update\current\gpn-node.exe`; `system_version`
+⇒ **0.3.80**; `C:\gpn\update.log` 00:00:34 ⇒ `latest 0.3.80`, `-> up to date (0.3.80)`, `nothing to do (node NOT
+restarted)`.
+
+**Update + release loop.** `~/.gpn/update/update-attempts.json` last four: 0.3.77/78/79/80 all `confirmed`
+(0.3.80 at 1795669574). `openclaw cron runs --id feff1358…` ⇒ last entry `status: ok`, 336 s. Release record
+consistent one machine deep: `docs/releases/INDEX.md` has 0.3.80, `docs/releases/archive/0.3.80.md` exists,
+`GPN-LIST.md` rows 279/280/281 `COMPLETE 0.3.80`, site `releases.json` ⇒ `0.3.80`, local node ⇒ `0.3.80`,
+box 1 ⇒ `0.3.80`. `gpn-deploy-drift` finished clean at 00:01.
+
+**NEEDS-ATTENTION — the miner and the LLM provider are fighting over one GPU.** `gpn-provider` journal, 7
+`GPU busy` lines in 3 days, last three hourly retries: `[attest] re-attesting: 825 GFLOPS attested at block
+356917, older than 7200 blocks` → `skipping: GPU busy (util 100 %, 1615/8188 MiB, utilization 100 % > 10 %)
+— NO measurement submitted` → `still busy after 6 attempt(s) — next try in 3600s`. `nvidia-smi
+--query-compute-apps` names the holders: **pid 4179529 `gpn-node` 1120 MiB @ 100 %** (the fleet miner) and
+pid 3771652 `gpn-agent` 140 MiB. Last successful attestation block 356917, head now 366389 ⇒ ~9,472 blocks
+(~29 h) ago. This cannot self-clear: mining holds the card at 100 %, so every retry will skip. Provider still
+serves jobs (`[assign] taking work again (serve gate clear)`), so it is degraded scoring, not an outage.
+Needs an owner/design call (attest under load, pause mining for the measurement, or accept no re-attestation)
+— filed as AUDIT-2026-11-26a in `docs/NEEDS-TRIAGE.md`, not fixed here.
+
+**Resources.** `free -h` available **24 GiB** (fine); load 5.13 / 6.34 / 6.65 (mining + providers, same shape as
+the last days); GPU 1617/8188 MiB. No `cargo`/`rustc` running at any point of this audit.
+
+**Nothing else fixed.** No dead unit to restart, no failed workflow to re-dispatch, no stale lock older than a
+day in `~/.gpn`.
+
 ## 23:5x PT — row 280: the macOS release lane stops lying (red 15/15 while every release used it)
 
 **A0 (CI).** `fetch && reset --hard origin/main` ⇒ HEAD `ddc5ab84`. Run `45777831509` (that sha) `pending`,
