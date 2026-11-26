@@ -1,3 +1,25 @@
+## 17:2x PT — 0.3.80 §4 push/CI boxes: three ticked on evidence, the code-SHA conclusion left open
+
+**A0 (CI):** `origin/main` HEAD `c13f410e` (docs-only) ⇒ `total_count: 0`, expected under
+`ci.yml` paths-ignore. The code commit `07be732c` ⇒ run **45730513852** `pending`, 0 jobs created yet —
+queued behind run 45725303970, whose Windows job has been compiling on `DESKTOP-USBUADL` since 00:21Z
+(runners API: `busy=true`). Linux/fmt+clippy/secret-scan in 45725303970 are green. Noted, not waited on.
+
+**Box worked — §4 "Push (once)": 3/4 ticked, box 4 left open on purpose.**
+- Box 1 (docs-only pushes must not build): `ci.yml:29-35` paths-ignore intact; full-sha queries give
+  `total_count: 0` for `1a51945c` and `c13f410e`; the code commit `07be732c` *does* have a run, so the
+  list is not swallowing code.
+- Box 2 (batch docs edits): one docs commit per pass, each carrying that pass's evidence + log entry.
+- Box 3 (CI observed, not waited on): asked once, recorded run id 45730513852, continued.
+- Box 4 **not ticked**: its second clause is "for a code SHA the conclusion must be `success`" and
+  45730513852 is still `pending` with no jobs. Claiming it would be a tick without evidence.
+
+Also recorded for the record: 45728549405 (code SHA `4c1ed61e`) ended **cancelled with 0 jobs** — a
+cancelled queued run, not a red build; 45723274517 and 45720343974 likewise. No failure line exists to fix.
+
+Next pass: read 45730513852's conclusion. Green ⇒ tick §4 box 4 and open §5 (dispatch both release
+builds, write handles, end the run). Red ⇒ quote the failing line and fix it first.
+
 ## 17:0x PT — box 3 of 0.3.80: §3 seed parity, green (no seed changed in this batch)
 
 **A0 (CI):** HEAD `07be732c` (row 276) ⇒ run **45730513852** `status: pending`, `conclusion: null`. Noted,
