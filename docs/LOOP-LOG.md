@@ -1,3 +1,35 @@
+## 00:2x PT — row 281: a test was writing fake `corrupt-key` records into the production exit log
+
+**A0:** `origin/main` HEAD `b6deb5d3` has **0 CI runs** (`head_sha=` query, full sha) — the previous commit is
+docs-only, so `paths-ignore` correctly suppressed it. Nothing to read, nothing to wait on.
+
+**First IN-PROGRESS row is 273 (seven-day soak)** — day 2 of 7 was recorded at 06:40Z by the collector timer,
+day 3 is due tomorrow, so the row itself has no work to do this run. Working it is what exposed the defect:
+both its day-1 and day-2 lines quote a `corrupt-key` record as **the update outcome**, and that record is not
+the updater's.
+
+**281 (new, found + fixed + verified):** `scripts/tests/test-wallet-provision.sh` runs the real
+`gpn_node --ensure-wallet` through three deliberate failures and exported `GPN_BASE_PATH` but not
+`GPN_EXIT_LOG`; `exit_report::default_path()` (`gpn-agent/src/exit_report.rs:236`) looks only at
+`GPN_EXIT_LOG` then `GPN_PREFIX`, so it fell through to `~/.gpn/last-exit.json`. Measured pollution: **32
+records, 2026-11-25T15:33:35Z → 2026-11-26T08:03:49Z, exactly 3 per run every ~90 min**, each naming a
+`/tmp/tmp.XXXX/data/keystore.json`. Two consequences: the updater's start-failure classifier reads the newest
+record from that file (so a real failure could be mis-reported as `corrupt-key`), and the soak's per-day
+"update outcome" line was false.
+
+Fix: isolated `GPN_EXIT_LOG="$tmp/last-exit.json"` + a new case 8 asserting the isolated log *was* written and
+that the real log **did not grow**. `bash scripts/tests/test-wallet-provision.sh` ⇒ `RESULT: PASS`, incl.
+`ok the failing cases wrote /tmp/tmp.hutbFAS7Z7/last-exit.json` and `ok /home/jeremyg/.gpn/last-exit.json
+unchanged (32 lines)`. Soak doc day-1/2 update lines corrected with the real evidence (`21:04 PT
+confirmed 0.3.80 is running`, 24 s; every other fire "up to date" in ~1 s). Commit `d959e921`, pushed.
+
+**No version opened** — batch policy holds: 4 open rows (256 NEW, 278 NEW, 279 NEW, 273 in soak), none critical,
+so this test-only fix rides the tree and needs no artifact.
+
+**For the assistant's triage:** 278 and 279 are both still NEW and both touch the updater's user-visible path
+(278: Windows stops the node before evaluating the canary gate; 279: `network.json` advertises `spec_version: 54`
+while the chain is at 55). Neither is a decision — they are work waiting for the batch to reach five.
+
 ## 00:0x PT AUDIT — fixed 1 (31 G); needs-attention: provider attestation blocked by the miner's own GPU
 
 **Disk first (85 % → 77 %).** `/dev/sdb3` 439 G: `Avail 67 G / Use 85 %` ⇒ **under the 25 % line**, cleaned before
