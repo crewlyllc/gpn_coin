@@ -173,6 +173,33 @@ eq(sr.select_prev({}, "2026-11-25"), {}, "no state at all is an empty prev, not 
 eq(sr.effective_interval_secs(366977, 1795688520.0, 367023, 1795689900.0), 1380 / 46,
    "46 blocks in 23 min is 30 s/block — the stall number, not its reciprocal")
 
+# ---- the 2026-11-26 defect: a 65-second window was printed as the day's cadence ----
+# Real state: a loop pass made day 2's first reading at 13:19:24Z (367623), the timer's
+# 13:20:29Z record measured from it, and day 2 read "2 blocks in 0.02 h = 32.53 s/block,
+# slower than the 13.4 s baseline". Truth day-over-day was 3,138 blocks in 13.38 h.
+_day2_state = {"last": {"height": 367625, "ts": 1795699229.0},
+               "day_first": {"2026-11-26": {"height": 367623, "ts": 1795699164.0}},
+               "day_last": {"2026-11-25": {"height": 364487, "ts": 1795651020.0},
+                            "2026-11-26": {"height": 367625, "ts": 1795699229.0}}}
+eq(sr.select_prev(_day2_state, "2026-11-26"),
+   {"height": 364487, "ts": 1795651020.0},
+   "day 2 measures from day 1's last reading, not from a loop pass 65 s earlier")
+eq(round(sr.effective_interval_secs(364487, 1795651020.0, 367625, 1795699229.0), 2),
+   15.36, "the day-over-day number is 15.36 s/block (3,138 blocks in 13.39 h)")
+eq(sr.effective_interval_secs(367623, 1795699164.0, 367625, 1795699229.0), None,
+   "a 65 s window is not a cadence figure — it is n/a, not 32.53 s")
+eq(sr.effective_interval_secs(367623, 1795699164.0, 367625, 1795699164.0 + 62), None,
+   "2 blocks in 62 s was the exact number printed; it must now be rejected")
+# a legacy state file with no day_last still prefers an earlier day's `last`
+eq(sr.select_prev({"last": {"height": 364401, "ts": 1795651020.0},
+                   "day_first": {"2026-11-26": {"height": 367623, "ts": 1795699164.0}}},
+                  "2026-11-26"),
+   {"height": 364401, "ts": 1795651020.0},
+   "legacy state (no day_last) still measures from yesterday, not today's first pass")
+eq(sr._entry_day({"height": 1, "ts": 1795651020.0}), "2026-11-25",
+   "_entry_day reads the UTC date off the entry's ts")
+eq(sr._entry_day({}), None, "_entry_day on an entry with no ts is None, not a crash")
+
 # ---- per-node telemetry (row 274) -------------------------------------------
 # The audit must be able to TREND, not just print prose: one small JSON per node
 # per day, and a report that flags a metric moving >25% week over week.

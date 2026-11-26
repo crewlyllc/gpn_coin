@@ -489,23 +489,51 @@ def day_index(start_date, today):
     return (today - start_date).days + 1
 
 
+def _entry_day(entry):
+    """The UTC date a state entry was recorded on, or None."""
+    ts = entry.get("ts") if isinstance(entry, dict) else None
+    if not ts:
+        return None
+    return datetime.fromtimestamp(ts, timezone.utc).strftime("%Y-%m-%d")
+
+
 def select_prev(st, today_str):
     """The record the day's effective interval is measured FROM.
 
-    `st["day_first"]` keeps the first reading of each day. A second run on the same day
-    (re-runs happen: the day line gets refreshed after a fix) must measure from that first
-    reading, not from the run 2 minutes ago — otherwise the day's interval collapses to
-    `best <= prev_height` and the record silently loses the number the gate reads
-    (measured 2026-11-26 02:4x PT: two consecutive passes left day 2 as "n/a (first record
-    of this soak)" while the earlier pass had a real 10.04 s).
+    Priority: the LAST reading of a previous day — that is the day-over-day drift the
+    gate reads — then, on the soak's first day or with a legacy state file that has no
+    per-day history, this day's FIRST reading.
+
+    Why the day's own first reading must not win: it is written by whichever pass runs
+    first that day. On 2026-11-26 a loop pass at 13:19Z created day 2's first reading and
+    the timer's 13:20Z record measured from it, so the day's headline number became
+    "2 blocks in 0.02 h = 32.53 s/block, slower than the 13.4 s baseline — drift": a
+    65-second window presented as the day's cadence, twice the truth (the real
+    day-over-day figure was 3,138 blocks in 13.38 h = 15.35 s/block).
     """
+    earlier = {d: e for d, e in (st.get("day_last") or {}).items()
+               if isinstance(e, dict) and d < today_str}
+    legacy = st.get("last") or {}
+    ld = _entry_day(legacy)
+    if ld and ld < today_str and ld not in earlier:
+        earlier[ld] = legacy
+    if earlier:
+        return earlier[max(earlier)]
     first = (st.get("day_first") or {}).get(today_str)
     if first:
         return first
-    return st.get("last") or {}
+    return legacy
 
 
-def effective_interval_secs(prev_height, prev_ts, best, now_ts, min_dt=60):
+# The drift number is a day-scale measure: a window shorter than this cannot say anything
+# about cadence, and using one turns 2 blocks into a headline figure (see select_prev).
+# The prose in main() carries the same two numbers — edit them together.
+MIN_WINDOW_SECS = 900
+BASELINE_INTERVAL_SECS = 13.4
+DRIFT_LIMIT_SECS = 15.0
+
+
+def effective_interval_secs(prev_height, prev_ts, best, now_ts, min_dt=MIN_WINDOW_SECS):
     """Seconds per block between two records — the number that catches a stall.
 
     Height delta over elapsed wall time, expressed as s/block (NOT blocks/s):
@@ -696,10 +724,11 @@ def main():
         lines.append(f"- effective block interval since previous record "
                      f"({best - prev['height']} blocks in {(now.timestamp()-prev['ts'])/3600:.2f} h): "
                      f"**{eff:.2f} s**"
-                     + ("" if eff <= 15 else "  ⚠️ slower than the 13.4 s baseline — name this as drift"))
+                     + ("" if eff <= DRIFT_LIMIT_SECS else "  ⚠️ slower than the 13.4 s baseline — name this as drift"))
     else:
         lines.append("- effective block interval: n/a ("
-                     + ("no forward progress or a window shorter than 60 s"
+                     + (f"no forward progress or a window shorter than "
+                        f"{MIN_WINDOW_SECS} s"
                         if prev.get("height") else "first record of this soak") + ")")
     lines.append(f"- authored interval over the last {len(intervals)} blocks: "
                  f"p50 **{p50:.2f} s**, p95 **{p95:.2f} s**")
@@ -774,6 +803,9 @@ def main():
 
     st["last"] = {"height": best, "ts": now.timestamp(), "peers": health.get("peers")}
     st.setdefault("day_first", {}).setdefault(today_str, {"height": best, "ts": now.timestamp()})
+    # Per-day LAST reading, so tomorrow's record measures from today rather than from
+    # whichever pass happens to run first tomorrow (the 2026-11-26 defect, see select_prev).
+    st.setdefault("day_last", {})[today_str] = {"height": best, "ts": now.timestamp()}
     st.setdefault("days", {})[today_str] = best
     save_state(st)
 
