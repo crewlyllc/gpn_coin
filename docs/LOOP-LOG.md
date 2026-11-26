@@ -1,3 +1,30 @@
+## 23:2x PT — row 279 (spec floor) source complete: network.json 54 → 55 and the guard can no longer pass a divergence
+
+**A0 (CI).** `fetch && reset --hard origin/main` ⇒ HEAD `d35c0a34` (loop-log docs commit); `GET /actions/runs?head_sha=d35c0a34…`
+⇒ `total_count: 0` — docs-only SHA under `ci.yml` paths-ignore, so nothing red and nothing to wait for.
+
+**Why this box.** No checklist is open (0.3.80 archived, its only unticked rows are 273 soak and 177 AWAITING-OWNER) and
+row 273 cannot advance tonight — day 2 was recorded at 06:40 UTC and `gpn-soak-record.timer` next fires
+`Thu 2026-11-26 09:11:36 PST`, so a third reading now would replace a day, not add one. NEW rows stand at 3 of 5
+(256, 278, 279), under the batch threshold, so nothing is bundled and no version is opened; per the batch rule the
+run took evidence/source work on a queued row instead.
+
+**Row 279 — `network.json` shipped a spec floor one behind the binary.** Verified the premise first: `network.json`
+`spec_version: 54`, `gpn-node/runtime/src/lib.rs:137` `spec_version: 55`, live `state_getRuntimeVersion` on `:9944`
+⇒ `specVersion: 55`. `classify()` compares `spec_version >= r.spec_version`, so a spec-54 node read as healthy, and
+`check-spec-version.sh` only enforced "source not behind the registry" (plus a warning above +1) — 54-vs-55 passed clean.
+
+- `scripts/tests/test-check-spec-version.sh` written FIRST: **4 of 6 checks failed** against the old script (behind, ahead,
+  no-warning-lane, shipped-floor) — evidence the guard was genuinely blind, not merely unimplemented.
+- `scripts/check-spec-version.sh`: equality is now the only passing state; `GPN_REPO_ROOT` added so a fake tree can drive it.
+  After: **6/6 pass**, and the real repo prints `source spec_version=55   network.json spec_version=55` / `OK`.
+- `network.json` `spec_version` 54 → 55; note above `spec_ok` in `network_registry.rs` records that raising the floor is
+  the deliberate compatibility call. `cargo test --lib network_registry` ⇒ 2 passed, 0 failed.
+
+**Boxes ticked:** none — row 279 stays NEW until it ships in a version with a fully ticked checklist.
+**Blockers / [TRIAGE]:** none new.
+**Next run:** record soak day 3 after the 09:11 PST timer; keep filling the batch (278 Windows updater gate, 256 lifecycle).
+
 ## 22:5x PT — 0.3.80 filed: checklist archived, INDEX row written
 
 **A0 (CI).** `fetch && reset --hard origin/main` ⇒ HEAD `433aa25e`. Run query on the full sha ⇒ one run,

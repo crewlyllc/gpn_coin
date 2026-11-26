@@ -96,6 +96,12 @@ pub fn classify(genesis_hex: &str, spec_version: u32, running_version: &str) -> 
     let r = load_registry();
     let placeholder = r.genesis_is_placeholder();
     let genesis_match = r.genesis_hash.eq_ignore_ascii_case(genesis_hex);
+    // The registry's `spec_version` is the floor below which a node is called
+    // OUTDATED. It must name the spec this tree actually builds (row 279: it
+    // shipped 54 while every released binary built 55, so a spec-54 node read
+    // as healthy). Raising it is what declares older nodes incompatible — a
+    // deliberate compatibility call, enforced by scripts/check-spec-version.sh
+    // requiring network.json and the runtime's spec_version to be equal.
     let spec_ok = spec_version >= r.spec_version;
     let summary = if !placeholder && !genesis_match {
         format!(
