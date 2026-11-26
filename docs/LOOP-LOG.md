@@ -1,3 +1,13 @@
+## 06:59 PT — 0.3.81 box 278 ticked with local proof; §5 builds left in flight
+
+**A0:** `origin/main` HEAD `5282bfa6` (docs-only) ⇒ runs for that sha **total_count 0**, expected. The three in-flight runs on `a57afde1` — CI `45838033526` (in_progress), linux `45841491261` (in_progress), windows `45841494923` (queued) — read once, ~18 min old, not waited on (all under the 90-min build threshold; §5–§7 waits are allowed only past 90 min).
+
+**Ticked:** §3b **278** — fix `ddc5ab84`; produced this pass on `5282bfa6`: `scripts/tests/test-update-shutdown.ps1` ⇒ `RESULT: PASS (all checks)` including `K the hold branch is closed before the next check` / `K it runs before the stop line` / `K it does not stop the node`; `cargo test --test gpn_update_cli` ⇒ `31 passed; 0 failed; finished in 14.64s`. Box-1 live `holding`-with-no-`taskkill` log proof is due at §9's self-update.
+
+**Left unticked by their own terms:** §4 "run for this SHA must conclude success" (CI still running), 273 (soak day 3 of 7), §0e stranger-lifecycle (AWAITING-OWNER, triage 256).
+
+---
+
 ## 06:41 PT — 0.3.81 §3/§4 recorded, §5 builds **dispatched and the run ended** (linux `45841491261`, windows `45841494923`)
 
 **A0:** `origin/main` HEAD `3725ba30` (log commit) ⇒ `?head_sha=3725ba30e3b1b90e0e3cb4db26e722ab6a1396c9` **total_count 0** — docs-only, expected. The code commit `a57afde1` has run `45838033526`, `in_progress`; read job-level at 14:38Z: `fmt + clippy` **success** (step 9/10 rustfmt, 11/12 clippy -D warnings), `secret-scan` **success**, linux `Build gpn-node (release)` + `Test gpn-node (non-GPU)` **success**, `Test gpn-agent` still running. Not blocked on, per the 2026-11-18 rule.
