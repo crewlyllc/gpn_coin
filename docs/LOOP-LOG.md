@@ -1,3 +1,28 @@
+## 09:15 PT — canary self-updated to 0.3.81 (canary proof published), §9 3/4, §10 proven, rows 282/283/284 ticked
+
+**A0:** `origin/main` HEAD `7a4fd6a7` ⇒ runs for that full sha **total_count 0** (docs-only commit, expected under `ci.yml` `paths-ignore`). Nothing red.
+
+**Box worked — §9 deploy, and the gate that was holding the fleet.** Box 1's `C:\gpn\update.log` explained the morning exactly:
+- `08:57:47` and `09:00:01` — `check: latest 0.3.81 published 2026-11-26T16:28:55Z` → `-> update available 0.3.81 but HELD here: 0.3.81 is available, but this node is not the canary — the published canary proof is for 0.3.80 not 0.3.81 — holding` → `holding - … (node NOT restarted)`. **No `taskkill` line in either cycle** and `(Get-Process gpn-node).StartTime` still `8:04:47 AM` at `09:00:38` — row 278's fix working live.
+- So the box was not "stuck", it was **correctly gated**: 0.3.81 had no canary proof. The fix was to become the canary, which this host already is (`GPN_CANARY=1` + `gpn-update.service.d/canary.conf`):
+  1. `systemctl --user start gpn-update.service` (the unit the timer runs) ⇒ `09:00:53` start → `confirm: process=up rpc=yes 26s version=0.3.81` → **`confirmed 0.3.81 is running`** at `09:02:45`, fleet restarted; RPC `system_version` ⇒ `0.3.81`; `current.previous` ⇒ `…/versions/0.3.80`; `update-attempts.json` ⇒ `{"version":"0.3.81","outcome":"confirmed","release_id":"302ed0c2…","attempts":1}` (that is the published linux asset sha256).
+  2. Served a real job on 0.3.81: two `mode:"settle"` chats landed on `0x664c…` — job `6598` and `6600`, both `Completed`; `scripts/canary-report.py --provider 0x664c… --job-id 6600` ⇒ `0.3.81 confirmed by the running node` + `job #6600 is Completed for 0x664c…`.
+  3. `scripts/canary-publish.sh` ⇒ committed `13eb707a`, `published canary proof for 0.3.81 — the fleet may now update`; `https://gpncoin.ai/canary.json` served `0.3.81 / ok:true / job 6600` at `09:08:44` (polled `09:08:19` = still 0.3.80, then green).
+- Ticked §9 boxes 1, 2, 4. **§9 box 3 left unticked** on purpose: the per-step `check → stop → download → swap → start` lines are emitted only by the **Windows** updater log, and box 1's next supervisor cycle (~09:57 PT) writes them. Tick it from `C:\gpn\update.log`, not from the quiet Linux half.
+
+**Boxes worked — §3b 282, 283, 284** (all were fixed on `main`; this pass produced the evidence):
+- **282** guard `489bbec9`: `~/.gpn/last-exit.json` **absent**, 32 pollution records quarantined at `~/.gpn/last-exit.fake-tests-2026-11-26.json`; `cargo test --lib default_path_never_points_at_the_real_prefix_under_cargo_test` ⇒ `1 passed`; `cargo test --lib firstrun::` ⇒ `38 passed; 0 failed` (the suite that used to append 3 fake records per run) with the operator log still absent; no `/tmp/gpn-test-last-exit-*` written.
+- **283** `4928d8ae`: 0 code references to the deleted clone (the single hit in the cadence-gate unit is a comment); `systemd-analyze verify --user scripts/systemd/gpn-cadence-gate.service` ⇒ rc 0; `bash -n build-spec42-wasm.sh` rc 0; `ast.parse(gpn_gpulock_contend.py)` ok.
+- **284** `27a8af44`: proven **live on the real file** — `systemctl --user start gpn-soak-record.service` at `09:10:28` rewrote Day 2 in place and all three `### Note` sections are byte-identical (`NOTES UNCHANGED`); `test-soak-record.py` ⇒ `138 checks passed`.
+
+**§10 proven:** held cycles with no `taskkill` + unchanged StartTime (above); 8 minutes after the 0.3.81 restart `💤 Idle (3 peers), best: #368502` with `canonical/anchor-match=true`; `grep -E 'Reason:|ban|gpn-isolated|gpn-forked'` over the post-restart journal ⇒ no matches; `/health` ⇒ `{"status":"ok","providers":6}`. §7b's capability box ticked **n/a** (0.3.81 is fixes only).
+
+**§10b recorded:** `docs/releases/timing/0.3.81.{json,md}` — `39 of 60 boxes`, `total 2h51m`; slowest single step **33m47s (§5 Windows SSH evidence — machine-wait, not re-work)**; the shorten-it answer is one batched SSH call per release instead of one call per fact.
+
+**Not worked:** `273` (soak day 2 of 7 — cannot be finished early), §0e stranger lifecycle (AWAITING-OWNER, triage 256, unanswered since 2026-11-24).
+
+**Blockers / [TRIAGE]:** none new. Next run: read `C:\gpn\update.log` once for §9 box 3 (expect `installed 0.3.81` + `CONFIRMED`), then §10 box 3 and the §0b filing boxes (`archive/0.3.81.md` + `INDEX.md` row).
+
 ## 08:45 PT — §7 release-cut verified from its log and ticked; §7b site surfaces stamped 0.3.81
 
 **A0:** `origin/main` HEAD `327b5e55` ⇒ run `45860000191` **status `pending`, conclusion null** — noted and not waited on (build in flight, other work available).
