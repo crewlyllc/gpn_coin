@@ -69,10 +69,42 @@ eq("- height: **100**" in doc2, False, "the superseded reading is gone")
 eq("protocol text" in doc2, True, "header survives a replacement")
 eq(doc2.endswith("\n"), True, "file ends with a newline")
 
+# ---- effective interval (the stall catcher) ---------------------------------
+# Day 1 on 2026-11-25 printed "0.08 s" for 83 blocks in 0.29 h — that is
+# 83/1044, i.e. blocks per second, printed as seconds per block. A stall would
+# make the real figure LARGE, so the inverted number could never catch one.
+eq(round(sr.effective_interval_secs(364404, 1795654020.0, 364487, 1795654020.0 + 1044), 2),
+   12.58, "83 blocks in 1044 s is 12.58 s/block, not 0.08")
+eq(sr.effective_interval_secs(None, None, 364487, 1795654020.0), None,
+   "no previous record is None, not a fabricated number")
+eq(sr.effective_interval_secs(364487, 1795654020.0, 364487, 1795654020.0 + 600), None,
+   "no forward progress is None (a stall is reported by peers/imports, not 0 s)")
+eq(sr.effective_interval_secs(364487, 1795654020.0, 364500, 1795654020.0 + 30), None,
+   "a window under min_dt is not measured")
+eq(sr.effective_interval_secs(100, 1000.0, 200, 7000.0), 60.0,
+   "a 300 s block gap reads as a drift-scale number, not 0.0167")
+
 # a day-2 section must not eat the day-1 section
 day2 = "### Day 2 — 2026-11-26 10:00 UTC\n\n- height: **300**"
-doc3 = sr.splice_day(doc2 + "\n" + day2, header, "### Day 2 — 2026-11-26 22:00 UTC\n\n- height: **400**")
-eq(doc3.count("### Day 2"), 1, "day 2 appears once after a rewrite")
+doc3 = sr.splice_day(doc2, header, day2)
+eq(doc3.count("### Day 1"), 1, "adding day 2 keeps day 1")
+eq(doc3.count("### Day 2"), 1, "day 2 is written once")
+eq("- height: **200**" in doc3, True, "day 1's last reading survives day 2")
+eq(doc3.index("### Day 1") < doc3.index("### Day 2"), True, "days stay in order")
+eq("protocol text" in doc3, True, "header survives across days")
+
+doc4 = sr.splice_day(doc3, header, "### Day 2 — 2026-11-26 22:00 UTC\n\n- height: **400**")
+eq(doc4.count("### Day 2"), 1, "day 2 appears once after a rewrite")
+eq("- height: **400**" in doc4, True, "the rewrite is what day 2 shows")
+eq("- height: **300**" in doc4, False, "day 2's superseded reading is gone")
+eq(doc4.count("### Day 1"), 1, "day 1 is untouched by a day-2 rewrite")
+eq("- height: **200**" in doc4, True, "day 1 content still intact")
+
+# three days, out of order on input, land 1-2-3
+doc5 = sr.splice_day(doc4, header, "### Day 3 — 2026-11-27 07:00 UTC\n\n- height: **500**")
+eq([doc5.index(f"### Day {n}") for n in (1, 2, 3)] ==
+   sorted(doc5.index(f"### Day {n}") for n in (1, 2, 3)), True, "three days in ascending order")
+eq(doc5.count("### Day"), 3, "exactly three day sections")
 
 # ---- per-node telemetry (row 274) -------------------------------------------
 # The audit must be able to TREND, not just print prose: one small JSON per node

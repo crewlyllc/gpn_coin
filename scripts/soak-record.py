@@ -128,20 +128,50 @@ def ts_at(block_hash):
     return ts_from_storage_hex(q("state_getStorage", [TS_KEY, block_hash]))
 
 
-def splice_day(existing_text, header, section):
-    """Keep the document header, replace any earlier section for the same day.
+def _day_number(section):
+    m = re.search(r"### Day (\d+)", section)
+    return int(m.group(1)) if m else None
 
-    Idempotent by construction: the recorder runs several times a day (timer + every
-    loop pass) and must not stack duplicate day sections.
+
+def splice_day(existing_text, header, section):
+    """Keep the header and every day already recorded; replace only this day's.
+
+    Idempotent for today (the recorder runs several times a day: timer + every loop
+    pass) and *additive* across days. The first version kept only the header, so the
+    day-2 write silently deleted day 1 — a seven-day soak could never hold seven
+    days, and the rule that a missed day restarts the soak made that fatal.
     """
     head = ""
+    sections = []
     if existing_text and "\n### Day " in existing_text:
-        head = existing_text.split("\n### Day ", 1)[0].rstrip("\n")
+        head, rest = existing_text.split("\n### Day ", 1)
+        rest = "### Day " + rest
+        sections = ["### Day " + s for s in rest.split("\n### Day ")[1:]]
+        sections.insert(0, rest.split("\n### Day ")[0])
+        head = head.rstrip("\n")
     elif existing_text:
         head = existing_text.rstrip("\n")
     if not head.strip():
         head = header.rstrip("\n")
-    return head + "\n\n" + section.rstrip("\n") + "\n"
+
+    new = section.strip("\n")
+    n_new = _day_number(new)
+    kept, replaced = [], False
+    for sec in sections:
+        if n_new is not None and _day_number(sec) == n_new:
+            kept.append(new)
+            replaced = True
+        else:
+            kept.append(sec.strip("\n"))
+    if not replaced:
+        kept.append(new)
+
+    def _order(sec):
+        n = _day_number(sec)
+        return n if n is not None else 10 ** 6
+
+    kept.sort(key=_order)
+    return head + "\n\n" + "\n\n".join(kept) + "\n"
 
 
 def authored_intervals(window):
@@ -306,6 +336,24 @@ def day_index(start_date, today):
     return (today - start_date).days + 1
 
 
+def effective_interval_secs(prev_height, prev_ts, best, now_ts, min_dt=60):
+    """Seconds per block between two records — the number that catches a stall.
+
+    Height delta over elapsed wall time, expressed as s/block (NOT blocks/s):
+    the day-1 record printed 0.08 "s" for 83 blocks in 0.29 h, which is the
+    reciprocal (83/1044) with the wrong unit. A stall makes this number big,
+    so the drift test has to compare it against the cadence baseline (>15 s).
+    Returns None when there is no usable previous record (first record of the
+    soak, no forward progress, or a window shorter than `min_dt`).
+    """
+    if not prev_height or not prev_ts or best is None or best <= prev_height:
+        return None
+    dt = now_ts - prev_ts
+    if dt <= min_dt:
+        return None
+    return dt / (best - prev_height)
+
+
 # ---------- per-node telemetry, row 274 --------------------------------------
 # One small JSON per node per day, so the audit can trend a number instead of
 # reading prose. Every node writes its own ~/.gpn/telemetry/<date>.json; the
@@ -450,11 +498,8 @@ def main():
 
     # effective interval since the previous record = the stall catcher
     prev = st.get("last") or {}
-    eff = None
-    if prev.get("height") and prev.get("ts") and best > prev["height"]:
-        dt = now.timestamp() - prev["ts"]
-        if dt > 60:
-            eff = (best - prev["height"]) / dt
+    eff = effective_interval_secs(prev.get("height"), prev.get("ts"),
+                                  best, now.timestamp())
 
     since = (now - timedelta(hours=24)).strftime("%Y-%m-%d %H:%M:%S")
     bans = journal(since, grep=r"Reason:|banned|ban ")
@@ -481,7 +526,7 @@ def main():
         lines.append(f"- effective block interval since previous record "
                      f"({best - prev['height']} blocks in {(now.timestamp()-prev['ts'])/3600:.2f} h): "
                      f"**{eff:.2f} s**"
-                     + ("" if eff < 15 else "  ⚠️ slower than the 13.4 s baseline — name this as drift"))
+                     + ("" if eff <= 15 else "  ⚠️ slower than the 13.4 s baseline — name this as drift"))
     else:
         lines.append("- effective block interval: n/a (first record of this soak)")
     lines.append(f"- authored interval over the last {len(intervals)} blocks: "

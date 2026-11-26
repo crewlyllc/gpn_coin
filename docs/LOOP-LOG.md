@@ -1,3 +1,43 @@
+## 22:4x PT — 0.3.80 row 273 (soak) day 2 recorded; two collector bugs fixed, one of them fatal to a 7-day soak
+
+**A0 (CI).** `git fetch && reset --hard origin/main` ⇒ HEAD `2e93d760` (loop-log docs commit). Full-40-char
+run query (`?head_sha=2e93d760390f87723189255c70f200f94d731c52`) ⇒ `total_count: 0`: docs-only SHA under
+`ci.yml` paths-ignore, not a fault. Straight to the first actionable box.
+
+**Only open box: §3b row 273 (seven-day soak).** Day 2 recorded on the live node —
+`scripts/soak-record.py --root .` ⇒ `recorded day 2 at height 366070`, `telemetry: ~/.gpn/telemetry/2026-11-26.json`.
+Numbers: peers 3 `isSyncing=False`, journal 24 h min 1 / max 3 with **0 lines at 0 peers**, 0 `Reason:` bans,
+imports 3,841/24 h longest gap 121 s, gate-6 strings all 0, jobs 228/256 succeeded, `NRestarts=0`,
+box 1 `peers=2 syncing=False height=366071`.
+
+**Effective interval 15.19 s over 1,583 blocks / 6.68 h** vs the 13.4 s reference — named as **drift**, not a
+stall: the same record's authored p50 is 10.80 s (faster than reference), so the window average is dragged by
+the 21:05 PST deploy restart. Day 3 either repeats it (drift) or clears it.
+
+**Two collector defects found while proving the record — both fixed, tests failed first:**
+1. The effective interval was printed **inverted**: blocks/seconds labelled seconds. Day 1's `0.08 s` is really
+   **12.6 s/block** (83 blocks in 1,044 s). Because `eff < 15` was therefore always true, the drift warning could
+   never fire. Now `effective_interval_secs()` returns s/block and the test compares against 15. Failing test:
+   `FAIL a 300 s block gap reads as a drift-scale number: got None, want 60.0` → after: pass.
+2. `splice_day()` kept only the document header and **deleted every earlier day section** — today's day-2 write
+   wiped day 1 outright. A seven-day soak could never have held seven days, and the rule says a missed day
+   restarts it. Now it replaces only the matching day and keeps the rest in ascending order. Failing test: day-1
+   height absent after a day-2 write → after: `65 checks passed, 0 failed`. Verified for real by re-running the
+   collector: `### Day 1` and `### Day 2` both present, day 1's `height: **364487**` still there once.
+
+Day 1's inverted figure is annotated in place (corrected, not silently rewritten). Checklist 273 notes carry the
+same evidence; box stays unticked until day 7 on 2026-12-02, as its own text requires.
+
+**Push:** one commit, `scripts/soak-record.py`, `scripts/tests/test-soak-record.py`, `docs/soak-2026-11-25.md`,
+`docs/releases/0.3.80.md`, this log. `scripts/**` is not in `ci.yml` paths-ignore, so this one starts a CI run —
+noted, not waited on.
+
+**Batch:** GPN-LIST holds 3 `NEW` rows (256 venue, 278 Windows canary-stop ordering, 279 `network.json`
+`spec_version` 54 vs chain 55) — under the five-fix threshold, so no version is opened; 0.3.80 remains open on
+row 273 anyway.
+
+[no TRIAGE] — nothing here needs a decision.
+
 ## 22:1x PT — 0.3.80 §10b: release timing measured and recorded (6h59m; slowest step is a venue wait)
 
 **A0 (CI).** `reset --hard origin/main` ⇒ HEAD `3584e5c3` (loop-log docs commit). Full-40-char run query
