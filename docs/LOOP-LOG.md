@@ -1,3 +1,18 @@
+## 06:41 PT — 0.3.81 §3/§4 recorded, §5 builds **dispatched and the run ended** (linux `45841491261`, windows `45841494923`)
+
+**A0:** `origin/main` HEAD `3725ba30` (log commit) ⇒ `?head_sha=3725ba30e3b1b90e0e3cb4db26e722ab6a1396c9` **total_count 0** — docs-only, expected. The code commit `a57afde1` has run `45838033526`, `in_progress`; read job-level at 14:38Z: `fmt + clippy` **success** (step 9/10 rustfmt, 11/12 clippy -D warnings), `secret-scan` **success**, linux `Build gpn-node (release)` + `Test gpn-node (non-GPU)` **success**, `Test gpn-agent` still running. Not blocked on, per the 2026-11-18 rule.
+
+**Ticked this pass (all with pasted evidence in the file):**
+- §3 all four — bump `a57afde1`, CHANGELOG `## [0.3.81]` with 0 `_TODO_`, `bump-version.py --check` ⇒ `lockstep: 15 manifest(s) and 14 lockfile entr(ies) agree` / `gpn version: 0.3.81` (rc 0, re-run this pass), seed parity green: `test-autostart-installers.sh` all assertions passed, `access-points.test.js` 10/10, `nodes-directory` + `referral` 0 fail.
+- §4 "docs-only must not start a build" (total_count 0 on `3725ba30`, paths-ignore intact), §4 "batch edits into one commit", §4 "CI observed, not waited on" (run id + job-level state, nothing polled).
+- §4 "the run for this SHA must conclude success" deliberately **left unticked** with a note — `45838033526` is still running; every finished job is green.
+- §5 "same SHA on both runs" — both release runs on `refs/tags/build/a57afde16b4c` → `a57afde1`.
+
+**Dispatched, not waited:** tag `build/a57afde16b4c` pushed for `a57afde1` (workflow_dispatch refuses a raw sha), then `release-linux-selfhosted.yml` run **45841491261** and `release-windows.yml` run **45841494923**, both queued at 14:41Z behind CI on the single-slot runners (`runners` API showed `busy: true` for both `openclawassist` and `DESKTOP-USBUADL`). Handles written into the §5 boxes; the run ended immediately after.
+
+**Next run:** ask once for `45841491261` + `45841494923` conclusions; if success, work §5 attestation boxes (mechanism = cosign bundle, repo is user-owned private) → §6 scan/`--version` → §7 `release-cut.sh`. If either is red, quote the failing step and fix the cause.
+
+**Open, unchanged:** row 273 soak continues (7-day window to 2026-12-02); AUDIT-2026-11-26a (attestation attempts) still open in triage.
 ## 06:2x PT — opened **0.3.81** and bundled the five ready fixes (278, 279, 282, 283, 284); section C's "no IN-PROGRESS item" precondition read against the newer batch policy
 
 **A0:** `origin/main` HEAD `9ada07fd` (triage docs) ⇒ `?head_sha=9ada07fd9a386983b74de19254af08c5eb84b1c1` **total_count 0** — correct under `ci.yml` `paths-ignore`, nothing to act on. The queue's red is already explained and already fixed: runs `45803757268` (`437f97b0`) and `45795600763` both `failure` at job `fmt + clippy` step 9 `rustfmt (check)`, log line `Diff in …/gpn-agent/src/exit_report.rs:239` — the row-282 guard landing unformatted; `cd05e348` ("fmt: exit_report.rs default_path under cfg!(test)") is its ancestor and its own run `45812605736` is still `in_progress` (2 h 40 m, windows job is the long pole). Local proof on this HEAD: `cargo fmt --all -- --check` ⇒ rc 0 in both `gpn-agent` and `gpn-node`. No run for the HEAD sha, so nothing to wait for.
