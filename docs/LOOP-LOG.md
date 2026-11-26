@@ -1,3 +1,78 @@
+## 12:14 PT AUDIT — fixed 1 (disk 84% → 74%), everything else clean
+
+**Disk first (the reason this ran).** `df -h /` before: `/dev/sdb3 439G 348G 69G 84%`,
+**68.6 GiB free (15.6%)** — under the 25% line, so cleanup ran before anything else.
+
+Measured the tenants, not the total:
+`du -sh ~/.ci-cache ~/.cache/* ~/.ollama ~/.openclaw /tmp` →
+`.ci-cache 117G`, `.cache/huggingface 53G`, `.openclaw 17G`, `ollama 8.1G`, `/tmp 951M`.
+`.ci-cache` decomposed: `gpn-agent-target 97G` (**release 57G + debug 41G**), `gpn-node-target 20G`.
+
+**Cleanup actually done (nothing in flight, verified rather than assumed):**
+- `pgrep -x cargo` / `rustc` empty · `lsof +D …/debug` empty · linux runner `busy=False`
+  (the one in-progress workflow was on `DESKTOP-USBUADL busy=True`, a different machine) ·
+  newest file under `.ci-cache` was `11:39` (35 min old) ⇒ no build reading the tree.
+- `rm -rf ~/.ci-cache/gpn-agent-target/debug` — **41 GiB** (all rebuildable; `release` untouched
+  so no CI release artifact was lost).
+- `scripts/prune-ci-cache-daily.sh` — **2.1 GiB** of >7d files (the sanctioned prune path).
+
+`df -h /` after: `439G 306G 111G 74%` — **111 GiB free (25.3%)**, before → after **68.6G → 111G**, +42.4G.
+
+**Deliberately left (owner decisions 2026-11-20), with sizes so the day it matters it is a number:**
+`.cache/huggingface 53G` (XTTS-v2 + sd/sdxl/LTX models the audio & diffusion providers load),
+`ollama 8.1G` (served by the providers), `~/.openclaw/workspace/shared 15G` (`artifacts/` is data),
+`.ci-cache` remaining `75G` (release targets — pruning them counts a full rebuild),
+`agents/main/sessions 376M` / `cron/runs 33M` (records, not deleted). `/tmp` had no dirs >3d worth
+removing (largest 3.3M); `~/.gpn/*.log` all <14d except a 76K `spec43-execute.log`.
+
+**Top five consumers now:** `.ci-cache 75G` · `.cache/huggingface 53G` · `~/.openclaw 17G`
+(`workspace/shared/artifacts 15G`) · `~/ollama 8.1G` · `/tmp 951M`.
+
+**Units — enabled vs running.** `systemctl --user list-units 'gpn*' --all`: all enabled units
+active; `gpn-node.service` and `gpn-update.service` are `disabled` but their work is done by
+`gpn-fleet.service` and `gpn-update.timer` (expected, not a fault). `list-unit-files` shows no
+enabled-but-dead unit. Ports `9944 / 8092 / 8093 / 8099 / 11434` all LISTEN.
+
+**Chain.** `system_chain` → `GPN Public Testnet`; `system_version` → `0.3.81`;
+`chain_getHeader` → `#369166` and still advancing (`#369170` at 12:05:49, ~8 s/block);
+`system_peers` → 3 authorities. `gpn-incident-alarm` at 12:05:49: `peers=3 height=369170
+jobs_seen=256` / `no incident conditions`.
+
+**Logs, read not skimmed.** `journalctl --user -u gpn-fleet -n 300 | grep -Ei 'panic|Reason:|restart|
+pruning modes|error|fatal|taskkill'` → **zero matches**; tail shows normal import/consensus/propose.
+`journalctl --user -u gpn-update -n 30` → 09:00 run `confirm: process=up rpc=yes 26s version=0.3.81`
+→ `confirmed 0.3.81 is running`; 10:13 and 11:30 checks finished with nothing to do.
+
+**Updater ledger.** `~/.gpn/update/update-attempts.json` last entry: `version 0.3.81`,
+`outcome confirmed`, `attempts 1`, `reason ""` — matches the running node. `~/.gpn/last-exit.json`
+**absent**, as row 282 intended (tests can no longer write the real exit log).
+
+**Release record consistency.** `docs/releases/INDEX.md` has rows for **every** version
+0.3.71→0.3.81 (I initially mis-read it as stopping at 0.3.70 because the table is newest-first and
+I tailed it — it is complete); `archive/` holds 0.3.71…0.3.81.md; `GPN-LIST.md` rows 278/279/283/
+284/287 are `COMPLETE 0.3.81`. Three-way version agreement: local `website/releases.json 0.3.81`
+== live `https://gpncoin.ai/releases.json 0.3.81 (16:28:55Z)` == running node `system_version 0.3.81`.
+
+**Box 1 (SSH via `scripts/box1.sh`).** `(Get-Process gpn-node).Path` →
+`C:\gpn\data\update\current\gpn-node.exe`; `system_version` → `0.3.81`; `system_peers` → `2`;
+process `StartTime` `2026-11-26 09:53:57` (i.e. it has not restarted since the 0.3.81 confirm).
+
+**Release loop.** `openclaw cron list` — `GPN release loop` last `ok`, next in 10m; last run's
+summary shows CI run 45738389392 red only at the `gpn_update` CLI test (a fixture predating the
+canary gate), fixed in `73f8db8a`. No repeated timeouts. 0.3.82 batch is open (rows 285/286
+IN-PROGRESS) — **I did not restart anything, publish, or touch the in-flight bundle.**
+
+**Resources.** `free -h`: 24 GiB available (>4 GiB ok), 2.0 GiB swap fully used (pre-existing).
+Load 2.93 / 2.83 / 3.25. GPU: RTX 4060 1617/8188 MiB, 100% util (diffusion/finetune providers).
+
+**Remains / notes, no action taken by me:**
+- Swap is 100% used (2.0/2.0 GiB) with 24 GiB RAM available — worth a look sometime, not a fault today.
+- `~/.ci-cache` is 75G and grows ~24G on a busy day; the 7-day prune only finds ~2G because the
+  release tree is refreshed constantly. If it crosses 120G again the lever is `gpn-node-target/release`
+  (20G) or a cache-size cap, not another prune — that is an owner call, flagged, not done.
+- The audit brief still names `projectmanager07/docs/LOOP-LOG.md`; that clone was deleted on
+  2026-11-24 (decision recorded in TOOLS.md). This entry went to `~/gpn-loop/docs/LOOP-LOG.md`, the
+  single live clone.
 ## 11:56 PT — CI 54 min in, linux+fmt+secret-scan green, only the windows self-hosted job left; release cut still gated
 
 **A0:** HEAD `5bc5c3765e87bb5babc2fc833ee51f1939902b4c` (docs: soak day 2 refresh + 19:37Z CI box)
