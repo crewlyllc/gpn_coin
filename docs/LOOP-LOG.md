@@ -1,3 +1,31 @@
+## 20:41 PT — 0.3.82 §4: CI green (45880574537 success) — both release builds DISPATCHED, run ended
+
+**A0 (HEAD).** `origin/main` = `617c4838` (docs) ⇒ `?head_sha` **total_count 0** (paths-ignore, expected).
+
+**§4 cut gate cleared.** CI run **`45880574537`** (`eb538744`, the 0.3.82 code sha) ⇒ **completed / success**,
+19:02:20→20:32:56Z (90m36s — finished inside the 90 min window, so no cancel/no re-dispatch).
+
+**Why not `release-cut.sh` directly:** the rolling assets on `linux-latest`/`windows-latest` were still
+dated 15:08:47Z / 16:08:25Z — **0.3.81 builds**. `?head_sha=eb538744…` ⇒ `total_count 1` (`CI` only):
+no release build had ever run for this sha. Cutting against those assets would have published 0.3.81's
+binaries under a 0.3.82 checklist. So §5 builds first.
+
+**Dispatched (tag `build/eb5387448d49`, both at `head_sha eb538744`):**
+- `release-linux-selfhosted.yml` ⇒ run **`45892755516`** (in_progress, 20:40:37Z)
+- `release-windows.yml` ⇒ run **`45892758345`** (in_progress, 20:40:38Z)
+
+Repo visibility checked first: **private / User-owned** ⇒ cosign keyless bundle path, so
+`gpn-windows.zip.bundle` beside the zip is the provenance and `attestations/sha256:` **404 is not a failure**.
+
+**Boxes ticked:** §4 "Next run: dispatch the release cut" (evidence above) · §5 "Same SHA on both runs".
+**Not ticked:** §5 artifact boxes — they need the two runs' artifacts, and no box is ticked on a dispatch.
+
+**Blockers / [TRIAGE]:** none.
+
+**Next run:** ask the two run ids once. Both success ⇒ §6 scan + `--version`, then §5 provenance verify
+(`cosign verify-blob` against `releases.json` sha256), then §7 `release-cut.sh --timeout 300`.
+Either failure ⇒ quote the failing step line, classify, fix, push once.
+
 ## 12:17 PT — 0.3.82 A0/§4: CI still building on box 1 (75 min, progressing), no dispatch yet
 
 **A0 (HEAD).** `origin/main` = `e794d2e5` (docs-only triage commit) ⇒ `?head_sha=e794d2e5e55f112927f50d003284a1144788ba18` **total_count 0** — expected under `ci.yml` `paths-ignore`, not a red flag. Nothing red at HEAD.
