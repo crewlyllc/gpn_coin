@@ -1,3 +1,35 @@
+## 21:22 PT — 0.3.80 is LIVE ON TWO NODES: canary gate opened and proven, box 1 auto-updated to 0.3.80
+
+**What closed.** §5/§6/§7/§7b were ticked in the 20:58 entry. This pass closed §9 (4/4) and 2 of 3 of §10.
+
+**The canary gate held first, then was opened the way row 275 says.** box 1's updater refused 0.3.80 three
+times with `this node is not the canary — no canary proof published for 0.3.80 — holding until one node has
+run it`. That is the gate working, but it also means **the release host had to become the canary**:
+`GPN_CANARY=1` in `~/.gpn/fleet/run-fleet.sh` plus a `gpn-update.service.d/canary.conf` drop-in;
+`gpn-update` at 21:04 PT ⇒ `current -> versions/0.3.80` ⇒ `confirmed 0.3.80 is running`. Proof built from
+a job that actually ran on the new build (`scripts/canary-report.py --job-id 6595`) and published
+(`canary-publish.sh` ⇒ `e03a87b2`), so `https://gpncoin.ai/canary.json` now serves
+`{"version":"0.3.80","ok":true,"job_served":true}` (HTTP 200; it was 404 an hour ago).
+
+**Then box 1 did what the release required.** `GPN-Update` triggered 05:13:22Z ⇒ `apply: downloading 0.3.80
+… 253.3 MB` → `installed 0.3.80 at …versions\0.3.80` → `current -> versions/0.3.80 previous: 0.3.79` →
+`copied 61 binaries to C:\gpn\bin` → **`CONFIRMED: 0.3.80 is running (rpc http://127.0.0.1:9944) after 8 s`**.
+Verified independently: process path `…\current\gpn-node.exe` (started 21:14:39), RPC `system_version` ⇒
+`0.3.80`, `peers=2 syncing=False`, 5m47s stable with 0 bans, 0 `gpn-forked`.
+
+**AI on the new build, measured.** `POST :8092/v1/chat/completions` on the 0.3.80 AP answered in **0.223 s**
+(`llama3.2:1b`, channel payment, real job).
+
+**Still open for the next run:** §8 (stranger checks as a script run), §10 last box + §10b (timing), §0b
+filing (archive + INDEX row), and the row-275/row-273..277 `DONE` marks. Then the release is closed.
+
+**Found on the way (rows, not fixes).**
+1. box 1's updater **stops the node before evaluating the canary gate** — three hourly checks each killed a
+   healthy node's process tree only to restart it on the same build (`taskkill /T /F` in the log). Checking
+   the gate before the stop removes three needless restarts per pending release.
+2. `network.json` ships `spec_version: 54` while the chain answers `specVersion=55` (safe direction, but it
+   lets a spec-54 node be classified compatible).
+
 ## 20:58 PT — 0.3.80 CUT AND PUBLISHED (f6aff08a); §5/§6/§7/§7b ticked, box 1 auto-update triggered
 
 **A0 (CI).** `reset --hard origin/main` ⇒ HEAD `8b9d7ce1` (docs-only). Full-40-char run query ⇒ 0 runs, the
