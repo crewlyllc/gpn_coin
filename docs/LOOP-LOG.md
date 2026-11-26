@@ -1,3 +1,25 @@
+## 22:5x PT — 0.3.80 filed: checklist archived, INDEX row written
+
+**A0 (CI).** `fetch && reset --hard origin/main` ⇒ HEAD `433aa25e`. Run query on the full sha ⇒ one run,
+`45769864017` `CI` — `pending`/`queued`, so per the rule it was noted and not waited on.
+
+**First unticked box: §0b filing (the two checkboxes).** 0.3.80 is genuinely published — `releases.json`
+returns `"version": "0.3.80"`, `published_at 2026-11-26T04:52:15Z`, and the running node agrees
+(`system_version` → `0.3.80`; `~/.local/bin/gpn-node --version` → `gpn-node 0.3.80`). So the release the file
+describes is live and filing is honest, not paperwork.
+
+- `git mv docs/releases/0.3.80.md docs/releases/archive/0.3.80.md`
+- `docs/releases/INDEX.md` — new top row: `0.3.80 | 2026-11-26 | 277, 274, 275, 276, 273 (soak IN-PROGRESS)`,
+  each id carrying its evidence line (277 lock-release 104 checks; 274 telemetry + `--trend`, 49 checks; 275
+  canary gate, 119 lib tests, live held at rc 3, `canary.json` 404; 276 injection-proven alarms, 38 checks,
+  `sent dm channel 1547030111549657138`; 273 day 1-2/7 in `docs/soak-2026-11-25.md`, ticks 2026-12-02).
+
+**Deliberately not ticked:** box 273 (soak, 2 of 7 days) and box 177 (stranger lifecycle, AWAITING-OWNER on the
+GPU venue, triage item 256). §B's COMPLETE marking in `GPN-LIST.md` therefore stays untouched — a bundled item
+is not COMPLETE while the release's own boxes are open.
+
+**CI:** run `45769864017` was `pending` at this pass; not waited on (docs commit `ef4de0d7` starts none anyway).
+
 ## 22:4x PT — 0.3.80 row 273 (soak) day 2 recorded; two collector bugs fixed, one of them fatal to a 7-day soak
 
 **A0 (CI).** `git fetch && reset --hard origin/main` ⇒ HEAD `2e93d760` (loop-log docs commit). Full-40-char
