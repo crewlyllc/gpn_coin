@@ -6576,3 +6576,22 @@ reading today would replace day 1, not add a day). Timer verified `gpn-soak-reco
 **Blockers / [TRIAGE]:** none.
 **Next run:** ask once for 45743326550; on `success` dispatch `release-linux-selfhosted.yml` and
 `release-windows.yml` on the same SHA with the run ids written into §5, then end the run.
+## 08:45 PT — 0.3.81 **cut and published**; windows build + attestation + §8 stranger check ticked; nodes still on 0.3.80 awaiting self-update
+
+**A0:** `origin/main` HEAD `fb0706dd` (docs-only checklist commit) ⇒ `?head_sha=fb0706dd…` **total_count 0**, expected under `ci.yml` `paths-ignore`. Nothing red.
+
+**Asked once, acted on the conclusion — windows build:** run **`45841494923`** (`a57afde1`) ⇒ **`completed / success`** (14:41:09Z → 16:08:32Z; job `windows` 23 steps green). Asset `gpn-windows.zip` **253,300,100 B**, digest `sha256:4d126f03…c477b808`, updated 16:08:24Z.
+
+**Attestation (private repo ⇒ cosign bundle), all three boxes ticked with the run's own step order:** `GET /repos/jeremyzguo/gpn_coin` ⇒ `visibility: private`, `owner.type: User`. Steps: `19 Check attestation availability` success → `20 Attest build provenance (public repo)` **skipped** → `21 Sign release artifact keyless` success → `22 Provenance gate - refuse to publish an unsigned artifact` success (no `if:`) → `23 publish` success. Downloaded the published zip (`Accept: application/octet-stream`): `sha256sum` = `4d126f03…` == API digest; `cosign verify-blob --bundle gpn-windows.zip.bundle …` ⇒ **`Verified OK`**.
+
+**Per-item Windows evidence over SSH (no dispatch):** box 1 `(Get-Process gpn-node).Path` ⇒ `C:\gpn\data\update\current\gpn-node.exe`, `gpn-node.exe --version` ⇒ `0.3.81`, `update.log` tail ⇒ `08:00:34 check: latest 0.3.80 / -> up to date / node NOT restarted`.
+
+**Cut:** `scripts/release-cut.sh --version 0.3.81` dispatched in background at 16:27Z, rc 0 in ~9 min. Step 3b marker scan `OK: 0.3.81 artifacts verified on linux, windows — 5 marker(s) present in each`; both assets mirrored+re-verified in `crewlyllc/gpn_coin` (incl. the `.bundle`); manifest signed, committed `51e2c4a2`, live URL polled to `0.3.81`; final line `released 0.3.81 — https://gpncoin.ai/releases.json`.
+
+**§7/§7b/§8 ticked:** `network.json latest_version 0.3.81`; `releases.json` 0.3.81 on two polls 10 s apart (`published_at 2026-11-26T16:28:55Z`); `--verify-published --version 0.3.81` rc 0 with the three lines (`linux 349107797 / 302ed0c2…`, `windows 253300100 / 4d126f03…`, `PASS: …`). `website/download.html` `current-release` fixed 0.3.80 → 0.3.81.
+
+**Left unticked, with reasons in the boxes:** §8 "docs stamp" and §7b "site serves the new version" — the hand-written `Verified against: … release 0.3.80` stamps in `website/docs/run-a-node.html` / `downloads.html` are verification records, re-stamped only after the doc's commands are re-run against a 0.3.81 node. **§9 deploy/confirm** — both nodes still report 0.3.80 (local RPC `system_version` 0.3.80; box 1 `RUNVER=0.3.80`, process started 08:04:47 PT on a binary that is now 0.3.81 on disk). Box 1's next hourly check ≈ 09:00 PT is the observation; not waited on.
+
+**Next run:** read `C:\gpn\update.log` + box 1/local `system_version` once ⇒ if 0.3.81, tick §9 and §10 (and re-stamp the two doc pages); if still 0.3.80, quote the update line that refused and fix it. Then §3b 282/283/284 evidence, 273 soak day 4.
+
+**No [TRIAGE] items.**
