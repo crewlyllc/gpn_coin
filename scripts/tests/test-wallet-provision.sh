@@ -26,12 +26,23 @@ WALLET="$BIN/gpn_wallet"
 tmp="$(mktemp -d)"
 trap 'rm -rf "$tmp"' EXIT
 export GPN_BASE_PATH="$tmp/data"
+# Every case below that is SUPPOSED to fail (corrupt keystore, bad GPN_ACCOUNT,
+# bad GPN_SIGNER) writes an exit record. Without this, `exit_report::default_path`
+# falls back to the real `~/.gpn/last-exit.json` and this test poisons the live
+# node's failure classification and the soak telemetry with three fake
+# `corrupt-key` records per run (measured: 32 records / 2026-11-25T15:33Z -
+# 2026-11-26T08:03Z, 3 per ~90 min). GPN_EXIT_LOG wins over GPN_PREFIX, so it is
+# the one that must be set.
+export GPN_EXIT_LOG="$tmp/last-exit.json"
 # A pinned base dir is only honoured when it looks like a real base; make it so
 # (resolve_effective_base prefers a legacy DB otherwise).
 mkdir -p "$GPN_BASE_PATH/chains/gpn_testnet/db"
 KS="$GPN_BASE_PATH/keystore.json"
 
 fail=0
+# The production exit log must not grow because this test ran.
+REAL_LOG="$HOME/.gpn/last-exit.json"
+real_before=$(wc -l < "$REAL_LOG" 2>/dev/null || echo 0)
 ok()  { printf '  ok   %s\n' "$*"; }
 bad() { printf '  FAIL %s\n' "$*"; fail=1; }
 addr_of() { sed -n 's/.*payout account: \([1-9A-HJ-NP-Za-km-z]\{47,48\}\).*/\1/p' "$1" | head -1; }
@@ -107,6 +118,14 @@ else
   ok "invalid GPN_SIGNER rejected"
 fi
 [ ! -f "$KS" ] && ok "no keystore created by failed overrides" || bad "a failed override wrote a keystore"
+
+echo "== 8. failures are recorded in the isolated exit log, not the real one =="
+[ -s "$GPN_EXIT_LOG" ] && ok "the failing cases wrote $GPN_EXIT_LOG" \
+  || bad "no exit record at $GPN_EXIT_LOG — the isolation is not being exercised"
+real_after=$(wc -l < "$REAL_LOG" 2>/dev/null || echo 0)
+[ "$real_after" = "$real_before" ] \
+  && ok "$REAL_LOG unchanged ($real_before lines)" \
+  || bad "$REAL_LOG grew $real_before -> $real_after lines: the test leaked into production"
 
 echo
 if [ "$fail" -ne 0 ]; then echo "RESULT: FAIL"; exit 1; fi
