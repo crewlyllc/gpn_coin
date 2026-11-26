@@ -326,21 +326,30 @@ def restart_audit(lines):
     """(terminations, planned, unexplained) from a journal extract, in order.
 
     A *termination* is the node's own `Essential task `<name>` failed. Shutting down service.`
-    line. It is counted PLANNED when systemd's `Stopping gpn-fleet.service` line appears in the
-    two lines before it: systemd stops the unit first and the node's txpool background task then
-    ends with `revalidation_queue::revalidate_view: ... error=Closed(..)`.
+    line. It is counted PLANNED when systemd's `Stopping gpn-fleet.service` line appears within
+    two lines either side of it: systemd stops the unit and the node's txpool background task
+    then ends with `revalidation_queue::revalidate_view: ... error=Closed(..)`.
 
-    Measured 2026-11-26 over 3 days: 13 terminations, 12 carrying the preceding stop (the 13th
-    was an updater apply, which signals the node directly so journal ordering can put the node's
-    line first). Without this split the day line could only say "starts/stops happened", which
-    reads as restarts by choice and hides a node that died on its own. The unexplained count is
-    what the stability gate must read, so it is counted, never assumed away.
+    Measured 2026-11-26 over 3 days: 13 terminations, 12 carrying the stop line *before* the
+    node's line. The 13th (the 0.3.80 updater apply, 2026-11-25 21:05:49) carries it *after*:
+    `gpn_update` signals the node's process directly, so the node's own line is written first and
+    systemd records the stop reason a line later in the unit's journal (read back with
+    `journalctl --user -u gpn-fleet.service -o cat` ⇒ termination at index i, `Stopping
+    gpn-fleet.service ...` at i+1). A backward-only window scored a planned restart as
+    "unexplained", and an unexplained count above 0 is what blocks the stability gate — a
+    classifier that cannot see a stop it caused itself makes day 7 unreachable. `Stopping` is
+    emitted only for an explicit stop request, never for a crash (a dead main process logs
+    `Main process exited` / `Scheduled restart job`), so the forward half cannot mask a real death.
+
+    Without this split the day line could only say "starts/stops happened", which reads as
+    restarts by choice and hides a node that died on its own. The unexplained count is what the
+    stability gate must read, so it is counted, never assumed away.
     """
     terminations = planned = 0
     for i, line in enumerate(lines):
         if "Essential task `" in line and "failed" in line:
             terminations += 1
-            window = lines[max(0, i - 2):i]
+            window = lines[max(0, i - 2):i + 3]
             if any("Stopping gpn-fleet.service" in w for w in window):
                 planned += 1
     return terminations, planned, terminations - planned
@@ -452,6 +461,22 @@ def save_state(st):
 
 def day_index(start_date, today):
     return (today - start_date).days + 1
+
+
+def select_prev(st, today_str):
+    """The record the day's effective interval is measured FROM.
+
+    `st["day_first"]` keeps the first reading of each day. A second run on the same day
+    (re-runs happen: the day line gets refreshed after a fix) must measure from that first
+    reading, not from the run 2 minutes ago — otherwise the day's interval collapses to
+    `best <= prev_height` and the record silently loses the number the gate reads
+    (measured 2026-11-26 02:4x PT: two consecutive passes left day 2 as "n/a (first record
+    of this soak)" while the earlier pass had a real 10.04 s).
+    """
+    first = (st.get("day_first") or {}).get(today_str)
+    if first:
+        return first
+    return st.get("last") or {}
 
 
 def effective_interval_secs(prev_height, prev_ts, best, now_ts, min_dt=60):
@@ -615,7 +640,8 @@ def main():
            else (max(intervals) if intervals else float("nan")))
 
     # effective interval since the previous record = the stall catcher
-    prev = st.get("last") or {}
+    today_str = now.strftime("%Y-%m-%d")
+    prev = select_prev(st, today_str)
     eff = effective_interval_secs(prev.get("height"), prev.get("ts"),
                                   best, now.timestamp())
 
@@ -646,7 +672,9 @@ def main():
                      f"**{eff:.2f} s**"
                      + ("" if eff <= 15 else "  ⚠️ slower than the 13.4 s baseline — name this as drift"))
     else:
-        lines.append("- effective block interval: n/a (first record of this soak)")
+        lines.append("- effective block interval: n/a ("
+                     + ("no forward progress or a window shorter than 60 s"
+                        if prev.get("height") else "first record of this soak") + ")")
     lines.append(f"- authored interval over the last {len(intervals)} blocks: "
                  f"p50 **{p50:.2f} s**, p95 **{p95:.2f} s**")
     lines.append(f"- peers now: **{health.get('peers')}**, isSyncing={health.get('isSyncing')}"
@@ -659,7 +687,7 @@ def main():
     term = journal(since, grep=r"Stopping |Started |Essential task")
     n_term, n_planned, n_unexplained = restart_audit(term.splitlines())
     lines.append(f"- node terminations in 24 h: **{n_term}** "
-                 f"({n_planned} immediately preceded by a systemd `Stopping`, "
+                 f"({n_planned} adjacent to a systemd `Stopping`, "
                  f"**{n_unexplained} unexplained**) — an unexplained count above 0 is a node that "
                  f"died on its own and must be root-caused before the gate is called green")
     lines.append(f"- gpn-fleet.service: NRestarts={props.get('NRestarts','?')}, "
@@ -719,7 +747,8 @@ def main():
     trend_text, trend_flags = trend_report(args.telemetry_dir)
 
     st["last"] = {"height": best, "ts": now.timestamp(), "peers": health.get("peers")}
-    st.setdefault("days", {})[now.strftime("%Y-%m-%d")] = best
+    st.setdefault("day_first", {}).setdefault(today_str, {"height": best, "ts": now.timestamp()})
+    st.setdefault("days", {})[today_str] = best
     save_state(st)
 
     print(f"recorded day {day} at height {best}: {doc}")

@@ -124,10 +124,34 @@ eq(sr.restart_audit(["2026-11-25 03:18:48 peer 12D3KooWP1 best=#361540 vs ours #
 eq(sr.restart_audit([]), (0, 0, 0), "no journal is zero of everything, not a false clean")
 eq(sr.restart_audit(["Stopping gpn-fleet.service ..."]), (0, 0, 0),
    "a stop with no termination line is not a termination")
-# the two-line window is the measured one (every planned event sat 1-2 lines after the stop)
+# the window is measured on both sides: 12 of 13 planned events put the stop line 1-2 lines
+# BEFORE the node's line, the 13th (an updater apply) put it 1 line AFTER
+TERM = "Essential task `txpool-background` failed. Shutting down service."
+STOP = "Stopping gpn-fleet.service - GPN fleet supervisor (node on the directive's target network)..."
+eq(sr.restart_audit([TERM, STOP]), (1, 1, 0),
+   "a stop line AFTER the termination is planned too — the updater signals the node "
+   "directly, so the node's line is written before systemd records the stop "
+   "(measured 2026-11-25 21:05:49)")
+eq(sr.restart_audit([STOP, "a", TERM]), (1, 1, 0),
+   "a stop 2 lines before is planned (the common suite-stop shape)")
 eq(sr.restart_audit(["Stopping gpn-fleet.service ...", "a", "b",
                      "Essential task `txpool-background` failed. Shutting down service."]),
    (1, 0, 1), "a stop 4 lines earlier is outside the measured window")
+eq(sr.restart_audit([TERM, "a", "b", "c", STOP]), (1, 0, 1),
+   "a stop 4 lines later is outside the window too — the window must not grow into "
+   "'any stop in the day means the day was planned'")
+
+# ---- select_prev: a same-day re-run must not destroy the day's effective interval ----
+_prev_state = {"last": {"height": 367023, "ts": 1795689648.0},
+               "day_first": {"2026-11-26": {"height": 366977, "ts": 1795688520.0}}}
+eq(sr.select_prev(_prev_state, "2026-11-26"), {"height": 366977, "ts": 1795688520.0},
+   "a re-run on the same day measures from the day's FIRST reading, not the run 2 min ago")
+eq(sr.select_prev({"last": {"height": 364401, "ts": 1.0}}, "2026-11-27"),
+   {"height": 364401, "ts": 1.0},
+   "the first run of a new day measures from the previous record (yesterday's last)")
+eq(sr.select_prev({}, "2026-11-25"), {}, "no state at all is an empty prev, not a crash")
+eq(sr.effective_interval_secs(366977, 1795688520.0, 367023, 1795689900.0), 1380 / 46,
+   "46 blocks in 23 min is 30 s/block — the stall number, not its reciprocal")
 
 # ---- per-node telemetry (row 274) -------------------------------------------
 # The audit must be able to TREND, not just print prose: one small JSON per node
