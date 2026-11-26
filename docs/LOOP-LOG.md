@@ -1,3 +1,18 @@
+## 07:45 PT — §3b 279 ticked (spec floor 54→55, guard now hard-fails); windows build still queued behind CI
+
+**A0:** `origin/main` HEAD `bfc80d20` (docs-only checklist commit) ⇒ `?head_sha=bfc80d20de91…` **total_count 0**, expected under `ci.yml` `paths-ignore`. Nothing red.
+
+**Box worked — §3b 279** (`network.json` spec floor 54 while chain/runtime are 55). Fix `2f863ada`, in the release tree at `a57afde1`. Evidence on `bfc80d20`:
+- `bash scripts/check-spec-version.sh` ⇒ `source spec_version=55   network.json spec_version=55` / `OK`, rc 0.
+- `bash scripts/tests/test-check-spec-version.sh` ⇒ `PASS=6 FAIL=0` — includes `registry behind runtime (55/54) fails with the numbers`, `registry ahead of runtime (54/55) fails`, `no warning lane: 54/60 is an error`; the old `>=` lane let 54-vs-55 pass clean.
+- `cargo test --lib network_registry` ⇒ `2 passed; 0 failed` (17.9 s build).
+- Floor/runtime agreement: `gpn-node/runtime/src/lib.rs:137 spec_version: 55` vs `network.json:5 "spec_version": 55`; compatibility note at `gpn-agent/src/network_registry.rs:99-104` (raising the floor is the deliberate "older nodes are OUTDATED" call).
+- Shipped-ness: `git show a57afde1:network.json` ⇒ `"spec_version": 55`; `a57afde1` is the sha both §5 builds were dispatched on.
+
+**Not acted on:** windows build run `45841494923` still `queued` behind CI `45838033526` (not polled further this pass; §5 windows box stays unticked for the next run).
+
+**Blockers / [TRIAGE]:** none. **Next run:** §5 `release-windows.yml` conclusion (or re-dispatch if >90 min), then §6/§7 attestation gate on the new zip.
+
 ## 07:24 PT — linux 0.3.81 artifact built, downloaded and verified; §5 linux + §6 ticked; windows still queued
 
 **A0:** `origin/main` HEAD `3b09a78901a39accd14c621082ad211919f45a20` (previous run's checklist commit, docs-only) ⇒ runs for that sha **total_count 0** — expected under `ci.yml` `paths-ignore`, nothing to act on.
