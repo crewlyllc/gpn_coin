@@ -1,3 +1,27 @@
+## 20:22 PT — 0.3.80 §5 box 1 ticked: linux artifact published, sha256 + `--version` verified; Windows leg still building
+
+**A0 (CI).** `git fetch && reset --hard origin/main` ⇒ HEAD `b9cda505` (docs-only commit). Full-40-char query
+⇒ `total_count: 0`, which is the expected answer for a docs SHA (`ci.yml` paths-ignore). The deciding code
+SHA `77b1c93f` was already green (run 45743326550, `success`, 03:59:51Z) — nothing red, no fix box.
+
+**Box ticked.** §5 `release-linux-selfhosted.yml` → `gpn-linux.tar.gz` on `linux-latest`: run **45752712360**
+asked once ⇒ `completed success` (04:03:00Z → 04:17:12Z, head `77b1c93f`), 8/8 steps green incl. `publish
+GitHub Release`. Artifact proven from the published bytes, not the log: release asset 349,108,790 B updated
+04:17:07Z, API digest `sha256:8e4ce114…9c642`, re-downloaded file hashes identically, and the binaries inside
+report `gpn-node 0.3.80` / `gpn_node 0.3.80 (spec 55, 77b1c93)`.
+
+**Still in flight (not waited on).** `release-windows.yml` run **45752717739**, head `77b1c93f`, `in_progress`
+since 04:03:03Z (~19 min, normal cold Windows build; not past the 90-minute rule). Next pass asks it once.
+
+**Found, filed, not fixed (release in flight — no code commit may ride along).**
+`scripts/ci/publish-release-asset.py` only sets the release `body` when it *creates* the release; a rolling tag
+therefore keeps its first body forever — `linux-latest` still claims "commit 310214250bd … (0.3.77)" while its
+asset is 0.3.80. Stale metadata only (timestamp/sha256/`--version` all say 0.3.80). Candidate row for the next
+batch: update `body` on every publish.
+
+**No decisions for the assistant this pass** — §0e stranger lifecycle stays AWAITING-OWNER on the venue
+question (triage item 256), unchanged.
+
 ## 20:05 PT — 0.3.80 §4 GREEN and §5 dispatched (linux 45752712360 / windows 45752717739 on `build/77b1c93f1edd`); run ended on purpose
 
 **A0 (CI).** `git fetch && reset --hard origin/main` ⇒ HEAD `567e3947`. Run **45743326550** asked once ⇒
