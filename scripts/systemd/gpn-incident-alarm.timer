@@ -1,0 +1,12 @@
+[Unit]
+Description=Evaluate the three GPN incident conditions every minute
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=1min
+AccuracySec=10s
+Persistent=false
+Unit=gpn-incident-alarm.service
+
+[Install]
+WantedBy=timers.target

@@ -1,0 +1,10 @@
+[Unit]
+Description=GPN incident alarms (row 276) — peers < 2 / no block 2 min / job success < 90 %
+
+[Service]
+Type=oneshot
+WorkingDirectory=/home/jeremyg/gpn-loop
+ExecStart=/usr/bin/python3 /home/jeremyg/gpn-loop/scripts/incident-alarm.py
+# 0 healthy · 1 alarms raised · 3 delivered to triage but Discord failed
+SuccessExitStatus=0 1 3
+Nice=10

@@ -1,3 +1,34 @@
+## 16:4x PT — box 4 of 0.3.80: row 276, three incident alarms (peers / block / job success), injected and delivered
+
+**A0 (CI):** HEAD `4c1ed61e` (the row-275 canary commit) ⇒ run **45728549405** `status: pending`, `conclusion: null`.
+Noted, not waited on — this box is a script + a timer, it needs no CI.
+
+**Box worked — 276 (three incident alarms).** `scripts/incident-alarm.py`, run by `gpn-incident-alarm.timer` every
+minute. Three conditions, each with a **duration held in the state file** so a blip cannot page anyone:
+`peers < 2` for 600 s · height unchanged for 120 s · job success `< 90 %` over 3600 s with a 10-job floor.
+
+- **Test first, failing:** `python3 scripts/tests/test-incident-alarm.py` ⇒ `FileNotFoundError: …/scripts/incident-alarm.py`.
+  The tests then found two real bugs in the implementation: a height that was never recorded when the RPC was
+  already dead (a dead node never stalled the clock — fixed with `st.setdefault("height_since", ts)`), and an
+  `append_triage` that re-appended the same firing every tick (now deduped by an `<!-- alarm:<key>:<epoch> -->`
+  marker). Final: **38 checks passed, 0 failed**.
+- **Injection proof, one per condition** (stub node+AP on :39944: peers=1, frozen height, historical jobs; clock
+  advanced with `--now`): 01:02 ⇒ `no block for 2 min: height 364500 unchanged since 2026-11-26T01:00:00Z`;
+  01:05 with 2 Completed / 8 Failed new jobs ⇒ `job success 20% over the last hour … threshold 90%`;
+  01:10 ⇒ `no peers for 10 min: peers 1 < 2`; 01:11 re-run ⇒ `ok`, nothing duplicated.
+- **False positive found and fixed on real data:** the first version read **89 %** on our own AP and alarmed,
+  because `/jobs` serves the whole history with no completion timestamps — those jobs are undateable, and
+  counting them invents a rate. Now the first sighting is a baseline and only jobs we watch arrive or change are
+  dated. Production re-run: `peers=3 height=364661 jobs_seen=256` ⇒ `ok: no incident conditions`, exit 0.
+- **Delivery proven:** `discord_dm(...)` ⇒ `sent dm channel 1547030111549657138` (a labelled delivery check, not
+  a fake incident); token at `~/.openclaw/credentials/discord-bot-token.txt` (0600) so the timer has it.
+- **Installed and observed:** `systemctl --user enable --now gpn-incident-alarm.timer` ⇒ `Result=success`,
+  `ExecMainStatus=0`, journal `ok: no incident conditions`.
+
+Tick evidence is inline in `docs/releases/0.3.80.md` box 276. Row 276 stays IN-PROGRESS until 0.3.80 is published
+and a node reports it. Remaining unticked in §3b: 273 (soak, day 1 of 7 — time-gated to 2026-12-02). Next boxes are
+§3–§7: seed-parity check, then push, build, publish.
+
 ## 16:24 PT — box 3 of 0.3.80: row 275, the canary gate (one node proves a release before the fleet gets it)
 
 **A0 (CI):** HEAD `42d6407a` (the row-256 filing commit) is docs-only ⇒ `GET /actions/runs?head_sha=42d6407ad31b78f09dd62df969923ebaa620f8ea`
