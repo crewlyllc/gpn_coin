@@ -1,3 +1,23 @@
+## 13:42 PT — 0.3.82 §6 CLOSED: strings + `--version` verified on the published artifacts (both platforms)
+
+**A0 (HEAD `9e1d9c5a`, docs).** `?head_sha=9e1d9c5a…` ⇒ total_count 1, **CI in_progress** (21:24Z) —
+not blocking per A0; noted and continued. Nothing red.
+
+**§6 strings scan — ticked.** Literals taken from this release's own code, not from the template
+(`git diff 7830a822^..eb538744 -- '*.rs'`): `no channel render endpoint`, `image service unavailable`
+(row 286's endpoint walk). Re-downloaded both **published** assets and scanned those bytes:
+linux `gpn-linux.tar.gz` 349,013,949 B sha256 `9f13c68d…0d5a2f7` (== API digest, run 45892755516);
+windows `gpn-windows.zip` 253,301,488 B sha256 `1985740a…c3407a` (== API digest, run 45892758345).
+Counts `strings -a | grep -cF`: `gpn_scheduler` **2 / 1**, `gpn_scheduler.exe` **2 / 1**;
+`gpn-node`, `gpn_node`, `gpn-node.exe`, `gpn_node.exe` all **0 / 0**. The AP carries the fix,
+node/supervisor do not — the expected shape.
+
+**§6 `--version` — ticked.** From the published tarball: `./gpn-node --version` ⇒ `gpn-node 0.3.82`;
+`./gpn_node --version` ⇒ `gpn_node 0.3.82 (spec 55, eb53874)`; windows `gpn-node.exe` carries `0.3.82`.
+
+Tally: 28/56. Next run starts at **§7** (`release-cut`: attestation gate → mirror → `releases.json`
+twice), which is a publish step — dispatch/mirror, write the handle, end the run.
+
 ## 13:22 PT — 0.3.82 §5 CLOSED: windows build + cosign provenance verified on the published bytes
 
 **A0 (HEAD `56c5ef22`, docs).** `?head_sha=56c5ef22…` ⇒ **total_count 0** — expected (`paths-ignore`);
