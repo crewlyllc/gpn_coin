@@ -1,3 +1,22 @@
+## 06:2x PT — opened **0.3.81** and bundled the five ready fixes (278, 279, 282, 283, 284); section C's "no IN-PROGRESS item" precondition read against the newer batch policy
+
+**A0:** `origin/main` HEAD `9ada07fd` (triage docs) ⇒ `?head_sha=9ada07fd9a386983b74de19254af08c5eb84b1c1` **total_count 0** — correct under `ci.yml` `paths-ignore`, nothing to act on. The queue's red is already explained and already fixed: runs `45803757268` (`437f97b0`) and `45795600763` both `failure` at job `fmt + clippy` step 9 `rustfmt (check)`, log line `Diff in …/gpn-agent/src/exit_report.rs:239` — the row-282 guard landing unformatted; `cd05e348` ("fmt: exit_report.rs default_path under cfg!(test)") is its ancestor and its own run `45812605736` is still `in_progress` (2 h 40 m, windows job is the long pole). Local proof on this HEAD: `cargo fmt --all -- --check` ⇒ rc 0 in both `gpn-agent` and `gpn-node`. No run for the HEAD sha, so nothing to wait for.
+
+**Why a release was opened now instead of a sixth wait.** Section C says bundle when *no* item is IN-PROGRESS, and the only IN-PROGRESS row is 273 — the seven-day soak. But 273's version **0.3.80 is already published** (`releases.json` `0.3.80`, node reports it, row 280 COMPLETE), so it is not an open bundle: it is a measurement riding on a shipped release. Holding five landed fixes for a week so a 7-day window can close is the stall the 2026-11-25 batch policy exists to prevent, and `docs/STABILITY-GATE.md` test 2 asks for **two unattended updates** — which a soak that never sees a new version can never produce. So: bundle the five, ship 0.3.81 mid-soak, and let the soak's update line record the transition. Recorded as an interpretation, not a hidden override; nothing is published yet, so reversing it costs one commit.
+
+**Bundled (all five had their source fix already on `main`, none was in a version):**
+- **278** Windows updater stopped the node *before* evaluating the canary gate (three hourly cycles on box 1 each paid a `taskkill /T /F` + restart for a decision needing no unlocked file).
+- **279** `network.json` shipped `spec_version: 54` while runtime and chain are 55.
+- **282** `exit_report::default_path()` fell back to the real `~/.gpn/last-exit.json` under test (32 fake `corrupt-key` records, 2026-11-25T15:33Z→2026-11-26T08:03:49Z).
+- **283** three shipped files still resolved the deleted `~/.openclaw/workspace/projectmanager07` clone (cadence-gate unit template, `build-spec42-wasm.sh`, `gpn_gpulock_contend.py`).
+- **284** the soak recorder deleted any `### Note` under a day section on a same-day refresh (it had eaten two).
+
+**Done this pass, in one commit (`a57afde1`, pushed `9ada07fd..a57afde1`):** rows 278/279/282/283/284 `NEW`→`IN-PROGRESS`; `scripts/bump-version.py patch` ⇒ **0.3.81** across 15 manifests + `network.json` + 14 lockfile entries; `bump-version.py --check` ⇒ `lockstep: 15 manifest(s) and 14 lockfile entr(ies) agree`, `gpn version: 0.3.81`; CHANGELOG section written (no TODO left); `docs/releases/0.3.81.md` generated from the template (6 in-progress boxes: 273 + the five).
+
+**Local checks run, not assumed:** `cargo fmt --all -- --check` rc 0 (agent, node) · `bash scripts/tests/test-check-spec-version.sh` ⇒ `PASS=6 FAIL=0` incl. `shipped network.json spec_version=55 == runtime spec 55` · `python3 scripts/tests/test-soak-record.py` ⇒ **138 passed, 0 failed** · `bump-version.py --check` lockstep ok.
+
+**Next run starts at 0.3.81 box 1** (the build/publish lane, sections 5-7). No build was dispatched this pass and nothing was waited on. Rule 273 (soak) is untouched: day 2 recorded, verdict block generated at 14:01Z, `gpn-soak-record.timer` NEXT `Thu 2026-11-26 09:11:36 PST`.
+
 ## 06:05 PT AUDIT — fixed 1 (disk, 14 G); needs-attention carried: AUDIT-2026-11-26a (attestation now 12 attempts in)
 
 **Disk first.** `df -h /` ⇒ `439G 320G 98G 77%` = **22.3 % free**, under the 25 % line ⇒ cleaned before anything else.
