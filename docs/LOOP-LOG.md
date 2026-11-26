@@ -1,3 +1,27 @@
+## 15:21 PT — 0.3.82 §7: linux rebuild at `50c9e9b8` verified by hand; windows rebuild still queued on box 1
+
+**A0.** `origin/main` HEAD `b90c23d3` is docs-only ⇒ `?head_sha=` `total_count: 0` (expected, `paths-ignore`).
+The sha that matters is the build sha `50c9e9b8`: CI run `45908365338` ⇒ `pending` (queued on box 1),
+not red — no box from CI this pass.
+
+**§7 (first unticked box) — linux half done, windows half dispatched, run ended per dispatch-and-end.**
+`release-linux-selfhosted.yml` run `45908378111` (tag `build/50c9e9b85b06`) ⇒ `completed/success`
+23:01:19→23:13:21Z. Re-downloaded the published assets via the API and checked them by hand:
+- `gpn-linux.tar.gz` 349,013,725 B, sha256 `dee7a6a30fb6c8056df0942427d9c88fc04e77881c6cc7203a8263af4cce468b` — equals the API digest
+- `gpn-linux.tar.gz.bundle` 9,229 B, sha256 `57f562ae724b403829956ad2e6e22a8384acd98bfa1b480184b18822b96c92b0` — equals the API digest
+- `cosign verify-blob --bundle … --certificate-identity-regexp '^https://github\.com/jeremyzguo/gpn_coin/\.github/workflows/release-linux-selfhosted\.yml@.*$' --certificate-oidc-issuer https://token.actions.githubusercontent.com gpn-linux.tar.gz` ⇒ **`Verified OK`** (cosign 2.4.1, 23:22Z)
+- extracted: `./gpn-node --version` ⇒ `gpn-node 0.3.82`; `./gpn_node --version` ⇒ `gpn_node 0.3.82 (spec 55, 50c9e9b)`
+- strings: `image service unavailable` 1 / `no channel render endpoint` 2 in `gpn_scheduler`; 0/0 in `gpn-node` and `gpn_node`
+
+`release-windows.yml` run `45908380728` (same sha) ⇒ still `queued` at 23:19Z; runners API shows
+`DESKTOP-USBUADL online busy=true` with CI run `45908365338` ahead of it on the single slot — contention,
+not a fault. `release-cut.sh` refuses two-commit bundles by design (`ABORT: bundles were built from
+different commits`), so it was **not** run. Run ended after writing the handle into §7.
+
+**Next run:** verify `45908380728`'s conclusion, download the new zip + `.bundle`, `cosign verify-blob`
+by hand, then `scripts/release-cut.sh --version 0.3.82`.
+
+No blockers, no [TRIAGE].
 ## 15:05 PT — 0.3.82 §7: windows rebuild died in 23 s on our own ASCII guard (§7 in a workflow comment); fixed, both lanes re-dispatched
 
 **A0.** `origin/main` HEAD `bd9854b6` is docs-only ⇒ `?head_sha=` total_count 0, nothing red there. But the
