@@ -5421,3 +5421,26 @@ Deleted only `/tmp` scratch whose newest file was ≥ 2 days old and which no pr
   built assets differ) and 1/6 detect (linux `79623ab8…`, windows `212db4c6…`) and was downloading at 2/6.
 - Next run: read `/tmp/cut073.log`; if published, tick box 2 and continue to `network.json`
   `latest_version` + the twice-ten-seconds `releases.json` poll and §7b surfaces.
+
+## 18:52 PT — A0: freed the Windows slot from the run whose linux leg was already red; the fix's run is now actually building
+
+**A0 (CI).** Run 45738389392 (`665bb967`) → linux leg **failure** (step 8 `Test gpn_update CLI`,
+`13 passed; 11 failed`, the canary-gate hold message — fixed by `73f8db8a`), **but** its
+`Build + unit tests (windows, self-hosted)` job was still `in_progress` on `DESKTOP-USBUADL`
+(`busy=true`). A run that cannot pass must not hold the only Windows slot: `POST …/cancel` ⇒
+**HTTP 202**; API then reads `45738389392 completed cancelled`, and the fixed SHA's run
+**45743326550** claimed both runners at `02:39:43Z` (`secret-scan` queued, `fmt + clippy` /
+`Build + unit tests (linux)` / `(windows, self-hosted)` in progress).
+
+**Attribution note (saves a future pass):** `73f8db8a` alone answers `total_count: 0` because it was
+pushed together with the docs commit `77b1c93f`; GitHub creates the run at the push tip, so
+**45743326550 is the run carrying the test fix**. Not a paths-ignore regression — the push range
+included `gpn-agent/tests/gpn_update_cli.rs`.
+
+**Boxes ticked:** none — §4's last box needs `success` on 45743326550; §5 builds follow that conclusion.
+**Soak (row 273):** day 1/7 recorded; file `docs/soak-2026-11-25.md` untouched this pass (a second
+reading today would replace day 1, not add a day). Timer verified `gpn-soak-record.timer`, next
+`Thu 2026-11-26 09:10 PST`. Box ticks 2026-12-02.
+**Blockers / [TRIAGE]:** none.
+**Next run:** ask once for 45743326550; on `success` dispatch `release-linux-selfhosted.yml` and
+`release-windows.yml` on the same SHA with the run ids written into §5, then end the run.
