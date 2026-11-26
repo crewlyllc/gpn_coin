@@ -1,3 +1,36 @@
+## 20:05 PT — 0.3.80 §4 GREEN and §5 dispatched (linux 45752712360 / windows 45752717739 on `build/77b1c93f1edd`); run ended on purpose
+
+**A0 (CI).** `git fetch && reset --hard origin/main` ⇒ HEAD `567e3947`. Run **45743326550** asked once ⇒
+**`completed success`**, head `77b1c93f`, started `02:34:31Z`, finished `03:59:51Z`. The Windows leg
+(`DESKTOP-USBUADL`, job 139655201769) finished `success` — step 7 `Build + test gpn-agent (release)`
+`03:18:39Z`→ done — inside the 90-minute rule, so nothing was cancelled. Linux leg success including step 8
+`Test gpn_update CLI`, `fmt + clippy` success, `secret-scan` success; macOS / GPU two-node / dependency audit
+`skipped` by design. Nothing red ⇒ no fix box this pass.
+
+**Boxes ticked.** §4 box 4 ("for a code SHA the conclusion must be `success`") — ticked on the run above, with
+the docs-SHA half re-derived on HEAD (`total_count: 0` for `567e3947`, 40-char query). §5 box 1 (per-item
+Windows evidence over SSH) — fresh read-only box 1 output pasted:
+`path=C:\gpn\data\update\current\gpn-node.exe`, RPC `system_version` ⇒ `"0.3.79"`.
+
+**§5 dispatched and the run ENDED** (the rule that stops the three-hour timeouts): tag `build/77b1c93f1edd`
+pushed for **`77b1c93f`** — the last code commit and the SHA with the green CI, chosen over HEAD `567e3947`
+which differs only in `docs/**` — then `scripts/dispatch-release.sh 77b1c93f…`:
+`release-linux-selfhosted.yml` ⇒ **45752712360** (`in_progress`), `release-windows.yml` ⇒ **45752717739**
+(`in_progress`, queued behind the CI run). Handles written into the checklist boxes; no polling.
+`release-unix.yml` (macOS) was dispatched too by the script and **failed in 3 s with zero steps** — the known
+permanent red of triage item AUDIT-2026-11-25a (hosted-minute billing block, macOS absent from the manifest),
+not a signal about 0.3.80. Note for later: `dispatch-release.sh` still dispatches that workflow; it should be
+dropped from its `workflows` array.
+
+**Not worked, and why.** §0e's stranger-lifecycle box stays `AWAITING-OWNER` (triage 256 — the only clean
+Windows guest that can host it needs the 5070 Ti partitioned to GPN-209, i.e. a GPU-config change on the box
+running the live mining node, which is Jeremy's call). §3b row 273 (seven-day soak) is day 1/7 by design —
+ticks 2026-12-02, and the release must not be held for it.
+
+**Next run:** read 45752712360 / 45752717739 once each. `success` ⇒ §5's attestation boxes on the private repo
+(cosign keyless + the pre-publish provenance gate) and §6's artifact scan + `--version`; then §7 cut.
+**[TRIAGE]** nothing new; item 256 remains the only open question.
+
 ## 19:45 PT — A0: linux leg GREEN on 45743326550 (both earlier reds fixed); Windows leg 60 min in; no box tickable
 
 **A0 (CI).** Run **45743326550** (head `77b1c93f`) asked **once**: `in_progress`, `run_started_at 02:34:31Z`.
