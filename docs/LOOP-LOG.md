@@ -1,3 +1,35 @@
+## 01:2x PT — row 273 day 2 re-recorded (height 366675, box 1 caught up); both queued fixes re-verified green; no version
+
+**A0:** `origin/main` HEAD `28de197d` (row 281's `soak-record.py` change, a code commit) has run **45788172599**,
+`pending`/queued at 09:01Z — 19 min old, no jobs started yet. **No conclusion ⇒ nothing acted on, nothing waited on,
+nothing cancelled.**
+
+**Row 273 (only IN-PROGRESS row, day 2 of 7).** No new calendar day was due (day 3 arrives with the 09:11 PST timer
+fire, 17:11Z), so no *new* day was opened; the recorder was re-run because that is the row's per-pass work and it is
+idempotent per date — it replaces today's section with the newest numbers. Because of that the 09:00Z reading is
+**superseded, not preserved**; both are quoted here so the change is not invisible:
+- 09:00Z: height 366613, effective interval **15.79 s** (535 blocks/2.35 h), p50 9.33 / p95 43.38, peers 3, box 1 366614
+- 09:19Z: height 366675, effective interval **17.75 s** (62 blocks/0.31 h), p50 11.32 / p95 46.04, peers 3, box 1 **366675**
+
+Two honest readings of that: (a) **box 1 caught up** — it was 1 block behind at 09:00 and is level at 09:19, which is the
+telemetry the row wants; (b) the effective interval is **above the 13.4 s baseline in both samples (15.79 → 17.75)**, and
+p50 moved 9.33 → 11.32. A 19-minute window on a Poisson process is not drift on its own — p95 (43–46 s) is the same
+historic tail — so it is **recorded as a flag, not called drift**; the next full-day reading decides. Live spot check at
+09:19–09:21Z: #366675 → #366677 in 65 s (2 blocks) — slow but moving, no >2 min gap, so no gate-3 alarm fires.
+Everything else unchanged: NRestarts=0, 24 h journal 0 ban/`Reason:` lines, gate-6 counters all 0, AP jobs
+256 attempted / 228 succeeded / 12 failed, update `confirmed 0.3.80 is running` (24 s), `gpncoin.ai/canary.json` ⇒
+`0.3.80 ok:true job 6595`.
+
+**Queued rows re-verified on the fresh reset (no version opened — batch 2 of 5: 278, 279; 280/281 already COMPLETE):**
+- 279: `bash scripts/tests/test-check-spec-version.sh` ⇒ `PASS=6 FAIL=0`, incl. `real repo passes: source spec_version=55
+  network.json spec_version=55 OK` and `shipped network.json spec_version=55 == runtime spec 55` — the 54-vs-55 floor is
+  gone from the tree.
+- 278: `pwsh -File scripts/tests/test-update-shutdown.ps1` ⇒ `RESULT: PASS (all checks)`, incl. the four §K assertions
+  (`exits 0 (a hold is not a failure)`, `does not stop the node`, `does not install anything`, `runs before the stop line`).
+
+**No version opened** — two real fixes ready, both non-critical (the updater's stop-then-check ordering on Windows and the
+spec floor in `network.json`); peering/discovery/chat are healthy, so the 5-fix batch rule keeps waiting. **No [TRIAGE] item.**
+
 ## 01:0x PT — row 273: the soak's "update outcome" was quoting a test's exit record; the collector now reads the update unit's journal
 
 **A0:** `origin/main` HEAD `d7123c5e` ⇒ **0 runs** (docs-only, `paths-ignore` correct). The previous code commit
