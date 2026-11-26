@@ -1,3 +1,22 @@
+## 22:1x PT — 0.3.80 §10b: release timing measured and recorded (6h59m; slowest step is a venue wait)
+
+**A0 (CI).** `reset --hard origin/main` ⇒ HEAD `3584e5c3` (loop-log docs commit). Full-40-char run query
+(`?head_sha=3584e5c39e…`) ⇒ `total_count: 0` — docs-only SHA under `ci.yml` paths-ignore. Not a fault, so
+straight to the first actionable box (177 is AWAITING-OWNER item 256, 273 is a soak that opens 2026-12-02,
+filing waits on 273).
+
+**Box worked: §10b "record how long the steps took".** Ran
+`/usr/bin/python3 scripts/release-timing.py 0.3.80 --json docs/releases/timing/0.3.80.json` and committed
+its stdout as `docs/releases/timing/0.3.80.md` (the script prints the table; the `.md` is the capture, same
+as 0.3.78/0.3.79). Result: `51 of 57` boxes ticked, `total: 6h59m` from checklist creation to last tick.
+
+**Slowest step named:** 1h20m on §0e "if the lifecycle cannot be run this release, say so" — a wait on the
+`stranger-lifecycle.ps1` **venue** (NEEDS-TRIAGE item 256), not rework. Real-work long poles are runner
+contention: 43m waiting for the push SHA's CI run (§4) and 36m for `release-windows.yml` (§5). Median §3b
+item step was 17m53s. Nothing to change in the code; it shortens when item 256 is decided.
+
+[no TRIAGE] — item 256 is already filed and escalated; nothing new needs a decision.
+
 ## 21:58 PT — 0.3.80 §10 row-DONE mark: rows 274/275/276/277 COMPLETE 0.3.80, completion bar re-measured
 
 **A0 (CI).** `reset --hard origin/main` ⇒ HEAD `06d4cb42` (0.3.80 §7b checklist commit). Full-40-char
