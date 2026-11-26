@@ -1,3 +1,35 @@
+## 21:58 PT — 0.3.80 §10 row-DONE mark: rows 274/275/276/277 COMPLETE 0.3.80, completion bar re-measured
+
+**A0 (CI).** `reset --hard origin/main` ⇒ HEAD `06d4cb42` (0.3.80 §7b checklist commit). Full-40-char
+run query (`?head_sha=06d4cb4214…`) ⇒ `total_count: 0` — docs-only SHA, `ci.yml` paths-ignore. Nothing red,
+nothing waiting, so straight to the first actionable box.
+
+**Box worked: §10 "mark the task row DONE with version, commit sha and the evidence line".** Ticked for the
+four rows whose own done-whens the published release satisfies: **274, 275, 276, 277 ⇒ COMPLETE 0.3.80
+(2026-11-26)**, each with build sha `77b1c93f1edde7a6c4d206b0a0d7ae286d8db6ed` and its quoted proof.
+**273 stays IN-PROGRESS by its own text** (soak day 1 of 7, ticks 2026-12-02) — a green release does not
+retroactively finish a seven-day measurement, and it must not be back-filled.
+
+**Re-measured rather than copied**, because the earlier entries were written by the run that *caused*
+the release:
+- `curl https://gpncoin.ai/releases.json` ⇒ `version 0.3.80, published_at 2026-11-26T04:52:15Z`,
+  `linux sha256 8e4ce114…9c642`, `windows sha256 ca093f0e…625f42` (matches §5/§6 asset digests).
+- `system_version` on the **running** node (`127.0.0.1:9944`) ⇒ **`0.3.80`**; `state_getRuntimeVersion` ⇒
+  `specVersion 55`, the same spec the artifact was stamped with.
+- `scripts/release-lock.sh status` ⇒ `no release in flight` (also the live check row 277 claims).
+- 275's canary half: `https://gpncoin.ai/canary.json` was published green at `e03a87b2`, and box 1 then
+  installed 0.3.80 unattended — `CONFIRMED: 0.3.80 is running … after 8 s`.
+
+Pushed as one docs commit `65152799` on `main` (`git ls-remote` agrees with local HEAD). No CI run expected
+or produced for it.
+
+**Still open on 0.3.80.** §0b filing (117/118 — archive + INDEX row, now unblocked in principle but still
+gated on 273's day-7 tick by the filing section's own wording), §0e stranger lifecycle (177 — AWAITING-OWNER
+venue, triage 256; box 4 off the tailnet, box 3 is a live node, box 1's GPN-209 GPU guest not yet usable),
+row 273 soak (day 1 of 7 → 2026-12-02), §10b timing (893/897).
+
+No [TRIAGE] items this pass.
+
 ## 21:45 PT — 0.3.80 §7b ticked (n/a, proven): no capability in this bundle, and the live ones still answer
 
 **A0 (CI).** `reset --hard origin/main` ⇒ HEAD `8eb6d932` (list rows 278/279). Full-40-char run query
