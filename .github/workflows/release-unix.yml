@@ -21,13 +21,22 @@ concurrency:
 
 jobs:
   build:
+    # Gated on purpose (row 280, 2026-11-26). This account's GitHub-hosted
+    # runners are billing-blocked, so a `macos-latest` job is created and then
+    # never acquired: it reports `failure` in 4-8 s with no runner, no steps and
+    # no log (`GET /actions/jobs/<id>/logs` => BlobNotFound). Fifteen consecutive
+    # dispatches from 2026-11-16 to 2026-11-26 failed that way, so this lane was
+    # permanently red for a platform the site already labels "not published yet"
+    # -- a red lane that is always red stops carrying information.
+    # Set the repository variable GPN_MACOS_BUILD=1 once a macOS runner exists.
+    if: vars.GPN_MACOS_BUILD == '1'
     strategy:
       fail-fast: false
       matrix:
         # Linux moved to release-linux-selfhosted.yml: GitHub-hosted runners are
         # billing-blocked on this account (this job had 0 runs ever, which left
         # linux-latest frozen at 2026-10-21). macOS has no self-hosted runner,
-        # so it stays on the hosted matrix.
+        # so it is gated above and skipped until one exists.
         os: [macos-latest]
     runs-on: ${{ matrix.os }}
     steps:
