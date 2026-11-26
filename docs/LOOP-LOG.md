@@ -1,3 +1,29 @@
+## 13:22 PT — 0.3.82 §5 CLOSED: windows build + cosign provenance verified on the published bytes
+
+**A0 (HEAD `56c5ef22`, docs).** `?head_sha=56c5ef22…` ⇒ **total_count 0** — expected (`paths-ignore`);
+code sha `eb538744` answered `success` (45880574537). Nothing red.
+
+**§5 windows leg — ticked.** Run **`45892758345`** ⇒ `completed / success` 20:40:38→21:07:37Z, job
+`windows`, 22 real steps green (incl. deploy to `C:\gpn\bin`, package zip, provenance gate, publish).
+Asset `gpn-windows.zip` **253,301,488 B**, `sha256:1985740a58cd45c948582636b462a7e05dbc2d54a01c9e94ec76e2a359c3407a`
+(21:07:28Z) + `gpn-windows.zip.bundle` 9,049 B. Re-downloaded the published asset via the API ⇒
+`sha256sum` identical to the API digest; zip carries `0.3.82`. Step 17 launcher gate in the same log:
+`gpn_node 0.3.82 (spec 55, eb53874)`.
+
+**§5 attestation boxes — ticked (private-repo cosign path).** `visibility: private`; log
+`provenance method: cosign` 21:04:37Z; jobs API order = step 22 `Provenance gate` → step 23 `publish`
+with no `if:`; gate printed `provenance gate PASSED (method=cosign, sha256=1985740a…c3407a)` at
+**21:06:43Z**, 45 s BEFORE the 21:07:28Z publish. Bundle re-downloaded, its sha matches the API digest
+(`0726ef54…adfba3`), and **`cosign verify-blob` on the re-downloaded zip ⇒ `Verified OK`** (cosign
+2.4.1, run here — not the job's word).
+
+**Side observation (not a box):** box 1 already reports the deploy — `(Get-Process gpn-node).Path` =
+`C:\gpn\data\update\current\gpn-node.exe`, pid 49784, `gpn-node.exe --version` ⇒ **0.3.82** (SSH,
+13:21 PT). That is §9/§10 material for the next runs; `DESKTOP-USBUADL` and `openclawassist` both idle.
+
+§5 now DONE (7/7). Next run starts at §6 (strings scan + `--version`), for which the previous run
+already pre-computed the 286 literals. Tally: 26/56.
+
 ## 13:05 PT — 0.3.82 §5: linux build landed and verified; windows build still building (25 min in) — run ended, no wait
 
 **A0 (HEAD `9b62de64`, docs).** `?head_sha=9b62de64…` ⇒ **total_count 0** — expected under `ci.yml`

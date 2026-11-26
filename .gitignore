@@ -73,3 +73,6 @@ __pycache__/
 .wrangler/
 worker/node_modules/
 .dev.vars
+
+# ---- Large release artifacts downloaded for verification (never commit) ----
+/artifacts/
