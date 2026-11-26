@@ -1,3 +1,39 @@
+## 15:05 PT — 0.3.82 §7: windows rebuild died in 23 s on our own ASCII guard (§7 in a workflow comment); fixed, both lanes re-dispatched
+
+**A0.** `origin/main` HEAD `bd9854b6` is docs-only ⇒ `?head_sha=` total_count 0, nothing red there. But the
+sha that matters is the one being built: `bad49d12`.
+
+**The failure, read from the log.** `Windows binaries` run `45904624707` (sha `bad49d12`) ⇒
+`completed/failure`; job `windows` started 22:45:45Z (after ~21 min queued behind CI run `45897921756`)
+and died 22:46:08Z with `##[error]Process completed with exit code 1`, preceded by
+`NON-ASCII release-linux-selfhosted.yml:105 byte 0xc2` / `byte 0xa7` and
+`throw ('non-ASCII bytes in workflow files (2) - Windows PowerShell 5.1 decodes run: scripts as ANSI…')`.
+Cause: commit `bad49d12` wrote a literal `§7` into a **comment** in `release-linux-selfhosted.yml:105`
+(UTF-8 `C2 A7`). Classification: **our code** (workflow file), same class as run `44924273272`.
+
+**The same cause had already reddened CI.** Linux CI run `45902079672` (sha `bad49d12`), job
+`fmt + clippy` (140205413543): `bash scripts/check-workflow-ascii.sh` ⇒
+`workflow-ascii: non-ASCII bytes in workflow files` ⇒ exit 1; `Build + unit tests (linux)` = `skipped`.
+So `45902084529`'s linux tarball never had green CI either — `release-cut.sh`'s `require_green_ci` would
+have refused it independently of the two-commit abort. Two refusals, one cause.
+
+**Fix.** `§7` → `section 7` in that comment; local `scripts/check-workflow-ascii.sh` ⇒
+`workflow-ascii: OK (all workflow files are pure ASCII)` (rc 0). Commit `50c9e9b8`, pushed to main; CI
+run `45908365338` started for it.
+
+**Why both lanes, not just windows.** The bundle stamp embeds the build sha, so pairing a `bad49d12`
+linux tarball with a `50c9e9b8` zip would abort exactly as before (`bundles were built from different
+commits`). Tag `build/50c9e9b85b06` created; `release-linux-selfhosted.yml` **run `45908378111`**
+(`in_progress`) and `release-windows.yml` **run `45908380728`** (`queued`) dispatched 23:01Z/23:02Z.
+Run ended right after dispatch, per the dispatch-and-end rule.
+
+Tally: 30/56 (no box ticable this run — §7 box 2 needs both new assets verified first).
+
+Next run: read `45908378111` and `45908380728`; if both `completed/success`, download the new
+tarball + zip and their `.bundle`s, check digests against the API, `cosign verify-blob` each with its
+workflow identity, `strings` for the 285/286 literals, `--version` on both, update §5/§6 notes, then
+run `scripts/release-cut.sh --version 0.3.82`.
+
 ## 14:45 PT — 0.3.82 §7: windows rebuild still queued behind a CI build on the single-slot box-1 runner; run ended, nothing else blocked
 
 **A0 (HEAD `3579e224`, docs).** `?head_sha=3579e22495ede19441f573ea28a20b302aab2471` ⇒ **total_count 0** —
