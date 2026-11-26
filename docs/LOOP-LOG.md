@@ -1,3 +1,35 @@
+## 18:0x PT — 0.3.80 §1/§2 ticked on re-derived evidence; freed the single Windows slot from a doomed run
+
+**A0 (CI).** Full sha `665bb967af04bb22d5f33e975d5d756f9be44a90` ⇒ run **45738389392** `pending`,
+`conclusion: null`, **0 jobs** at 01:56Z — queued behind the previous run's Windows job. Not waited on.
+Queue fixed instead: run **45730513852** (`07be732c`, superseded by this box's fix) still held
+`DESKTOP-USBUADL` with `Build + unit tests (windows, self-hosted)` in progress after its `fmt + clippy`
+job had **already failed** — it could not pass, and it was spending the only Windows slot while the fix's
+run sat queued. `POST …/actions/runs/45730513852/cancel` ⇒ **HTTP 202**; API confirms
+`45730513852 completed cancelled 01:57:36Z` and `45738389392 in_progress 01:58:34Z`. No value lost: that
+window was building a commit whose linux lint was already red.
+
+**Boxes ticked — §1 (3/3) and §2 (6/6), both on evidence re-run this pass on HEAD:**
+- `cargo fmt --all -- --check` ⇒ FMT_CLEAN both crates (`gpn-agent`, `gpn-node`).
+- CI's exact lint `cargo clippy --release --all-targets -- <CLIPPY_ALLOWS> -D warnings` ⇒
+  `Finished release profile in 12.36s`, **CLIPPY_EXIT=0** (only the pre-existing upstream `subxt v0.37.0`
+  future-incompat note).
+- `cargo test --release --lib update::` ⇒ **119 passed, 0 failed, 2 ignored**;
+  `--lib onboard::` ⇒ **18 passed, 0 failed**.
+- Script suites, whole files: release-cut **104/0**, release-lock **PASS=19 FAIL=0**, soak-record **49/0**,
+  incident-alarm **38/0**, canary-report **13/0**, canary-publish **15/0**.
+- Call sites grepped, not assumed: `canary_gate(` ⇒ `gpn_update.rs:989` and `gpn_node.rs:2847`;
+  `soak-record.py` ⇒ `soak-record-daily.sh:22` under `gpn-soak-record.timer` (active, next 09:10 PST);
+  `incident-alarm.py` ⇒ `systemd/gpn-incident-alarm.service:7` under `gpn-incident-alarm.timer`.
+
+**Still open in 0.3.80 (in order).** §3b row **273** — soak counting, day 1/7 recorded, ticks on
+2026-12-02 (a missed day restarts it, no back-fill). §4's last box — needs a `success` conclusion on a
+code SHA; run 45738389392 is that question and is now actually running. §0e's stranger lifecycle — needs a
+clean Windows guest **and** a newer published version to self-update to, so it follows publication, not
+precedes it. Then §5 builds (dispatch on the green SHA, end the run with the handle).
+
+**Blockers / [TRIAGE]:** none this pass.
+
 ## 17:5x PT — 0.3.80 §0e: stranger-path failure messages audited (box ticked); A0 read a RED and fixed it
 
 **A0 (CI) — the run on the code SHA went red, and it was ours.** `origin/main` HEAD `c13f410e` (docs-only)
