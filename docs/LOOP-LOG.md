@@ -1,3 +1,32 @@
+## 03:4x PT — A0 caught a real red: `fmt + clippy` failed on run 45803757268 (`exit_report.rs:239`); fixed with `cargo fmt`, pushed `cd05e348`
+
+**A0:** `origin/main` HEAD was `8ccd9160` (loop-log only) ⇒ `?head_sha=` **0 runs** (paths-ignore correct).
+The queued code run **`45803757268`** (`437f97b0`) finally started at 11:38Z and its **`fmt + clippy` job
+failed in 5 s**: `Diff in …/gpn-agent/src/exit_report.rs:239` — row 282's `cfg!(test)` guard was committed
+unformatted (`join(format!(` split across three lines where rustfmt wants two).
+
+- **Classification: our code (formatting), not environment, not upstream.** Quoted line:
+  `2026-11-26T11:38:34.4585207Z Diff in /home/jeremyg/actions-runner/_work/gpn_coin/gpn_coin/gpn-node/node/src/../../../gpn-agent/src/exit_report.rs:239:`
+- **Fix:** `rustfmt --edition 2021 src/exit_report.rs` (2 insertions / 4 deletions, semantics identical).
+- **Narrowest check:** `cargo fmt --all -- --check` in `gpn-agent` ⇒ **rc 0**; `cargo check --lib` ⇒
+  `Finished dev profile … in 12.00s` (5 warnings, all pre-existing allow-listed).
+- **Pushed once:** `8ccd9160..cd05e348`. Windows build of the old SHA keeps running; next pass reads
+  whatever `?head_sha=cd05e348…` produced. **Not waiting on it** (rule: dispatch/push and end the run).
+
+**Checklist state:** `0.3.80` published (`releases.json` `"version":"0.3.80"`, published 2026-11-26T04:52Z),
+running node reports it (`/proc/4179529/exe` → `~/.local/bin/gpn-node`, `--version` ⇒ `gpn-node 0.3.80`),
+INDEX row + `archive/0.3.80.md` present. Two boxes stay unticked by design: §0e stranger-lifecycle
+(**AWAITING-OWNER**, `NEEDS-TRIAGE.md` item 256 — venue/GPU config on box 1 is Jeremy's call) and 273
+(soak day 3 of 7, `gpn-soak-record.timer` NEXT **09:11:36 PST**; day 2 already recorded at 10:40Z today).
+
+**Batch:** 3 of 5 countable fixes ready in tree — **279** (network.json spec floor 54→55 + hard-fail
+`check-spec-version.sh`), **283** (stale `~/.openclaw/workspace/projectmanager07` references fixed), **278**
+(Windows updater evaluates the canary gate before stopping the node; live half needs 0.3.81). **282** is an
+invariant guard, explicitly not counted. Batch waits — no new version opened.
+
+**Live health (probed, not assumed):** peers **3**, height **367233**, `gpn-incident-alarm` last three fires
+`ok: no incident conditions` (3.36/3.37/3.38 UTC), `~/.gpn/telemetry/2026-11-26.json` written 02:41 PT.
+
 ## 03:2x PT — all three queued fixes re-proven by running their own tests (not by reading commits); CI still has no conclusion; soak day 3 not due
 
 **A0:** `origin/main` HEAD `cdf7a54c` (loop-log only) ⇒ `?head_sha=` **0 runs** (paths-ignore correct). The code run
