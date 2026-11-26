@@ -33,7 +33,7 @@ A decentralized blockchain where every GPU-connected node can mine, stake, and s
 ## Project Structure
 
 ```
-projectmanager07/
+gpn_coin/            # repo root (single working clone: ~/gpn-loop)
 ├── gpn-node/          # Substrate blockchain node
 │   ├── node/          # Node binary
 │   ├── runtime/       # Runtime with custom pallets
@@ -41,8 +41,13 @@ projectmanager07/
 │       ├── gpu-pow/             # Ethash mining pallet
 │       ├── gpu-attestation/     # Proof of Staked GPU
 │       ├── compute-marketplace/ # GPU compute marketplace
-│       ├── profitability-oracle/# On-chain profitability feed
-│       └── gpn-token/           # Token economics (mint/inflation/fees)
+│       ├── profitability-oracle/ # On-chain profitability feed
+│       ├── gpn-token/           # Token economics (mint/inflation/fees)
+│       ├── gpn-treasury/        # Disclosed vested treasury
+│       ├── gpn-governance/      # Committee/governance primitives
+│       ├── gpn-liveness/        # Node liveness + slashing
+│       ├── gpn-bridge/          # Cross-chain bridge pallet
+│       └── shielded-pool/       # Shielded transfers
 ├── gpn-agent/         # GPU node agent (Rust)
 │   ├── src/
 │   │   ├── main.rs              # Entry point
@@ -58,12 +63,6 @@ projectmanager07/
 │   │   └── config/              # Agent configuration
 │   └── config/
 │       └── default.toml
-├── shared/artifacts/project7/   # Research + cycle logs + ops docs
-│   ├── 01-gpu-coins-research.md
-│   ├── 02-gpu-compute-networks-research.md
-│   ├── 03-hybrid-consensus-research.md
-│   ├── 04-design-decisions-synthesis.md
-│   └── testnet-public-runbook.md  # Public testnet spec/runbook (Phase 4 prep)
 ├── design/           # Source-of-truth design (aligned to implemented code)
 │   ├── pallets/00-pallet-overview.md
 │   ├── protocols/01-gpu-pow-consensus.md
@@ -77,8 +76,7 @@ projectmanager07/
 │   ├── mainnet-launch-runbook.md
 │   ├── upgrades-governance.md   # Mainnet runtime-upgrade pipeline (committee)
 │   └── incident-response.md
-├── SECURITY.md      # Vulnerability disclosure policy
-└── HEARTBEAT.md
+└── SECURITY.md      # Vulnerability disclosure policy
 ```
 
 ## Key Design Decisions
