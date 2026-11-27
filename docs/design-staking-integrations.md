@@ -96,3 +96,14 @@ Solana-specific beyond an RPC connection.
 3. **Reward accounting:** do staking rewards count toward the operator's dashboard "earnings" (a
    fourth line), or stay in a separate "other chains" panel?
 4. **Minimums:** Solana needs ~0.01 SOL + rent; do we refuse below it, or warn?
+
+---
+
+## 7. OWNER DECISIONS (2026-11-27 10:02)
+
+- **Ethereum staking: out of scope entirely** — not solo, not provider, **not even a display-only
+  stETH panel**. No Ethereum code path ships.
+- **Solana delegation: in scope** (row 295).
+- **Dashboard:** staking rewards appear on the dashboard, and a **second "Other earnings" section
+  appears only when the operator is staking or mining a second coin** — it is not a permanent
+  fixture and never merges with GPN's own earnings line.

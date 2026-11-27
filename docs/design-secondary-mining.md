@@ -168,3 +168,10 @@ stdin API, with the supervisor owning start/stop/pause. That keeps the blast rad
    shows `pool disconnected` rather than failing silently.
 4. Coin B earnings never appear in GPN's `Earnings Today`, and the airdrop export is unchanged.
 5. A card whose VRAM cannot fit the two DAGs plus a model does not offer the coin at all.
+
+### 7.4 Dashboard section appears only when it applies (owner, 2026-11-27)
+
+The "Other earnings" panel is **conditional**: it appears when a second coin is enabled **or** SOL
+staking is active, and it disappears when both are off. It shows coin-B rewards and staking rewards
+as separate lines, with their own totals — never folded into GPN's "Earnings Today", which keeps
+meaning exactly one thing: GPN earned by this node.
