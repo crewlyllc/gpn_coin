@@ -1,3 +1,26 @@
+## 08:59 PT 0.3.84 box 290 ticked — the canary proof publishes itself, and filing refuses without it
+
+- **A0 CI:** no run exists for `46809679` (docs-only SHA). Continued to A.
+- **Box 290 (canary proof no longer a manual step)** — ticked:
+  - `scripts/canary-auto.sh` (new): published version from `releases.json` → running version over the node's
+    RPC → `canary-report.py --auto` → `canary-publish.sh` → poll the LIVE `canary.json`. Exit 1 = waiting,
+    2 = refused, 0 = bridged.
+  - `canary-report.py --auto` (new): discovers this host's provider from `/providers` loopback rows and takes
+    the newest `Completed` job with id **> the last published proof's job_id** (a stale job cannot bridge a new
+    release). Several local providers (LLM/image/finetune) are not "ambiguous" — any local job qualifies.
+  - `canon_account()`/`same_account()`: ss58 ↔ 0x, so one account is not read as "another provider".
+  - Gate: `release-cut.sh --verify-published` runs `canary_check` FIRST and exits 1 with
+    `the fleet is HELD — … proves 0.3.83, not 0.3.84`; `release-status.sh` prints a `canary` line and flags
+    PROBLEM when site ≠ canary.
+  - Deployed: `gpn-canary-auto.timer` every 10 min. First live run 08:59:40 PT ⇒
+    `already bridged: https://gpncoin.ai/canary.json serves 0.3.83` (status 0/SUCCESS in the journal).
+  - Live auto-discovery on the real node/AP: `canary-report.py --auto --min-job-id 6602` ⇒
+    `0.3.83 confirmed by the running node` + `job #6604 is Completed for 5HgbpiT…`.
+  - Tests: `test-canary-report.py` **21/21**, new `test-canary-auto.sh` **15/15**, new
+    `test-release-cut-canary.sh` **8/8**.
+- Remaining half: one real publish→bridge cycle on 0.3.84 (the new timer does it unattended; the box records it).
+- No blockers, no [TRIAGE] items.
+
 ## 08:45 PT 0.3.84 box 289 ticked — ollama download is bounded, streamed and actionable
 
 - **A0 CI:** no run exists for `2f52a4ef` (docs-only SHA, `paths-ignore` working as intended).

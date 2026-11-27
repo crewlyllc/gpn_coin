@@ -1,0 +1,11 @@
+[Unit]
+Description=Check every 10 minutes whether a published release still needs its canary proof
+
+[Timer]
+OnBootSec=3min
+OnUnitActiveSec=10min
+AccuracySec=30s
+Unit=gpn-canary-auto.service
+
+[Install]
+WantedBy=timers.target

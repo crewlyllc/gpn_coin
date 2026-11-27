@@ -335,6 +335,14 @@ Two different jobs use Windows, and they must not be confused (owner question, 2
 proof is a release step, not an afterthought: 0.3.82 and 0.3.83 both shipped without it and the
 whole fleet stayed pinned to 0.3.81 for two releases (found 2026-11-27 00:20 PT).
 
+**Since row 290 this publishes itself**: `scripts/canary-auto.sh` runs from
+`gpn-canary-auto.timer` every 10 minutes on the canary host — it reads the published version,
+requires the RUNNING node to report it, takes the newest `Completed` job for a provider on that
+host (id greater than the last proof's `job_id`), publishes, and polls the live URL. The boxes
+below verify it happened; the commands are the manual fallback for when the timer is not running.
+`release-cut.sh --verify-published` refuses to pass (and `release-status.sh` reports PROBLEM)
+while `canary.json` names a different version.
+
 - [ ] **Generate the proof from the RUNNING process, never from a file.**
       `scripts/canary-report.py --provider <canary provider account> --job-id <a job Completed on
       this version>` — it reads `system_version` from the node's own RPC and a `Completed` row in

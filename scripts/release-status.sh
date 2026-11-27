@@ -34,6 +34,11 @@ lock="$HOME/.gpn/release.lock"
 
 site_ver=$(curl -s --max-time 10 "https://gpncoin.ai/releases.json?cb=$(date +%s)" \
            | python3 -c 'import sys,json;print(json.load(sys.stdin).get("version",""))' 2>/dev/null)
+# Row 290: the canary proof is what unblocks every non-canary node. A site that
+# serves a version the proof does not name means the whole fleet is (silently)
+# held — exactly what happened for 0.3.82 and 0.3.83.
+canary_ver=$(curl -s --max-time 10 "https://gpncoin.ai/canary.json?cb=$(date +%s)" \
+           | python3 -c 'import sys,json;print(json.load(sys.stdin).get("version",""))' 2>/dev/null)
 
 tok_file="${GPN_GITHUB_TOKEN_FILE:-$HOME/.openclaw/credentials/github-gpn-pat.txt}"
 runs=""
@@ -111,6 +116,7 @@ fi
 
 say "tree      v$tree_ver @ ${head_sha:-unknown}"
 say "site      ${site_ver:-unreachable}"
+say "canary    ${canary_ver:-unreachable}"
 say "ci        $ci"
 printf 'builds    %s\n' "$(printf '%s\n' "$builds" | head -1)"
 case "$builds" in *$'\n'*) say "$(printf '%s\n' "$builds" | tail -n +2)" ;; esac
@@ -140,6 +146,11 @@ esac
 
 if [ -n "$site_ver" ] && [ "$site_ver" != "$tree_ver" ]; then
   say "PROBLEM: site serves $site_ver but the tree is $tree_ver (release not published)"
+  rc=2
+fi
+
+if [ -n "$site_ver" ] && [ "$canary_ver" != "$site_ver" ]; then
+  say "PROBLEM: site serves $site_ver but canary.json proves ${canary_ver:-nothing} — the fleet is HELD on ${canary_ver:-an unproven release} (row 290: scripts/canary-auto.sh publishes it)"
   rc=2
 fi
 

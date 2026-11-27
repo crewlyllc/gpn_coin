@@ -94,6 +94,7 @@ GPN_GH_UPLOAD="${GPN_GH_UPLOAD:-https://uploads.github.com}"
 SRC_REPO="${GPN_SOURCE_REPO:-jeremyzguo/gpn_coin}"
 MIRROR_REPO="${GPN_MIRROR_REPO:-crewlyllc/gpn_coin}"
 RELEASES_URL="${GPN_RELEASES_URL:-https://gpncoin.ai/releases.json}"
+CANARY_URL="${GPN_CANARY_URL:-https://gpncoin.ai/canary.json}"
 DL_BASE="${GPN_RELEASE_DOWNLOAD_BASE:-https://github.com/$MIRROR_REPO/releases/download}"
 KEY="${GPN_RELEASE_KEY:-$HOME/.openclaw/credentials/gpn-release-key.txt}"
 SRC_PAT_FILE="${GPN_GPN_PAT_FILE:-$HOME/.openclaw/credentials/github-gpn-pat.txt}"
@@ -667,6 +668,32 @@ say "mirror      $MIRROR_REPO (public downloads)"
 say "published   $(published_version || true)"
 [ "$DRY" = 1 ] && say "mode        DRY RUN (no upload, no commit, no push)"
 
+# canary_check <version> — row 290's filing gate. A release is not publishable to
+# the fleet until the canary has proven THIS version: every non-canary node
+# refuses to install without that proof, so §8 and the filing step must not pass
+# while the proof still names the previous release (0.3.82/0.3.83 both did).
+canary_check() { # <version>
+  local want="$1" tmp ver
+  tmp="$(mktemp "${TMP:-${TMPDIR:-/tmp}}/canary.XXXXXX")"
+  curl -sS --max-time 30 --retry 3 --retry-delay 2 -o "$tmp" "$CANARY_URL" 2>/dev/null || {
+    echo "ABORT: canary proof: $CANARY_URL could not be read anonymously" >&2
+    rm -f "$tmp"; return 1; }
+  ver="$("$PY" -c 'import json,sys; print(json.load(open(sys.argv[1])).get("version",""))' "$tmp" 2>/dev/null || true)"
+  rm -f "$tmp"
+  if [ -z "$ver" ]; then
+    echo "ABORT: canary proof: $CANARY_URL is not a JSON proof" >&2
+    return 1
+  fi
+  if [ "$ver" != "$want" ]; then
+    echo "ABORT: the fleet is HELD — $CANARY_URL proves $ver, not $want." >&2
+    echo "       Every non-canary node refuses to install $want until a canary running" >&2
+    echo "       it has served a job and the proof is published. That is automatic:" >&2
+    echo "         scripts/canary-auto.sh        (or the gpn-canary-auto.timer)" >&2
+    return 1
+  fi
+  say "canary proof: $CANARY_URL proves $want — the fleet may update"
+}
+
 # ───────────────────────────── verify-as-a-stranger mode (#246) ────
 # The §8 boxes used to be done by hand, and were ticked against a URL that
 # returned 404 to anonymous callers. This mode IS that check, as a command:
@@ -675,6 +702,14 @@ say "published   $(published_version || true)"
 if [ "$VERIFY_PUBLISHED" = 1 ]; then
   TMP="$(mktemp -d "${TMPDIR:-/tmp}/gpn-stranger.XXXXXX")"
   step "verify as a stranger (§8)"
+  # Row 290: the proof gate is cheap and comes FIRST — a release whose canary
+  # proof names the previous version cannot be filed no matter how well its
+  # assets download, and a maintainer should learn that before a 300 MB fetch.
+  live_ver="$(curl -sS --max-time 30 --retry 3 "$RELEASES_URL" \
+    | "$PY" -c 'import json,sys; print(json.load(sys.stdin).get("version",""))' 2>/dev/null || true)"
+  if ! canary_check "${DECLARED_VERSION:-$live_ver}"; then
+    exit 1
+  fi
   if stranger_check "$RELEASES_URL" "$DECLARED_VERSION" 1; then
     say "PASS: both manifest assets are publicly downloadable by exact filename and match their sha256/size"
     exit 0

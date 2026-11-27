@@ -38,6 +38,7 @@ def bad(msg):
 class Stub(http.server.BaseHTTPRequestHandler):
     version = "0.3.80"
     jobs = []
+    providers = []
     rpc_down = False
 
     def log_message(self, *_a):
@@ -57,11 +58,15 @@ class Stub(http.server.BaseHTTPRequestHandler):
         self.wfile.write(body)
 
     def do_GET(self):
-        if not self.path.startswith("/jobs"):
+        if self.path.startswith("/providers"):
+            payload = {"providers": self.providers}
+        elif self.path.startswith("/jobs"):
+            payload = {"from": 0, "jobs": self.jobs}
+        else:
             self.send_response(404)
             self.end_headers()
             return
-        body = json.dumps({"from": 0, "jobs": self.jobs}).encode()
+        body = json.dumps(payload).encode()
         self.send_response(200)
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(body)))
@@ -77,6 +82,15 @@ def run(tmp, *extra, job_id=6342):
         [sys.executable, SCRIPT, "--rpc-port", str(PORT), "--ap-url", f"http://127.0.0.1:{PORT}",
          "--provider", PROVIDER, "--job-id", str(job_id), "--out", os.path.join(tmp, "canary.json"),
          *extra],
+        capture_output=True, text=True,
+    )
+
+
+def run_auto(tmp, *extra, min_job_id=0):
+    return subprocess.run(
+        [sys.executable, SCRIPT, "--auto", "--min-job-id", str(min_job_id),
+         "--rpc-port", str(PORT), "--ap-url", f"http://127.0.0.1:{PORT}",
+         "--out", os.path.join(tmp, "canary.json"), *extra],
         capture_output=True, text=True,
     )
 
@@ -159,6 +173,88 @@ if not os.path.exists(OUT):
 else:
     bad("a report was written without a running version")
 Stub.rpc_down = False
+
+print("== row 290: --auto finds this host's provider and its newest job after the baseline")
+os.path.exists(OUT) and os.remove(OUT)
+SS58 = "5ENqSp5Q65bxfgryZExQDRnV1rEW1qb2UBztvswLamkoUrqj"
+Stub.providers = [
+    {"address": SS58, "status_url": "http://127.0.0.1:8093",
+     "channel_url": "http://127.0.0.1:8095/channel/job"},
+    {"address": "5HgbpiTYE27CtBQF7gRWLz6Qt3HBxyi4tR2M75FC1oydH48z",
+     "status_url": "http://10.0.0.9:8093", "channel_url": "http://10.0.0.9:8095/channel/job"},
+]
+Stub.jobs = [
+    {"id": 6600, "provider": SS58, "state": "Completed"},        # at/below the baseline
+    {"id": 6601, "provider": SS58, "state": "Running"},
+    {"id": 6602, "provider": "0xdeadbeef", "state": "Completed"},  # another provider
+    {"id": 6604, "provider": SS58, "state": "Completed"},        # the one to pick
+]
+r = run_auto(tmp, min_job_id=6600)
+if r.returncode == 0:
+    ok("exit 0")
+else:
+    bad(f"expected exit 0, got {r.returncode}: {r.stdout}{r.stderr}")
+st = json.load(open(OUT)) if os.path.exists(OUT) else {}
+if st.get("job_id") == 6604:
+    ok("picked the newest Completed job for the loopback provider (#6604)")
+else:
+    bad(f"picked {st.get('job_id')!r}, expected 6604")
+if st.get("job_served") is True and st.get("ok") is True:
+    ok("the auto proof is as green as the manual one")
+else:
+    bad(f"flags wrong: {st}")
+
+print("== row 290: --auto accepts the SAME account in both encodings (hex flag vs ss58 row)")
+os.path.exists(OUT) and os.remove(OUT)
+Stub.jobs = [{"id": 6604, "provider": SS58, "state": "Completed"}]
+r = subprocess.run(
+    [sys.executable, SCRIPT, "--rpc-port", str(PORT), "--ap-url", f"http://127.0.0.1:{PORT}",
+     "--provider", PROVIDER, "--job-id", "6604", "--out", OUT],
+    capture_output=True, text=True,
+)
+if r.returncode == 0:
+    ok("hex 0x664c… matches ss58 5ENqS… — one account, one proof")
+else:
+    bad(f"rejected an equal account: {r.stderr}")
+
+print("== row 290: several loopback providers on one host are not 'ambiguous'")
+os.path.exists(OUT) and os.remove(OUT)
+OTHER = "5HgbpiTYE27CtBQF7gRWLz6Qt3HBxyi4tR2M75FC1oydH48z"
+Stub.providers = [
+    {"address": SS58, "status_url": "http://127.0.0.1:8093"},
+    {"address": OTHER, "channel_url": "http://127.0.0.1:8095/channel/job"},
+]
+Stub.jobs = [
+    {"id": 6604, "provider": SS58, "state": "Completed"},
+    {"id": 6605, "provider": OTHER, "state": "Completed"},
+]
+r = run_auto(tmp, min_job_id=6604)
+if r.returncode == 0 and json.load(open(OUT)).get("job_id") == 6605:
+    ok("picked the newest job on the host (a second provider's #6605)")
+else:
+    bad(f"expected #6605 on the local sibling provider, got rc={r.returncode}: {r.stdout}{r.stderr}")
+
+print("== row 290: --auto refuses when every job predates the last proof")
+os.path.exists(OUT) and os.remove(OUT)
+Stub.jobs = [{"id": 6600, "provider": SS58, "state": "Completed"}]
+r = run_auto(tmp, min_job_id=6600)
+if r.returncode == 2 and "after" in r.stderr:
+    ok("exit 2, names the missing post-proof job")
+else:
+    bad(f"expected exit 2, got {r.returncode}: {r.stderr}")
+if not os.path.exists(OUT):
+    ok("nothing written — a stale job cannot bridge a release")
+else:
+    bad("a stale job produced a proof")
+
+print("== row 290: --auto refuses when the access point lists no loopback provider")
+Stub.providers = [{"address": SS58, "status_url": "http://10.0.0.9:8093"}]
+r = run_auto(tmp, min_job_id=0)
+if r.returncode == 2 and "loopback" in r.stderr:
+    ok("exit 2, says this host is not a provider here")
+else:
+    bad(f"expected exit 2, got {r.returncode}: {r.stderr}")
+Stub.providers = []
 
 print("== an empty version is not a proof")
 Stub.version = ""

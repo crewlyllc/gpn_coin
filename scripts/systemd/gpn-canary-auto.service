@@ -1,0 +1,12 @@
+[Unit]
+Description=GPN canary proof (row 290) — bridge a published release to the fleet with no human step
+
+[Service]
+Type=oneshot
+WorkingDirectory=/home/jeremyg/gpn-loop
+ExecStart=/bin/bash /home/jeremyg/gpn-loop/scripts/canary-auto.sh
+# 1 = waiting for the canary to update / serve a job. That is the normal state
+# between a publish and the updater confirming; the next tick retries.
+SuccessExitStatus=0 1
+Nice=10
+TimeoutStartSec=600
