@@ -1,3 +1,51 @@
+## 22:57 PT — 0.3.83 RELEASED, DEPLOYED AND ARCHIVED; 287/288 proven live
+
+A0: HEAD `38647ef1` (docs) ⇒ `total_count: 0`, correct for a docs-only SHA. The code run
+**`45937187011`** (`a57f030f`) was `in_progress` at the start and finished **`success`** at
+06:39:40Z. It was not cancelled at the 90-minute mark because the Windows job was verified
+alive over SSH (`cargo` + 2×`rustc` running, 06:29Z) — it had only claimed box 1 at 05:17:24Z
+after queueing behind `release-windows` `45939164076`, and step 6 alone took 39m47s. Total 82 min
+of real compile on a single-slot box is contention, not a fault.
+
+Boxes ticked (two commits: `c8d24525`, `99136f14`):
+- **§7** `release-cut.sh --timeout 300` rc 0 at 06:46Z ⇒ `released 0.3.83`, cut commit `0eff7a8f`;
+  `network.json:25 latest_version 0.3.83`; `/releases.json` 0.3.83 twice, 10 s apart
+  (`published_at 2026-11-27T06:46:52Z`).
+- **§7b** four site surfaces were still naming 0.3.82 — fixed at the cause and restamped with live
+  facts (spec 55, block 371,743, 22:53 PT): `website/download.html` fallback literal,
+  `website/docs/run-a-node.html`, `website/docs/downloads.html`, `docs/downloads.md`. After the
+  Cloudflare deploy the live pages were polled: `/download` `current-release">0.3.83`,
+  `/docs/run-a-node` `0.3.83`, `/docs/downloads` `0.3.83`. GitHub `linux-latest`/`windows-latest`
+  and the `crewlyllc` mirror carry the manifest digests (`d9e663dd…`, `126b410c…`).
+  `seeds.json` has no version key by design.
+- **§8** `--verify-published --version 0.3.83` rc 0 — both assets downloaded anonymously,
+  sha256+size match the manifest, `PASS`.
+- **§9** this host updated itself through `gpn-update.service`: `confirmed 0.3.83 is running`
+  22:52:10 PT (22 s after the swap), RPC `system_version` ⇒ `0.3.83`, process is
+  `~/.local/bin/gpn-node` pid 969554; `~/.gpn/update/current.previous` ⇒ `versions/0.3.82`
+  (full binary set retained). The AP restarted on the new `gpn_scheduler` (22:51:47).
+- **§10** live behaviour: **287** — AP handed the provider `the request leaves 899s` (media
+  deadline 900 s vs the old 180 s); `POST /v1/images/generations {"model":"sd-turbo",…}` 06:53:51Z
+  ⇒ 202 ⇒ `completed` at +40 s, `channel 9`, `job 1795762431371`, artifact HTTP 200, 491,658 B
+  PNG 512×512, sha256 `bfe0920368b3…02d6` == the API's own hash. **288** — a failed request at
+  06:53:19Z (provider refused HTTP 425, model genuinely cold) left no wedge:
+  `hub_channels.json` channel 9 ⇒ `pending {}`, `settled_jobs [1795747531176, 1795762431371]`,
+  log `settled on channel 9 (job 1795762431371) — 1 image(s)`.
+- **§10b + §0b** timing recorded (`total 3h56m`; slowest step 1h35m = 287's live half waiting on
+  the Windows build), checklist moved to `archive/0.3.83.md`, INDEX row added.
+- **GPN-LIST** rows 287 and 288 → `COMPLETE 0.3.83` with the evidence above.
+
+Left open by design: **273** (seven-day soak, day 3/7, box ticks 2026-12-02) and **256** (needs a
+clean Windows guest; the run-a-node walkthrough stamp therefore stays 0.3.80 even though the
+release facts stamp moved to 0.3.83).
+
+One self-inflicted detour worth recording: the first 287 attempt used `"model":"gpn-image"`,
+which is not an alias the diffusion provider knows, so it refused HTTP 425 with a
+`gpn-image` HF pull (401, repo does not exist). The documented model is `sd-turbo`
+(`website/ai.html`); the retry with `sd-turbo` is the proof above. The refusal itself is correct
+behaviour, but the error names a repo a stranger cannot fetch — a candidate for a follow-up row.
+No blockers; nothing needs a decision.
+
 ## 21:45 PT — 0.3.83: CI windows job still building (step 6/14); cut re-checked and still gated
 
 A0: HEAD `9bdd5dd7` (docs) — `?head_sha=9bdd5dd7…` ⇒ `total_count: 0`, correct for a docs-only SHA.
