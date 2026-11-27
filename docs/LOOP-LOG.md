@@ -1,3 +1,23 @@
+## 21:45 PT — 0.3.83: CI windows job still building (step 6/14); cut re-checked and still gated
+
+A0: HEAD `9bdd5dd7` (docs) — `?head_sha=9bdd5dd7…` ⇒ `total_count: 0`, correct for a docs-only SHA.
+The code run **`45937187011`** (`a57f030f`) is still `in_progress`: `fmt + clippy`, `secret-scan`,
+linux all `success`; the windows job claimed box 1 at **05:17:24Z** and at **05:41Z** is on step
+6/14 `Build + test gpn-node (release)` — actively compiling, not stalled. Run age 1h43m but the
+windows job is only 24 min old (it queued behind `release-windows` run `45939164076`, which is the
+documented single-slot contention, not a fault) → **not cancelled**.
+
+§7 `release-cut` still refused pending that run; nothing else in the file can move before the cut
+(§5's remaining SSH box and §3b's 287/288 live halves all need the deployed 0.3.83 binary).
+No box ticked this run — no box was completable without the cut, and ticking one on intent is
+exactly what the evidence rule forbids.
+
+Row 273 (7-day soak, in flight): day 3 recorded on schedule — `docs/soak-2026-11-25.md` now carries
+Day 1/2/3, `~/.gpn/telemetry/2026-11-27.json` written 16:20Z; `gpn-soak-record.timer` next fire
+09:07 PT. Day 7 = 2026-12-02.
+
+Next run: re-read `45937187011` once; on `success` run `scripts/release-cut.sh --timeout 300`.
+
 ## 21:2x PT — 0.3.83: windows build green, both assets cosign-verified; cut gated on CI
 
 A0: `origin/main` HEAD before this run `0ea55efd` (docs) — `2026-11-27T05:18Z`. The code CI run
