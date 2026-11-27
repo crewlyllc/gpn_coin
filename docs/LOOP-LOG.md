@@ -1,3 +1,46 @@
+## 02:17 PT — 256: the last unvaried variable is varied — a Windows 11 CLIENT guest (build 26100) is installed and installing unattended on box 1; GPU-PV verdict next run
+
+A0: origin/main HEAD `92308fe2` (docs: 256 iGPU partition + driver on GPN-209) ⇒
+`?head_sha=92308fe2fcf5a4b64bdac76b2e2337c3332fc316` ⇒ `total_count: 0` — correct for a docs-only SHA
+(`ci.yml` paths-ignore: `GPN-LIST.md`, `docs/**`). Nothing red, nothing in flight.
+
+**No release is open** (0.3.83 published and archived; the two unticked boxes are 256 and 273, both
+IN-PROGRESS rows), so this run worked the first unticked box: **256**, continuing the venue question
+the 02:55 run left: *is the guest failure a Server-2022 `vrd.sys` problem or is GPU-PV simply not
+available here?*
+
+**Work done (real, measured):**
+- Verified the two remaining candidate venues before building anything new: **box 3 is in use** — a
+  full provider stack is live there (`gpn_node` supervisor + `gpn-node` + 4 providers, all started
+  00:51 PT, listening 9944/30333/8093), so a stranger install there would fight the running test
+  nodes and would not be "clean" anyway. **box 4 is still off the tailnet** (`scripts/box4.sh` ⇒
+  ssh rc=255, SOCKS general failure, 2 attempts). box 1 has no DDA device and its consumer GeForce
+  cannot do GPU-PV, so a guest on box 1 is the only venue left on hardware we control.
+- Downloaded the one guest OS whose `vrd.sys` has not yet been tried: **Win11 Enterprise eval 24H2,
+  build 26100** — `D:\iso\win11eval.iso`, 5,387,960,320 B, sha256
+  `755A90D43E826A74B9E1932A34788B898E028272439B777E5593DEE8D53622AE`, curl rc=0 at 02:11, hash at
+  02:13. (The failing guest is Server 2022 `10.0.20348.1`; the host is Win11 22621 — 26100 is a third,
+  independent `vrd.sys`.)
+- Built and started **GPN-210**: gen2, SecureBoot On, vTPM True, 4 vCPU, 8 GB startup, 80 GB VHDX on
+  D:, `Default Switch`, answer file `C:\gpn-vm\unattend210.xml` on a 64 MB FAT32 VHDX (image index 1,
+  local admin `gpn`). Log `D:\iso\build210.log` ⇒ `unattend vhdx staged` / `VM built:
+  secureboot=On tpm=True` / `VM started: state=Running` at 02:14:15 PT. Handles: task `gpn-build210`,
+  script `C:\gpn-vm\build-210.ps1`.
+- **Run ended here on purpose** (dispatch-and-end): the unattended install is a 20-40 min job and
+  waiting inside the run is what produced the three-hour timeouts. Handle written into the 0.3.83
+  checklist §3b box 256.
+
+**Next run (256):** PowerShell Direct into GPN-210, attach the **Intel UHD 630** partition only, stage
+the host-matched DCH package (`31.0.101.2140`), read `Get-PnpDevice -Class Display` + the OpenCL
+vendor keys. Code 43 again on 26100 ⇒ GPU-PV is not a stranger-gate venue on any guest OS on this
+host and the gate needs a physical stranger machine (that is an owner question, [TRIAGE]).
+Device healthy ⇒ run `stranger-lifecycle.ps1` steps 3-6 on it.
+
+**273 (soak):** day 4 is the `gpn-soak-record.timer` tick's job, not this run's.
+
+No [TRIAGE] this run: the venue work was all execution, and the only decision point (physical machine
+vs GPU-PV) is not reached until the 26100 result exists.
+
 ## 02:55 PT — Intel iGPU partition attached and its driver installed on the clean guest; GPU-PV still fails at the guest driver (code 43) on BOTH GPUs, and DDA is unavailable on box 1 — venue question narrowed again, still no owner answer needed
 
 A0: origin/main HEAD `1665170e` (docs: 256 stranger gate on a clean guest) ⇒ `?head_sha=` (full 40)
