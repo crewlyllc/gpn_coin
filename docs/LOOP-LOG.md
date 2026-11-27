@@ -1,3 +1,64 @@
+## 06:12 PT — AUDIT (6-hourly): clean, 2.1 G of stale 0.3.82 verification copies removed, disk 24.8% → 25.3% free
+
+**Units.** `systemctl --user list-units 'gpn*' --all` = 27 units; every `enabled` one is `active/running`
+(accesspoint, diffusion, explorer, faucet, finetune, fleet-directive, fleet, oracle, provider-heartbeat,
+provider) and the only dead ones are the `static`/`disabled` helpers (ci-cache-prune, prune-ci-cache,
+cadence-gate, deploy-drift, incident-alarm, soak-record, ap-topup, node, update) — each paired with a live
+timer or deliberately one-shot. `list-unit-files | grep gpn` shows no enabled-but-dead unit. **No fault.**
+
+**Ports.** 9944, 8092, 8093, 8099, 11434 all OPEN (`/dev/tcp` probe). `:8092/v1/models` lists 5 models
+(deepseek-r1:14b/7b, llama3.2:1b, qwen2.5:0.5b/7b); `:8093/health` = `{"status":"ok"}`; `:8099` = HTTP 200.
+
+**Chain.** `system_chain` GPN Public Testnet, `system_version` 0.3.83, `system_health` peers=4 isSyncing=false,
+`system_peers` count=4; block number sampled twice 30 s apart: **373393 → 373399 (+6)**. `finalized #0` is
+unchanged and already documented as expected for this PoW chain (LOOP-LOG 3818, 7867) — observation, not fault.
+
+**Logs, read not skimmed.** `journalctl --user -u gpn-fleet -n 300` = 300 lines, all normal footer/consensus
+traffic (GPU sealed block, `Imported #373394`, self-heal divergence verdict `match` at checkpoint #372969).
+`journalctl --user -u gpn-fleet --since -24h | grep -icE "panic|Banned|Reason:|Incompatible pruning|taskkill"`
+= **0**. Provider/diffusion/accesspoint/faucet/explorer/oracle/finetune error grep over 6 h = 0 each.
+One hit in `gpn-provider-heartbeat`: `04:02:24 [heartbeat] push failed: no local libp2p identity yet (node RPC
+unreachable) (non-fatal; continuing poll-only until it recovers)` — the fleet log for 04:00–04:04 shows the node
+importing #372964/#372965 normally at that minute, i.e. a heartbeat-side websocket blip that self-recovered (no
+failure line since, `/status` healthy, `gflops=825` `attested-idle`, `gflops_samples [824,825,825]`). The
+startup `gflops=0` warning at 22:51:48 is stale — attestation has since landed.
+
+**Updater.** `~/.gpn/update/update-attempts.json` last entry: version 0.3.83, `outcome: confirmed`,
+`attempts: 1`, `release_id d9e663dd…4e6ca6`, `at 1795762330` (= 2026-11-26 22:51, matching
+`gpn-fleet` ActiveEnterTimestamp 22:51:48, NRestarts=0). `current -> versions/0.3.83`. **No failed attempt.**
+
+**Release loop.** `openclaw cron runs --id feff1358…` latest = `status: ok`, duration 49 min, summary row 289
+(install-ollama streaming fix, `9c3a5826`). No timeout, no error.
+
+**Box 1 (cross-network).** `scripts/box1.sh` → `(Get-Process gpn-node).Path` =
+`C:\gpn\data\update\current\gpn-node.exe`; its own `:9944` answers `system_version` = **0.3.83**. Matches host.
+
+**Release record.** 0.3.83 has `docs/releases/INDEX.md` row, `docs/releases/archive/0.3.83.md` (57 KB), and
+`GPN-LIST.md` COMPLETE rows (287, 288). Version triangle checked: site `releases.json` 0.3.83 == running node
+0.3.83 == the release_id/sha256 in the updater ledger (`d9e663dd…` = the linux asset sha256). **Consistent.**
+
+**Disk — free measured first: 109 G / 439 G = 24.8%**, i.e. under the 25% line, so cleanup ran before anything
+else. Removed (all `lsof +D` empty, all re-downloadable, all >12 h old, all superseded 0.3.82 verification):
+`/tmp/v082` 1.3 G (15 h), `/tmp/wz` 524 M (16.7 h), `/tmp/gpn-windows-0.3.82.zip` 242 M (16.8 h) → **111 G
+free = 25.3%**. Also dropped 30 `/tmp/*.log` >7 d (1.5 M). Left alone deliberately: `/tmp/win083` (766 M),
+`/tmp/art083` (507 M), `/tmp/cosigncheck` (333 M) — 0.3.83 verification, 8–10 h old, inside the 12 h window.
+
+**Top five consumers (measured this run).**
+1. `~/.ci-cache` **96 G** (gpn-agent-target 77 G, gpn-node-target 20 G) — owner decision 2026-11-20: not deleted;
+   the daily prune unit ran at 04:20 and reclaimed 3 070 MiB on its own, cache still 95 GiB, 19 553 files >7 d.
+2. `~/.cache/huggingface` **53 G** — models, never delete.
+3. `~/.gpn` **24 G** (models 16 G, node 2.3 G, ollama 2.1 G, update 2.0 G = versions 0.3.82 983 M + 0.3.83 984 M).
+4. `~/.openclaw/workspace` **15 G** — of which `shared/` 15 G (data, never delete); no `*/target/debug` has
+   reappeared anywhere under the worktrees (checked, `pgrep -x cargo` and `pgrep -x rustc` both empty).
+5. `~/ollama` **8 G** — provider weights, never delete. (Next: `/tmp` 4.3 G → 2.2 G after cleanup,
+   `plugin-runtime-deps` 1.5 G needed by plugins, `agents/main/sessions` 375 M, `cron/runs` 33 M.)
+
+**Memory/resources.** `free -h`: 31 Gi total, 23 Gi available (>4 GiB floor ✓); swap **2.0 Gi of 2.0 Gi used**
+with 22 Gi in buff/cache — not a fault under the brief's rule, but the swap file is saturated; worth watching.
+Load 2.81/2.69/3.03 on 20 days uptime. GPU mining healthy (`GPU sealed block: nonce=91165638`, `GPU healthy` in
+sealer lines). Nothing rebuilt, nothing restarted — no fix was needed beyond the disk step.
+
+**Verdict: clean, 1 cleanup action (2.1 G).** No `[TRIAGE]`, nothing added to `docs/NEEDS-TRIAGE.md`.
 ## 06:10 PT — 289: the ollama download buffered 1.9 GB in RAM on a 3 GB guest and blamed ollama for it — fixed to a streaming download with bounded retries; the same guest now installs to a running node
 
 A0: origin/main HEAD `bdf9d6036eee` (row 292 docs) ⇒ CI run `46005222188` `in_progress` at start and still in flight at
