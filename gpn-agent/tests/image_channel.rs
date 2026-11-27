@@ -42,6 +42,12 @@ enum Behaviour {
     ServeSlowMs(u64),
     Refund,
     Reject409,
+    /// Row 288: the first POST is answered `409 StaleStateBefore` carrying the
+    /// **ahead** state the provider really holds (its mirror advanced when it
+    /// accepted a job whose result the AP never applied). Every later POST is
+    /// accepted only if its `state_before` is that ahead state — which is what
+    /// "adopt the provider's copy" means.
+    Reject409WithState,
     GarbageResult,
 }
 
@@ -70,6 +76,8 @@ fn start_stub(
     let artifacts_c = artifacts.clone();
     let handle = std::thread::spawn(move || {
         let mut chans: HashMap<u64, ProviderChannel> = HashMap::new();
+        // Row 288: the state the provider claims to hold, once it has 409ed.
+        let mut ahead: Option<gpn_agent::hub_channel::ChannelState> = None;
         for mut req in server.incoming_requests() {
             let url = req.url().to_string();
             let path = url.split('?').next().unwrap_or("").to_string();
@@ -140,6 +148,35 @@ fn start_stub(
             let ch = chans
                 .entry(a.channel_id)
                 .or_insert_with(|| ProviderChannel::new(a.channel_id, DEPOSIT, ap_pub));
+            if behaviour == Behaviour::Reject409WithState {
+                match ahead {
+                    None => {
+                        // Our mirror is one update ahead of the AP's: pretend a
+                        // job it never learnt about was accepted (nonce +1,
+                        // provider +1000).
+                        let b = a.state_before;
+                        let s = gpn_agent::hub_channel::ChannelState {
+                            balance_requestor: b.balance_requestor - 1000,
+                            balance_provider: b.balance_provider + 1000,
+                            nonce: b.nonce + 1,
+                        };
+                        ahead = Some(s);
+                        let _ = req.respond(
+                            tiny_http::Response::from_string(
+                                serde_json::json!({
+                                    "ok": false,
+                                    "error": "assignment rejected: state_before is not the current channel state",
+                                    "state": s,
+                                })
+                                .to_string(),
+                            )
+                            .with_status_code(409),
+                        );
+                        continue;
+                    }
+                    Some(s) => ch.state = s,
+                }
+            }
             if let Err(e) = ch.accept(&a) {
                 let _ = req.respond(
                     tiny_http::Response::from_string(
@@ -162,7 +199,7 @@ fn start_stub(
             })
             .to_string();
             let msg = match behaviour {
-                Behaviour::Serve | Behaviour::ServeSlowMs(_) => {
+                Behaviour::Serve | Behaviour::ServeSlowMs(_) | Behaviour::Reject409WithState => {
                     if let Behaviour::ServeSlowMs(ms) = behaviour {
                         std::thread::sleep(Duration::from_millis(ms));
                     }
@@ -400,6 +437,38 @@ fn happy_path_202_poll_completes_with_zero_transactions() {
         f.stub.artifacts.load(Ordering::SeqCst),
         1,
         "bytes fetched once"
+    );
+
+    let _ = std::fs::remove_dir_all(f.state_path.parent().unwrap());
+}
+
+/// Row 288: the provider's mirror is one update ahead, so it answers
+/// `409 StaleStateBefore` **carrying the state it holds**. The AP must adopt
+/// that state and retry once. Before the fix it re-priced from its own stale
+/// mirror three times, got three identical 409s, and every later image request
+/// on that channel answered 503 until a human edited `hub_channels.json`.
+#[test]
+fn a_stale_state_409_is_answered_by_adopting_the_providers_state() {
+    let _s = serialize();
+    let f = fixture(Behaviour::Reject409WithState, true);
+
+    let out = run(&f, 10).expect("the retry after adopting the provider's state must succeed");
+    assert_eq!(out.channel_id, 42);
+
+    // The AP now holds the provider's state (nonce 1 from the phantom advance)
+    // plus its own update for the served job: two nonces ahead of where it
+    // started, and the provider was paid for the job we actually ran.
+    let ch = channel(&f);
+    assert_eq!(ch.state.nonce, 2, "adopted nonce + this job's update");
+    assert_eq!(
+        ch.state.balance_provider, 1010,
+        "phantom 1000 + the 10 this render cost"
+    );
+    assert_eq!(ch.pending_len(), 0);
+    assert_eq!(
+        f.stub.jobs.load(Ordering::SeqCst),
+        2,
+        "exactly one 409 and one accepted POST"
     );
 
     let _ = std::fs::remove_dir_all(f.state_path.parent().unwrap());

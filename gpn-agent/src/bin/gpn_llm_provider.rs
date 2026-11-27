@@ -513,9 +513,17 @@ fn serve_channel_job(
         }
     };
     if let Err(e) = ch.accept(&a) {
+        // Row 288: hand the AP the state we actually hold. Without it the AP
+        // re-prices from its own stale mirror and every retry is rejected the
+        // same way, wedging the channel until an operator deletes the pending
+        // entry by hand.
         return (
             409,
-            serde_json::json!({"ok": false, "error": format!("assignment rejected: {e}")}),
+            serde_json::json!({
+                "ok": false,
+                "error": format!("assignment rejected: {e}"),
+                "state": ch.state,
+            }),
         );
     }
     // Persist the accepted (pre-paid) state BEFORE running the work, so a crash

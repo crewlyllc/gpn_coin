@@ -631,9 +631,15 @@ fn serve_audio_job(ctx: &ChannelCtx, a: Assignment) -> (u16, serde_json::Value) 
         ch.sync_to_assignment(&a);
         if let Err(e) = ch.accept(&a) {
             eprintln!("[channel] job {} rejected: {e}", a.job_id);
+            // Row 288: include the state we actually hold, so the AP can adopt
+            // it instead of re-pricing from its stale mirror forever.
             return (
                 409,
-                json!({"ok": false, "error": format!("assignment rejected: {e}")}),
+                json!({
+                    "ok": false,
+                    "error": format!("assignment rejected: {e}"),
+                    "state": ch.state,
+                }),
             );
         }
     }
@@ -877,9 +883,15 @@ fn serve_channel_job(ctx: &ChannelCtx, body: &str) -> (u16, serde_json::Value) {
         ch.sync_to_assignment(&a);
         if let Err(e) = ch.accept(&a) {
             eprintln!("[channel] job {} rejected: {e}", a.job_id);
+            // Row 288: include the state we actually hold, so the AP can adopt
+            // it instead of re-pricing from its stale mirror forever.
             return (
                 409,
-                json!({"ok": false, "error": format!("assignment rejected: {e}")}),
+                json!({
+                    "ok": false,
+                    "error": format!("assignment rejected: {e}"),
+                    "state": ch.state,
+                }),
             );
         }
     }

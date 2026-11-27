@@ -769,6 +769,11 @@ fn run_channel_job(
                     && (detail.contains("state_before") || detail.contains("StaleStateBefore"));
                 if stale {
                     abort_pending(hub, provider_addr_hex, job_id);
+                    // Row 288: the 409 body carries the provider's real state;
+                    // adopt it, or the next attempt re-signs the same stale
+                    // `state_before` and the channel wedges until a human
+                    // edits `hub_channels.json`.
+                    adopt_state_from_409(hub, provider_addr_hex, &detail);
                     if attempt >= STALE_STATE_ATTEMPTS {
                         eprintln!(
                         "[hub] job {job_id}: channel state still stale after {attempt} attempt(s) — \
@@ -941,6 +946,45 @@ fn expire_pending(hub: &HubCtx, provider: &str, job_id: u64) {
     }
 }
 
+/// Row 288: the provider answered 409 because our `state_before` was stale, and
+/// its body carries the state it actually holds. Adopt that state so the retry
+/// is priced off the provider's copy instead of our own stale mirror — the
+/// retry-from-mirror loop was the bug (`StaleStateBefore` forever, then every
+/// later job on the channel 409s until a human edits the JSON).
+///
+/// Returns true when a state was adopted (and the retry is worth making).
+fn adopt_state_from_409(hub: &HubCtx, provider: &str, detail: &str) -> bool {
+    #[derive(serde::Deserialize)]
+    struct Reject {
+        state: Option<crate::hub_channel::ChannelState>,
+    }
+    let Some(state) = serde_json::from_str::<Reject>(detail)
+        .ok()
+        .and_then(|r| r.state)
+    else {
+        return false;
+    };
+    let mut reg = hub.registry.lock().unwrap();
+    let Some(ch) = reg.channels.get_mut(provider) else {
+        return false;
+    };
+    match ch.adopt_provider_state(state) {
+        Ok(()) => {
+            let (channel_id, nonce, balance) =
+                (ch.channel_id, ch.state.nonce, ch.state.balance_provider);
+            let _ = reg.save(&hub.path);
+            println!(
+                "[hub] adopted provider state on channel {channel_id}: nonce {nonce} (provider balance {balance}) — re-pricing from the provider's copy"
+            );
+            true
+        }
+        Err(e) => {
+            eprintln!("[hub] provider 409 offered an unusable state: {e} (keeping our mirror)");
+            false
+        }
+    }
+}
+
 /// Drop a pending entry whose assignment provably never reached a provider.
 fn abort_pending(hub: &HubCtx, provider: &str, job_id: u64) {
     let mut reg = hub.registry.lock().unwrap();
@@ -1058,6 +1102,28 @@ pub fn spawn_settler(hub: Arc<HubCtx>, rt: Arc<tokio::runtime::Runtime>, client:
     }
     std::thread::spawn(move || loop {
         std::thread::sleep(Duration::from_secs(60));
+        // Row 288: a pending job whose deadline passed can never settle (the
+        // provider was paid only if it answered, and the answer never came).
+        // Leaving it in the registry blocks `pending_len() == 0` forever, so
+        // sweep every channel before deciding what is due. A live registry
+        // carried one dated 2026-10-23 — five weeks of no settlement.
+        {
+            let mut reg = hub.registry.lock().unwrap();
+            let mut dropped = 0usize;
+            for ch in reg.channels.values_mut() {
+                let n = ch.expire_due_pending();
+                if n > 0 {
+                    println!(
+                        "[hub] channel {}: expired {n} pending job(s) past their deadline (they can never settle)",
+                        ch.channel_id
+                    );
+                }
+                dropped += n;
+            }
+            if dropped > 0 {
+                let _ = reg.save(&hub.path);
+            }
+        }
         let due: Vec<(String, crate::hub_channel::CloseMaterial)> = {
             let reg = hub.registry.lock().unwrap();
             reg.channels

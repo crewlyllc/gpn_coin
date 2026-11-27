@@ -867,6 +867,48 @@ impl HubChannel {
         }
     }
 
+    /// Row 288: drop every pending job whose deadline has passed.
+    ///
+    /// `spawn_settler` only settles when `pending_len() == 0`, and the only
+    /// caller of [`Self::expire_pending`] is the abort-on-serialization-failure
+    /// path — so a job whose result never arrived (the AP gave up, the provider
+    /// finished anyway) left a **permanent** `pending` entry. A live registry
+    /// carried one dated `2026-10-23`; that channel had not settled in the five
+    /// weeks since. Returns how many entries were dropped.
+    pub fn expire_due_pending(&mut self) -> usize {
+        let now = now_ms();
+        let before = self.pending.len();
+        self.pending.retain(|_, p| p.deadline_ms >= now);
+        before - self.pending.len()
+    }
+
+    /// Row 288: adopt the provider's current channel state after it rejected our
+    /// `state_before` as stale.
+    ///
+    /// The provider's mirror is the one that advances first — `accept` commits
+    /// the payment to it before the work runs, while ours only advances when a
+    /// *result* is applied. When it answers `StaleStateBefore` and hands back the
+    /// state it actually holds, re-pricing from our own copy is guaranteed to be
+    /// rejected again (that was the live 409 loop: three identical attempts).
+    ///
+    /// Adopt only a state that is strictly ahead, conserved against our deposit,
+    /// and no worse for the provider; anything else is a lie and is refused.
+    /// Pending entries are left alone — the deadline sweep retires the ones that
+    /// can never settle.
+    pub fn adopt_provider_state(&mut self, state: ChannelState) -> Result<(), HubError> {
+        if !state.is_conserved(self.deposit) {
+            return Err(HubError::StateNotConserved);
+        }
+        if state.nonce <= self.state.nonce {
+            return Err(HubError::NonceNotAdvancing);
+        }
+        if state.balance_provider < self.state.balance_provider {
+            return Err(HubError::ProviderBalanceDecreased);
+        }
+        self.state = state;
+        Ok(())
+    }
+
     /// Drop a pending job that **provably never ran**: the assignment was never
     /// delivered, or the provider rejected it at accept-time. Returns true if it
     /// was pending.
@@ -2228,5 +2270,84 @@ mod tests {
         ch.complete_job(&r).unwrap();
         assert_eq!(ch.state.balance_provider, 0);
         assert_eq!(ch.state.balance_requestor, deposit);
+    }
+
+    /// Row 288: a pending job past its deadline must never block settlement.
+    /// The live registry carried one dated 2026-10-23 on channel 7; because
+    /// `spawn_settler` only settles when `pending_len() == 0`, that channel had
+    /// not settled in five weeks.
+    #[test]
+    fn a_pending_job_past_its_deadline_is_swept_so_settlement_is_not_blocked() {
+        let (_ap, _prov, mut ch, _pch) = setup(1_000);
+        let before = ch.state;
+        ch.pending.insert(
+            1,
+            Pending {
+                price: 100,
+                deadline_ms: now_ms().saturating_sub(1),
+                before,
+                after: ChannelState {
+                    balance_requestor: 900,
+                    balance_provider: 100,
+                    nonce: 1,
+                },
+            },
+        );
+        ch.pending.insert(
+            2,
+            Pending {
+                price: 10,
+                deadline_ms: now_ms() + 60_000,
+                before,
+                after: ChannelState {
+                    balance_requestor: 990,
+                    balance_provider: 10,
+                    nonce: 1,
+                },
+            },
+        );
+        assert_eq!(ch.pending_len(), 2);
+        assert_eq!(ch.expire_due_pending(), 1, "only the expired entry goes");
+        assert_eq!(ch.pending_len(), 1, "the live job is untouched");
+        assert_eq!(ch.expire_due_pending(), 0, "sweep is idempotent");
+    }
+
+    /// Row 288: the provider's state is authoritative only when it is strictly
+    /// ahead, conserved against the deposit, and no worse for the provider.
+    /// Anything else is refused **without mutating** the channel.
+    #[test]
+    fn the_providers_state_is_adopted_only_when_it_is_ahead_and_conserved() {
+        let (_ap, _prov, mut ch, _pch) = setup(1_000);
+        let ahead = ChannelState {
+            balance_requestor: 900,
+            balance_provider: 100,
+            nonce: 1,
+        };
+        ch.adopt_provider_state(ahead).unwrap();
+        assert_eq!(ch.state, ahead, "adopted the provider's copy");
+        assert_eq!(
+            ch.adopt_provider_state(ahead),
+            Err(HubError::NonceNotAdvancing),
+            "a state we already hold is not news"
+        );
+        assert_eq!(
+            ch.adopt_provider_state(ChannelState {
+                balance_requestor: 500,
+                balance_provider: 100,
+                nonce: 2,
+            }),
+            Err(HubError::StateNotConserved),
+            "value appeared out of nowhere"
+        );
+        assert_eq!(
+            ch.adopt_provider_state(ChannelState {
+                balance_requestor: 1_000,
+                balance_provider: 0,
+                nonce: 2,
+            }),
+            Err(HubError::ProviderBalanceDecreased),
+            "an AP clawback claim is not a stale state"
+        );
+        assert_eq!(ch.state, ahead, "a refused state never mutates the channel");
     }
 }

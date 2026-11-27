@@ -1,3 +1,41 @@
+## 19:5x PT 0.3.83 box 2 (row 288) — stale-state 409 now adopts the provider's state; expired pendings swept
+
+A0: `origin/main` HEAD `d08d6a6f80ef9c17900c0317b243dbe0ae52bccc` (docs) had nothing red when this
+run started; a CI run for `9681a390` (the 0.3.83 cut) was still `pending` on the single-slot
+runner — noted, not waited on.
+
+**Row 288 — the cause, fixed (two mechanisms, both measured live on 2026-11-26).**
+1. *The wedge.* The AP's `state_before` is priced from `HubChannel::state`, which only advances when
+   a **result** is applied; the provider's mirror advances at `accept`. When the AP timed out a job
+   the provider had already accepted (row 287), the provider sat one nonce ahead forever, answered
+   `409 StaleStateBefore` to every later assignment, and the retry branch re-signed the same stale
+   `state_before` three times → `channel state stayed stale after 3 attempts`. Fix: both providers
+   (`gpn_llm_provider`, `gpn_diffusion_provider` image + audio) now return `"state": <their current
+   state>` in the 409 body, and the AP's stale branch calls `adopt_state_from_409` →
+   `HubChannel::adopt_provider_state`. Adoption is refused unless the state is strictly ahead,
+   conserved against the deposit, and no worse for the provider (a clawback claim is not a stale
+   state); a refused state never mutates the channel.
+2. *The leak.* `spawn_settler` settles only when `pending_len() == 0` and `expire_pending` had one
+   caller (abort-on-serialization-failure), so a job whose result never arrived left a permanent
+   `pending` — the live registry carried one dated **2026-10-23** and channel 7 had settled nothing
+   in five weeks. Fix: `HubChannel::expire_due_pending()` runs at the top of the settler's 60 s loop
+   for every channel, drops entries past their deadline, logs the count and saves the registry.
+
+**Tests (fails before, passes after).** New `a_stale_state_409_is_answered_by_adopting_the_providers_state`
+(stub answers 409 once with an ahead state, then accepts only a matching `state_before`). With the
+adopt call commented out it fails with the exact live string:
+`NotAttempted("… HTTP 409: channel state stayed stale after 3 attempts ({\"error\":\"state_before is not the current channel state\",\"ok\":false})")`
+(0 passed / 1 failed). Restored: `--test image_channel` **12 passed / 0 failed**. Plus `--lib` unit
+tests `a_pending_job_past_its_deadline_is_swept_so_settlement_is_not_blocked` and
+`the_providers_state_is_adopted_only_when_it_is_ahead_and_conserved`; `--lib hub` 42/42,
+`--test channel_settle` 11/11, `cargo fmt --check` rc 0, clippy `--release --all-targets` with
+ci.yml's CLIPPY_ALLOWS + `-D warnings` clean.
+
+**Not ticked:** both 287 and 288 need the 0.3.83 binary for their live half (a channel already
+carrying the stale pending must settle by itself after the update restart). Same sha must go green
+in CI, then §5 build → §7 cut → §9 deploy. Next box: §4 green check on this commit's run.
+No blocker, no [TRIAGE].
+
 ## 20:0x PT 0.3.83 box 1 (row 287) — media jobs get their own deadline; code+test green, live half rides §7/§9
 
 A0: HEAD `9681a390` (release 0.3.83 cut) had one CI run `45931500621` — `pending` at 19:17 PT
