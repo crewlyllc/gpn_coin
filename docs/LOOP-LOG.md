@@ -1,3 +1,23 @@
+## 15:16 PT 0.3.84 — release CI still building (alive, not stalled); §7 cut handle re-armed, run ended per dispatch rule
+
+- **A0 CI:** `origin/main` = `c5c43b85` (docs-only loop-log commit) ⇒ `total_count: 0` for the full
+  40-char sha, expected under `paths-ignore`; nothing to wait on.
+- **§7 `release-cut` — still the first unticked box, NOT ticked. Read run `46067336386` again.**
+  Run `in_progress`; `Build + unit tests (windows, self-hosted)` `140735756078` on `DESKTOP-USBUADL`:
+  step 6 `gpn-node (release)` success 22:02:52Z→22:42:51Z (40 min), step 7 `gpn-agent (release)`
+  in_progress from 22:42:51Z (32 min at 23:14Z). Liveness proved on box 1 over SSH at 23:12:41Z:
+  `cargo` pid 60816 (started 15:04:59 local) with `rustc` 44968/45580 spawned 15:12:40/41 local —
+  compiling, not hung. All other jobs `success`; the two `failure`s are the known
+  `continue-on-error` ones (macos: no runner; Dependency audit = row 298). 32 min < 90-min stale
+  rule ⇒ no cancel, no re-dispatch.
+- **Ended per dispatch rule.** Waiting 22 min in-run produced no conclusion; the cut is a local step
+  that must not race the next pass, and `release-cut.sh` holds an exclusive
+  `~/.gpn/release.lock.flock` (a concurrent cut prints `REFUSED: another release-cut holds …`), so
+  the next pass is safe to run it. Handle written into the box.
+- **Next pass:** poll `46067336386` once; on `success` run
+  `scripts/release-cut.sh --version 0.3.84 --timeout 300`, then §7 do surface boxes.
+- No blocker, no decision needed.
+
 ## 14:40 PT 0.3.84 — §5 attestation + §6 scan/version TICKED on the shipping digest; release-cut ABORTed at the CI gate (run 46067336386 still in_progress, handle recorded)
 
 - **A0 CI:** `origin/main` = `ac58946a` (docs-only loop-log commit) ⇒ `total_count: 0` for the full
