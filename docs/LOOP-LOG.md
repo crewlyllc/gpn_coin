@@ -1,3 +1,20 @@
+## 13:20 PT 0.3.84 — cycle-2 linux build green and proven; windows build queued behind a live CI job
+
+- **A0 CI:** `origin/main` = `29b0285b752f` (docs-only loop-log/checklist commit) ⇒
+  `total_count: 0`, expected under `paths-ignore`.
+- **§5 linux (cycle 2):** run `46067302695` (`build/bd36c4f9d561`) **completed success** 21:11:18Z.
+  Asset 802065298 re-downloaded from the release asset API: 349,136,775 B,
+  sha256 `660f75854c91c055…93d36e9` == API digest. `./gpn-node --version` ⇒ `gpn-node 0.3.84`;
+  `./gpn_node --version` ⇒ `gpn_node 0.3.84 (spec 55, bd36c4f)` — the right tree this time.
+  §6 linux string scan re-earned (`display-adapter list names no usable GPU`, `vc_redist`,
+  `reorg=`, `work ours=`, `gpn-forked`). Boxes ticked with that evidence.
+- **§5 windows (cycle 2):** run `46067304988` still `queued`. Measured cause: `DESKTOP-USBUADL`
+  `busy: true` running job `140712499859` (Windows build+unit tests of CI run `46058162194`,
+  sha `2c79b4ef`, started 20:26Z, 47 min in, at `Post Run actions/checkout`). Contention, not a
+  fault, and not past the 40-75 min budget — not cancelled.
+- **Also queued:** CI `46067336386` (the run `release-cut` will insist on), behind the same runner.
+- Run ended after the tick, per the dispatch rule — no polling.
+
 ## 13:15 PT 0.3.84 rebuilt from main HEAD — first artifacts refused by release-cut's CI gate
 
 - **A0 CI:** `origin/main` = `6166d939` (docs-only loop log) ⇒ `total_count: 0`, no run expected.
