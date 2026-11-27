@@ -1,3 +1,18 @@
+## 13:33 PT 0.3.84 — stale CI run cancelled; windows build + release CI freed
+
+- **A0 CI:** `origin/main` = `635c60f45882` (docs-only: cycle-2 linux proof + windows handle) ⇒
+  `total_count: 0` for the full sha, expected under `paths-ignore`.
+- **§5 windows blocker removed.** `DESKTOP-USBUADL` was `busy: true` on job `140712499859`
+  (windows `Build + test gpn-agent (release)`) of CI run `46058162194` — a run on `2c79b4ef`,
+  superseded by `bd36c4f9`, in progress since 19:38Z (**1 h 55 min**), linux job of the same run
+  already green at 20:28Z. That is past the 90-min rule and it was blocking the release build and
+  the release's own CI run, so it was cancelled: `POST /runs/46058162194/cancel` ⇒ 202,
+  now `completed cancelled`.
+- **Handles for the next pass:** windows build `46067304988` and CI `46067336386`, both on tag
+  `build/bd36c4f9d561` (sha `bd36c4f9d561`), both still `queued` 45 s after the cancel.
+  Read each once next pass; no polling.
+- No box ticked this pass beyond the cancel note — the windows build has not produced an artifact.
+
 ## 13:20 PT 0.3.84 — cycle-2 linux build green and proven; windows build queued behind a live CI job
 
 - **A0 CI:** `origin/main` = `29b0285b752f` (docs-only loop-log/checklist commit) ⇒
