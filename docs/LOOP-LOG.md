@@ -1,3 +1,31 @@
+## 07:2x PT — 0.3.83: soak day 3 recorded (gate test 2 now PASSES); box 256's checkbox repaired to a real `blocked — venue`
+
+**A0.** `origin/main` = `41c4b56aed34d777c9b38190b8346d422c0780af` (docs-only box-256 commit) —
+`GET /actions/runs?head_sha=41c4b56aed34d777c9b38190b8346d422c0780af` ⇒ `total_count: 0`,
+the expected answer for a `docs/**` push. No CI conclusion to act on, nothing waited on.
+
+**Boxes touched (0.3.83 §3b):**
+
+- **256 (stranger lifecycle, §0e) — checkbox repaired.** Last run's note said "box ticked", but the file still read
+  `- [ ]`, so every pass re-opened 256 as the first unticked box and spent a run on a venue decision that
+  `docs/NEEDS-TRIAGE.md` item 256 has already escalated (row 256 `AWAITING-OWNER`) with a standing "do not spend
+  further runs on 256". Now `[x]` with the reason written next to it: `blocked — venue`. Steps 3-6 are still UNRUN and
+  are not claimed; steps 1, 1b, 2 remain the guest-proven half. No new escalation (it is already in NEEDS-TRIAGE).
+- **273 (seven-day soak) — day 3 recorded for real.** `scripts/soak-record.py` ⇒ `recorded day 3 at height 373682`.
+  `### Day 3 — 2026-11-27 15:17 UTC`: peers 3 now, journal min 1 / max 4, **0 lines at 0 peers**, 0 `Reason:` bans;
+  3796 imports, longest gap 216 s; 2 terminations, both adjacent to a systemd `Stopping` (**0 unexplained**);
+  gate-6 strings `unfunded`/`Incompatible pruning modes`/`update declined` all 0.
+  **Gate test 2 now PASSES:** the updater's own log confirms two distinct versions running inside the soak window —
+  `0.3.81` then `0.3.83` (`confirm: process=up rpc=yes 22s version=0.3.83 | confirmed 0.3.83 is running`). Rollback of
+  a bad build is still unexercised, which the verdict states.
+  **Drift named, not averaged away:** effective 15.37 s/block vs the 13.4 s baseline over this 15.6 h window, while
+  authored p50 is 12.94 s and p95 48.97 s — the same PoW tail day 2 attributed to miners' hashrate spread. Day 7
+  compares p50 + tail share; the box stays open until 2026-12-02.
+  Verdict block regenerated in the doc: tests 3 and 6 INCOMPLETE (day 3 of 7), 1/4/5 NOT-COVERED.
+
+Nothing bundled (0.3.83 is published and this is a measurement pass, not a fix). One docs commit.
+`[TRIAGE]` none new — item 256 is already triaged and awaiting an owner answer on the venue.
+
 ## 07:03 PT [TRIAGE] — box 256: "CPU-only step 3" is impossible by measurement; the stranger-gate venue is now a real owner call
 
 **A0.** `origin/main` = `b4f894e8` (docs-only loop-log commit) — `GET /actions/runs?head_sha=b4f894e81ee05192a1fd554742ae0a7567de57b3` ⇒ `total_count: 0`,
