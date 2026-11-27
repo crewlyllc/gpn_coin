@@ -1,3 +1,23 @@
+## 13:51 PT 0.3.84 — windows build read once (still building, not waited on); release CI mostly green
+
+- **A0 CI:** `origin/main` = `b93bdcb8` (docs-only) ⇒ `total_count: 0` for the full sha, expected
+  under `paths-ignore`.
+- **§5 windows, first unticked box — read once, not ticked.** Run `46067304988` (`Windows binaries`,
+  sha `bd36c4f9d561`) is `in_progress`: job `140735652287` on `DESKTOP-USBUADL`, started 21:33:23Z
+  (18 min in), steps 1-9 `success` (encoding guard, git config, deps, rust, build agent,
+  polkadot-sdk pre-checkout), **step 10 `build node` `in_progress`**, steps 11-23 pending (prune,
+  upload, ollama pre-flight, deploy + restart `C:\gpn\bin`, launcher verify, zip, attest,
+  provenance gate, publish `windows-latest`). No artifact ⇒ no tick. Ran to the 40-75 min build
+  window by the owner rule: dispatch, record the handle, end the run.
+- **Release CI `46067336386` (tag `build/bd36c4f9d561`) read in one query:** secret-scan `success`,
+  `fmt + clippy` `success` (21:20:32Z), two-node GPU testnet `success` (21:18:38Z), **linux build
+  `140743287977` `success` 21:41:21Z**; `windows, self-hosted` `140735756078` still `queued` behind
+  the release build on the single-slot runner. The only two `failure` jobs are the already-diagnosed
+  `continue-on-error` ones (macos: no runner assigned, 2 s, `BlobNotFound`; `Dependency audit`:
+  licenses, filed as row 298). Nothing new to fix here.
+- No blocker, no decision needed. Next pass: read `46067304988` once — if `success`, tick §5 windows
+  and move to §6 (verify the artifact before publishing).
+
 ## 13:36 PT 0.3.84 — stale CI run cancelled, windows build now RUNNING; two CI failures diagnosed
 
 - **A0 CI:** `origin/main` = `635c60f4` (docs-only) ⇒ `total_count: 0` for the full sha, expected.
