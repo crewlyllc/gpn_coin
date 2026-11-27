@@ -1,3 +1,22 @@
+## 13:15 PT 0.3.84 rebuilt from main HEAD — first artifacts refused by release-cut's CI gate
+
+- **A0 CI:** `origin/main` = `6166d939` (docs-only loop log) ⇒ `total_count: 0`, no run expected.
+- **§5 first cycle proven, then refused.** Windows run `46053214955` completed **success** at
+  20:26Z (all 23 steps, incl. deploy to `C:\gpn\bin`, keyless cosign sign, provenance gate before
+  publish). §5's attestation, `cosign verify-blob` (`Verified OK`), §6 string scan and `--version`
+  boxes were ticked with that evidence.
+- **Then `release-cut.sh` aborted at step 3**: `no CI run for 66f5353; its nearest verified
+  ancestor 56fcd99 is 'completed:cancelled' -- refusing to sign an unverified build`. Cause read
+  from the cancelled run's log: CI at `56fcd99` **failed step 13** `Autostart installers` with
+  `scripts/tests/test-install-ollama-download.ps1 contains non-ASCII bytes (breaks Windows
+  PowerShell 5.1 parsing)` (same for `job-object-probe.ps1`). The fix `2c79b4ef` landed on main
+  **after** the tag was cut, so the built tree is a tree CI never passed.
+- **Fix, not a bypass:** rebuilt from `main` HEAD `bd36c4f9` (= 66f5353 + ASCII fix + docs).
+  Dispatched 13:14 PT on tag `build/bd36c4f9d561`: linux `46067302695`, windows `46067304988`,
+  CI `46067336386` (the gate's witness). Handles written into §5; run ended without polling.
+- Lesson for the loop: **do not cancel a CI run for the release SHA or its ancestors** — a
+  `cancelled` verdict is a hard abort in `release-cut.sh`, and it cost this cycle two builds.
+
 ## 12:16 PT 0.3.84 §5 windows build still building — dispatched, not waited on
 
 - **A0 CI:** `origin/main` = `4f235553c8420e3fef959d4d879d9f4f92b89278`; `GET /actions/runs?head_sha=<full>`
