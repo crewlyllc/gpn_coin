@@ -1,3 +1,31 @@
+## 16:05 PT — 0.3.82 §7: cancelled the 118-min dead CI run holding box 1's single slot; release handles re-queued
+
+**A0.** `origin/main` HEAD `2228d0f6` is docs-only ⇒ `?head_sha=` `total_count: 0` (expected, `paths-ignore`).
+No red CI to work from that query.
+
+**Failure found and classified while reading the queue (our workflow file, already fixed).** CI run
+`45902079672` (sha `bad49d12`) had been `in_progress` 118 min with job `fmt + clippy` (`140205413543`)
+already `failure` at step 4 `workflow encoding guard (workflow files must be pure ASCII)`:
+`workflow-ascii: non-ASCII bytes in workflow files` → `.github/workflows/release-linux-selfhosted.yml:105`.
+Cause is the `§` byte in a comment added by `bad49d12`; fixed at `50c9e9b8`
+("ci(release): drop the non-ASCII byte that failed the workflow-ascii guard"), and
+`grep -rlP '[^\x00-\x7F]' .github/workflows/` returns no match on HEAD. Nothing left to fix.
+
+**Action: cancel.** That run's windows job (`140205413986`, `Build + test gpn-agent (release)`, since
+22:46:09Z) was occupying box 1 — the only slot our release build needs — for a run that could never
+turn green (>90 min, dead sha). `POST /runs/45902079672/cancel` ⇒ 202, then
+`status=completed conclusion=cancelled`. Immediately after, CI run `45908365338` (sha `50c9e9b8`) moved
+`pending` (0 jobs) → `queued`.
+
+**Queued handles for the next run (dispatch-and-end, no polling):** `45908365338` (CI, `50c9e9b8`, runs
+first on the slot) then `45908380728` (`Windows binaries`, `50c9e9b8`). Linux leg of `50c9e9b8` is already
+verified (`45908378111` completed/success, `cosign verify-blob` `Verified OK`, digests match the API).
+Next run: check those two once, `cosign verify-blob` the new zip, then `release-cut.sh --version 0.3.82`.
+
+**§3b 273 (soak)** day 2 stays filed at 23.73 h / 15.42 s per block; cannot tick before 2026-12-02.
+
+No blockers, no [TRIAGE].
+
 ## 16:45 PT — 0.3.82: windows leg still queued (measured cause: box 1 running CI's windows cargo test); soak day 2 re-recorded at 23.73 h
 
 **A0.** `origin/main` HEAD `9df2a554` is docs-only ⇒ `?head_sha=` `total_count: 0` (expected, `paths-ignore`).
