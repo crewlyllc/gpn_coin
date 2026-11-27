@@ -1,3 +1,13 @@
+## 10:37 PT 0.3.84 §4 (push) ticked — docs-only HEAD started no build, confirmed by the API
+
+- **A0 CI:** `origin/main` = `8ec8fc4c99c68abac620fa41afe532f6462a67f2`; `GET /actions/runs?head_sha=<full>`
+  ⇒ `total_count: 0`. `8ec8fc4c` touches only `docs/LOOP-LOG.md` + `docs/releases/0.3.84.md`, and
+  `ci.yml:36-42` `push.paths-ignore` covers `docs/**` and `**/*.md` — so 0 runs is the expected answer,
+  not a red flag. Nothing waited on.
+- **§4 boxes (all four)** ticked with that evidence, including the batch-into-one-commit and
+  observe-don't-wait boxes; §4 marked `DONE 2026-11-27 (4/4)`.
+- Checklist tally now **23/62**; §5 build is next. No blockers, no [TRIAGE] items.
+
 ## 10:2x PT 0.3.84 §3 (bump and record) ticked — lockstep 15 manifests + bootnode parity 8/8 green
 
 - **A0 CI:** `origin/main` = `56fcd99d`; run `46047494382` was `pending` at 10:17 (created 18:10Z).
