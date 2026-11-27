@@ -1,3 +1,39 @@
+## 00:05 PT — 256 ran the whole way to step 3: 1/1b/2 PASS, 3 FAILS on OpenCL; gate venue now the only obstacle (+ new row 289)
+
+The dispatch recorded in the 23:34 entry came back. Read from the guest (`C:\lifecycle-report.txt`,
+`C:\gpn\node.log`, `system_health`):
+
+- **step 1 download integrity PASS** — 253,335,994 B, `sha256 126b410c0abe250b == manifest` (0.3.83).
+- **step 1b install PASS** — `install.ps1 exit 0` on a wiped guest.
+- **step 2 version PASS** — `C:\gpn\bin\gpn-node.exe reports 0.3.83`.
+- **step 3 registration FAIL** — `[onboard] ! onboarding did not complete: GFLOPS benchmark: open GPU
+  matmul: no OpenCL platforms: DLOPEN_RUNTIME_LOAD_FAILED`, and the message then tells the user exactly
+  what to do (install/repair the vendor driver, or give the VM GPU passthrough). The node was healthy
+  and synced the whole time (`system_health` ⇒ `peers 2, isSyncing false`), so this is compute, not the
+  node.
+
+Two fixes tried on the GPU-PV guest, neither helped: copying `nvopencl64.dll`/`OpenCL64.dll` into guest
+System32 + registering the Khronos ICD key, and copying the host's `OpenCL.dll` loader
+(540,904 B, sha256 `D21E7F65…582A` == host). Measured cause one layer down: the paravirtual GPU
+`PCI\VEN_1414&DEV_008E` (`vrd.inf`) is `CM_PROB_FAILED_POST_START` — the vendor ICD has no device to
+open. The Intel iGPU partition in the same guest always started cleanly, so GPU-PV works in this
+Server 2022 guest; the failure is specific to the RTX 5070 Ti partition.
+
+**New row 289** filed from this run's other real finding: the first `install.ps1` run died with five
+`Unable to connect to the remote server` errors and then blamed ollama (`did not answer … within 60s`),
+while a second run of the same installer on the same machine succeeded — a flaky download with no retry
+and a message that names the wrong component.
+
+Rig lesson (mine): two launchers ran at once (a `Start-Process` the SSH session did not keep alive, then
+the `schtasks` run that did), so the shared report interleaves two runs — `install: FAIL 23:46:12` is the
+dead run, `installer exit: PASS 23:47:35` the live one. Check for a single runner before trusting a
+shared report.
+
+**Next run:** gate on a Windows 11 *client* guest with the same 5070 Ti partition (GPU-PV's supported
+guest class); if `vrd` still fails POST_START, DDA the card for the test. Then 273 day 4.
+
+No blockers, no [TRIAGE] items.
+
 ## 23:34 PT — 273 day 3 re-recorded; 256 venue BUILT and the stranger gate DISPATCHED on GPN-209
 
 A0: origin/main HEAD `2c78181e` (docs) ⇒ `?head_sha=` `total_count: 0` — correct for a docs-only SHA
