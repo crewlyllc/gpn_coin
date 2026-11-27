@@ -1,3 +1,39 @@
+## 04:05 PT — 256: the Win11 guest boots but its specialize pass aborts (0x13) — that, not the GPU, is why `gpn` never existed; offline unattend re-applied via DISM /Apply-Unattend
+
+A0: origin/main HEAD `8d5a1316` (docs: 256 guest install) ⇒ `?head_sha=8d5a1316…` ⇒ **total_count 0** —
+docs-only, correct under `ci.yml` paths-ignore. Nothing red, nothing in flight.
+
+**Box 256 — root cause measured, and it is not the GPU.** The offline apply from the last run did
+reach first boot (`gpn-apply210` `LastTaskResult 0`, image applied 03:28:25, boot event 18601 at
+03:30:03). But `J:\Windows\Panther\setuperr.log` ends with:
+
+    03:38:35 SYSPRP ActionPlatform::DeleteValue: Error from RegOpenKeyExW on key
+      HKEY_LOCAL_MACHINE\Software\Microsoft\Windows\CurrentVersion\Setup\Sysprep\OfflineState\Specialize; dwRet = 0x13
+    03:38:35 SYSPRP SysprepSession::Execute: Win32 error (19), could not execute actions
+    03:38:36 SYSPRP Callback_Specialize: Specialize return: [19]
+    03:38:37 IBSLIB PublishMessage: [Windows Setup could not configure Windows to run on this computer's hardware.]
+
+`C:\Windows\Panther\unattend.xml` is **still present** (never consumed), `C:\Users` = `Public`
+only — so the oobeSystem pass never ran and `gpn` was never created. That is the whole explanation
+for `The credential is invalid` from PowerShell Direct (`gpn`, `GPN-210\gpn`, `.\gpn`,
+`Administrator` all rejected).
+
+**GPU-PV ruled out, by removing the variable:** `Get-VMGpuPartitionAdapter` ⇒ 0 adapters, VM started
+03:40:56, boot 03:41:06, `windeploy.exe` relaunched `setup.exe` 03:41:51 — and no further setupact
+line in the next 16 min. Same failure without the paravirtual display device.
+
+**Fix dispatched (v2, dispatch-and-end):** v1 hand-copied the answer file into `Windows\Panther\`,
+which is the unsupported route that leaves the `Sysprep\OfflineState\Specialize` key. v2 applies it
+with `dism /Image:J:\ /Apply-Unattend:C:\gpn-vm\unattend210.xml` and no hand copy. Script
+`C:\gpn-vm\apply-210b.ps1` sha256 `8B599F37…4B392C4` (2721 B, base64 in 5 chunks, hash-verified),
+task **`gpn-apply210b` started 04:01:01 PT**, log `C:\gpn-vm\apply210b.log`. VM rebuilt from scratch,
+GPU partition detached.
+
+Next run: `LastTaskResult 0` + `apply-unattend rc=0` → PS Direct `gpn`/`Gpn210Test!` →
+`Get-PnpDevice -Class Display` → lifecycle step 3.
+
+No [TRIAGE] items.
+
 ## 03:35 PT — 256: the Win11 24H2 guest installs headlessly at last (media boot bypassed entirely); Intel partition attached; the answer file's own deprecated OOBE flags were why no account existed — rebuilt
 
 A0: origin/main HEAD `19be4e7d` (docs: 256 GPN-210 media-boot diagnosis) is docs-only ⇒
