@@ -1,3 +1,23 @@
+## 12:16 PT 0.3.84 §5 windows build still building — dispatched, not waited on
+
+- **A0 CI:** `origin/main` = `4f235553c8420e3fef959d4d879d9f4f92b89278`; `GET /actions/runs?head_sha=<full>`
+  ⇒ `total_count: 0` — the HEAD commit is the 12:12 audit (docs-only), which `ci.yml` paths-ignore
+  excludes. No run expected, not a problem.
+- **Release in flight:** 0.3.84 checklist `docs/releases/0.3.84.md`, §4 push DONE, §5 device build
+  half landed. First unticked box = `release-windows.yml`. Run `46053214955` (tag
+  `build/66f5353ba8c9`) created 18:57Z, went `in_progress` **19:58Z** (11:58 PT) only after the
+  obsolete linux-failed `CI` run `46047494382` was cancelled off the single-slot Windows runner at
+  11:59. Now 20:16Z: job `windows` = `in_progress`, step 10/23 **`build node`** running, steps 1-9
+  success (encoding guard, rust, build agent, pre-checkout polkadot-sdk). That is 18 min into a
+  40-75 min node build — normal, not stuck.
+- **Runners:** `DESKTOP-USBUADL` online `busy: true`, `openclawassist` online `busy: true` — both
+  occupied by real work; no contention claim made.
+- **Action taken:** none needed beyond recording the handle. Per the DISPATCH rule I do not poll a
+  build inside a run. Next pass reads run `46053214955`, ticks §5 if `success`, dispatches again if
+  `failure` (>90 min in_progress ⇒ cancel + re-dispatch).
+- **Not done deliberately:** no new bundling (0.3.84 in flight), no AUDIT-2026-11-25a re-workflow
+  (release-path code stays untouched while the windows build is running), no unrelated commit.
+
 ## 12:12 PT AUDIT — fixed 1 (disk), chain + fleet clean; one deferred re-workflow left red
 
 - **Disk first:** `df -h /` ⇒ 439G, 310G used, **107G free (24.4%)** — under the 25 % trigger, so
