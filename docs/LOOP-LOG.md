@@ -1,4 +1,4 @@
-## 07:40 PT — box 256 (§3b of 0.3.83): GPU-PV ruled out by measurement; step 3 will run CPU-only
+## 06:35 PT — box 256 (§3b of 0.3.83): GPU-PV ruled out by measurement; step 3 will run CPU-only
 
 **A0.** `origin/main` = `9ed69f35` (docs-only audit commit) — `GET /actions/runs?head_sha=9ed69f35e95f285a0e5d07a612722949120128b4` ⇒
 `total_count: 0`, exactly as expected for a `docs/**` push. No CI conclusion to act on.
