@@ -850,12 +850,12 @@ if ($Note) {
     '-1073741515' {
       $kind='vc-runtime'
       $detail='missing Visual C++ runtime (0xC0000135) - the node cannot even load, so it printed nothing'
-      $fix='winget install --id Microsoft.VCRedist.2015+.x64 -e'
+      $fix='download https://aka.ms/vs/17/release/vc_redist.x64.exe and run it (or: winget install --id Microsoft.VCRedist.2015+.x64 -e)'
     }
     '3221225781' {
       $kind='vc-runtime'
       $detail='missing Visual C++ runtime (0xC0000135) - the node cannot even load, so it printed nothing'
-      $fix='winget install --id Microsoft.VCRedist.2015+.x64 -e'
+      $fix='download https://aka.ms/vs/17/release/vc_redist.x64.exe and run it (or: winget install --id Microsoft.VCRedist.2015+.x64 -e)'
     }
     '69' { $kind='no-ollama'; $detail='ollama is required and was not reachable'; $fix='gpn_node.exe --setup' }
     '78' { $kind='not-dialable'; $detail='the node could not prove it is inbound-reachable'; $fix='forward TCP 30333, or set GPN_REQUIRE_BACKBONE=0' }
@@ -3582,14 +3582,41 @@ if (Test-MissingVCRuntime $nodeExe) {
       if (Test-MissingVCRuntime $nodeExe) {
         $vc = Join-Path $env:TEMP 'vc_redist.x64.exe'
         Invoke-WebRequest -Uri 'https://aka.ms/vs/17/release/vc_redist.x64.exe' -OutFile $vc -UseBasicParsing
-        Start-Process -FilePath $vc -ArgumentList '/install', '/quiet', '/norestart' -Wait
+        # 2026-11-27 (row 256, clean Win11 24H2 guest): `Start-Process -Wait` on
+        # vc_redist died with "This command cannot be run due to the error: No such
+        # interface supported" -- it takes the shell-execute path, which needs an
+        # interactive desktop, and a GPN install is often headless (PS Direct, a
+        # service, a scheduled task). The runtime then stayed missing and the
+        # installer printed a winget command that an eval machine cannot run at
+        # all (no winget). Try Start-Process, then fall back to a shell-free
+        # Process.Start, and report the redist's own exit code either way.
+        $vcRc = $null
+        try {
+          $vcRc = (Start-Process -FilePath $vc -ArgumentList '/install','/quiet','/norestart' -Wait -PassThru -ErrorAction Stop).ExitCode
+        } catch {
+          Say "vc_redist: Start-Process failed ($($_.Exception.Message)) -- retrying without the shell"
+          try {
+            $psi = New-Object System.Diagnostics.ProcessStartInfo
+            $psi.FileName = $vc
+            $psi.Arguments = '/install /quiet /norestart'
+            $psi.UseShellExecute = $false
+            $psi.CreateNoWindow = $true
+            $p = [System.Diagnostics.Process]::Start($psi)
+            if (-not $p.WaitForExit(600000)) { try { $p.Kill() } catch { } }
+            $vcRc = [int]$p.ExitCode
+          } catch { Say "vc_redist: shell-free start also failed: $($_.Exception.Message)" }
+        }
+        Say "vc_redist exit code: $(if ($null -eq $vcRc) { 'unknown' } else { $vcRc })"
       }
     }
     if (Test-MissingVCRuntime $nodeExe) {
       Write-Host ''
       Write-Host 'The Visual C++ runtime is still missing, so the node cannot start.' -ForegroundColor Red
-      Write-Host 'Install it, then run this installer again:' -ForegroundColor Red
+      Write-Host 'Install it with ONE of these, then run this installer again:' -ForegroundColor Red
+      Write-Host '    download https://aka.ms/vs/17/release/vc_redist.x64.exe and run it, or' -ForegroundColor Red
       Write-Host '    winget install --id Microsoft.VCRedist.2015+.x64 -e' -ForegroundColor Red
+      Write-Host 'A machine with no winget (Windows Server, Windows 11 Enterprise Evaluation,' -ForegroundColor Red
+      Write-Host 'Server Core) has only the first option; it needs no network beyond aka.ms.' -ForegroundColor Red
       Write-Host "Log: $InstallLog" -ForegroundColor Red
       try { Stop-Transcript | Out-Null } catch { }
       exit 1

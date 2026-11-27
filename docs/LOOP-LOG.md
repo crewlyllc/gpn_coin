@@ -1,3 +1,56 @@
+## 05:14 PT — 256: a clean Win11 guest with a real `gpn` admin and a vGPU that enumerates; the gate ran and found a real stranger defect (VC++ runtime on a headless install)
+
+A0: origin/main HEAD `6c932be1` (docs: 256 unattend staging) ⇒ `?head_sha=6c932be1…` ⇒ **total_count 0** —
+docs-only, correct under `ci.yml` paths-ignore. Nothing red, nothing in flight.
+
+**Box 256 — the venue question moved from "no GPU" to "no compute inside the guest", and it is now measured layer by layer.**
+1. GPN-210 was built with the GPU-PV prerequisites UNSET: `GuestControlledCacheTypes False`,
+   `LowMemoryMappedIoSpace 134217728`, `HighMemoryMappedIoSpace 536870912` (GPN-209: `True / 1 GB / 32 GB`).
+   With those unset the guest never enumerates a vGPU at all — `Get-PnpDevice` shows no `VEN_1414` device.
+   After `Stop-VM` → `Set-VM -GuestControlledCacheTypes $true -LowMemoryMappedIoSpace 1073741824
+   -HighMemoryMappedIoSpace 34359738368` and re-adding the Intel partition with real budgets, the device
+   appears: `Intel(R) UHD Graphics 630 | PCI\VEN_1414&DEV_008E | CM_PROB_FAILED_POST_START`, provider
+   Microsoft (inbox `vrd.inf`).
+2. `Hyper-V-Worker-Admin` names the remaining cause instead of leaving it inferred: `4:40:16 Error 33101 —
+   Virtual machine requested unsupported Virtual PCI protocol version 0x10005 … negotiated 0x10004`, then
+   `4:40:30 33107 guest powered ON`, `4:40:34 33108 guest operating system powered OFF a virtual PCI device`.
+   Host is Win11 Pro `22621.4317`, guest `26100` — the guest's VPCI stack is a generation ahead.
+3. The GPU-PV user-mode staging path was executed for real: 36 files / 342 MB of the host's Intel DCH
+   `iigd_dch.inf_amd64_65ac4d73bb85cb27` (incl. `igdrcl64.dll`, `igc64.dll`, `Intel_OpenCL_ICD64.dll`)
+   copied into the guest's `System32` offline, `HKLM\SOFTWARE\Khronos\OpenCL\Vendors` registered for
+   both ICDs, device disable/enable. Device still `CM_PROB_FAILED_POST_START`. Also measured: the Intel
+   DCH package is gone from box 1 (`D:\igpu` absent, no `iigd_dch.inf` under `D:\` or `C:\gpn-vm`) and
+   in-guest Windows Update driver search fails `0x80244011`; `Get-VMHostAssignableDevice` ⇒ **0**, so DDA
+   is not a fallback without taking the host GPU offline.
+4. **The gate ran anyway, and that is the useful result.** `scripts/stranger-lifecycle.ps1`
+   (sha256 `EA819644…6232` == repo copy, fetched anonymously inside the guest) on a wiped 26100 guest:
+   **step 1 PASS** (`253335994 bytes, sha256 126b410c0abe250b == manifest`), **step 1b FAIL exit 1** —
+   `install-log.txt`: `Start-Process : This command cannot be run due to the error: No such interface
+   supported.` at `install.ps1:3585`, then `The Visual C++ runtime is still missing … winget install
+   --id Microsoft.VCRedist.2015+.x64 -e` on a guest that has no `vcruntime140.dll`, no `msvcp140.dll` and
+   **no winget**. `Start-Process` takes the shell-execute path, so it dies in any headless install
+   (PowerShell Direct, a service, a scheduled task — which is how our own update path runs).
+
+**Fix (in tree, row 292):** `install.ps1` keeps `Start-Process` as the first attempt but falls back to a
+shell-free `[System.Diagnostics.Process]::Start` with `UseShellExecute = $false`, logs `vc_redist exit
+code: N`, and its failure text now offers `https://aka.ms/vs/17/release/vc_redist.x64.exe` first with
+`winget` only as an alternative; the same advice replaced the bare `winget` line in the two `vc-runtime`
+entries of the `last-exit.json` remediation table. Mechanism proven on the same guest:
+`Process.Start(UseShellExecute=false)` ⇒ `waited: True rc=0`, `vcruntime140.dll True`, `msvcp140.dll True`.
+Re-running the shipped installer then got past the VC check (binaries installed, snapshot 372969 / 371 MiB
+downloading) — that run was still in progress when this run ended; the log is `C:\inst2-out.txt` on GPN-210.
+
+**Not a [TRIAGE] item yet:** the remaining gap is compute for step 3 (OpenCL), and the next step is work —
+a guest at or below the host's VPCI generation (Win11 22621) or the Intel iGPU with a matching DCH driver.
+`docs/NEEDS-TRIAGE.md` item 256 now carries the measured option set for the case where that also fails.
+
+**Rows:** 292 added (VC++ headless install, IN-PROGRESS, fix in tree). 256 annotated with the 12th
+measurement. No version opened: 289/290/291/292 are NEW/IN-PROGRESS waiting on the five-fix batch.
+
+**Next run:** read `C:\inst2-out.txt` + `C:\lifecycle-report.txt` on GPN-210 (guest is up, `gpn`/PS Direct
+works, `GPN-Inst2` task is disabled), tick steps 1/1b/2, then attack step 3 with either a 22621 guest or
+the Intel DCH staged from the host's DriverStore.
+
 ## 05:15 PT — 256: the Win11 guest gets a real local admin — `dism /Apply-Unattend` never stages the answer file, so specialize/oobe ran with none; hand-staged `Panther\unattend.xml` on the offline volume and `gpn` now exists (PS Direct OK)
 
 A0: origin/main HEAD `2e48315f` (docs: 256 specialize 0x13 diagnosis) ⇒ `?head_sha=2e48315f…`

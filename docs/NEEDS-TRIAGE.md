@@ -218,6 +218,31 @@ It needs box 4 powered on first: box 4 is **not in the tailnet at all** — box 
       If a Win11 guest also fails, the venue question is a real owner call: spend on a dedicated test
       machine / power box 4 back on, versus accepting the gate at steps 1–2 for this release.
 
+      **2026-11-27 06:0x PT — the Win11-26100 guest was executed and the failure is now a host/guest protocol
+      mismatch, not a driver or config slip.** First a real config bug was found and fixed on GPN-210: the VM
+      was created without GPU-PV prerequisites (`GuestControlledCacheTypes False`, `LowMemoryMappedIoSpace
+      128 MB`, `HighMemoryMappedIoSpace 512 MB`; GPN-209 has `True / 1 GB / 32 GB`), and with those unset the
+      guest never enumerates a vGPU at all — no `VEN_1414`/`VEN_10DE` device anywhere in `Get-PnpDevice`.
+      After setting them and re-adding the Intel UHD 630 partition with real compute budgets the device
+      appears (`PCI\VEN_1414&DEV_008E`, inbox `provider=Microsoft`, `CM_PROB_FAILED_POST_START`). Cause,
+      measured in the host log rather than inferred: `Hyper-V-Worker-Admin 4:40:16 Error 33101 — Virtual
+      machine requested unsupported Virtual PCI protocol version 0x10005 … negotiated 0x10004`, then
+      `4:40:30 33107 power ON` → `4:40:34 33108 guest operating system powered OFF a virtual PCI device`.
+      Host is `Windows 11 Pro 22621.4317`; guest is `26100`. Also measured: the Intel DCH package is gone from
+      box 1 (`D:\igpu` absent, no `iigd_dch.inf` under `D:\` or `C:\gpn-vm`) and in-guest Windows Update driver
+      search fails `0x80244011`, so neither the pnputil path nor the 'let Windows find the driver' path is
+      available on this image.
+      Work continues without an answer: build the guest at or below the host's VPCI generation (Win11 **22621**
+      client, i.e. 22H2, not 24H2) and repeat. **If a 22621 guest also refuses the partition, the venue question
+      becomes real and needs Jeremy:** options (i) DDA — `Get-VMHostAssignableDevice` ⇒ **0** today, so it needs
+      the 5070 Ti dismounted and the host's GPU offline for the test window (build box loses its display, no CI
+      impact); (ii) power box 4 back on and run the lifecycle on real hardware, preserving its keystore (honest
+      stranger path, but box 4 is off the tailnet since 2026-11-25 and is a live leaf); (iii) accept steps 1–2 as
+      the guest-proven half and run steps 3–6 on a real GPU machine as a 'second-machine lifecycle', documented
+      as not-a-clean-guest. Recommendation if it comes to that: **(ii)**, because a stranger test on a machine we
+      never installed on is the only version of this test that can find the defects it exists to find; (i) is
+      cheaper but tests our own build box's GPU stack, and (iii) cannot catch install-path defects at all.
+
 - [ ] AUDIT-2026-11-26a — the fleet miner and the LLM provider share one GPU, so `gpn-provider` can never re-attest: `[attest] re-attesting: 825 GFLOPS attested at block 356917, older than 7200 blocks` → `skipping: GPU busy (util 100 %, 1615/8188 MiB, utilization 100 % > 10 %) — NO measurement submitted` → `still busy after 6 attempt(s) — next try in 3600s` (re-logged at 06:05 PT: `after 12 attempt(s)`, head #367813 vs attested 356917 ⇒ ~34 h). `nvidia-smi --query-compute-apps` names pid 4179529 `gpn-node` (the fleet miner, 1120 MiB @ 100 %) and pid 3771652 `gpn-agent` (140 MiB). Head #366389 vs attested block 356917 ⇒ ~9,472 blocks (~29 h) without a fresh measurement; 7 `GPU busy` lines in 3 days. Jobs are still served, so this is degraded capability scoring, not an outage. | options: A attest under a declared load window (measure a stable fraction, e.g. GFLOPS while the miner runs, and label it as such) · B pause mining for the ~2 s measurement (needs a miner-side hook or dropping `--force-authoring` briefly; small chain risk) · C accept that a mining node does not re-attest and exclude the condition from alarms | recommend: **A** — it keeps the miner running and gives the oracle a real number with its conditions recorded; B costs block production on the only heavy node, C hides a metric that is supposed to detect a degraded provider. Not fixed by the auditor: it changes provider/miner behaviour while a 0.3.80 rollout is fresh, and it needs a measurement semantics decision. | raised 2026-11-26 00:0x PT (6-hourly audit)
 
 - [ ] AUDIT-2026-11-26a — `~/.ci-cache` will hit the same wall again within a day or two: it was **117 G** at 12:04 PT today (of a 439 G disk at 84% used), the daily 7-day prune only found **2.1 G** because the release target tree is rewritten so often that almost nothing qualifies as >7d, and the growth is structural — `gpn-agent-target/release 57 G` + `gpn-node-target/release 20 G` are rebuilt every release. Today I reclaimed 41 G by deleting the `debug` target (rebuildable, no release artifact lost) plus the 2.1 G prune, taking free space 68.6 G → 111 G (74% used). That is a one-time lever; next time the only similar win is `gpn-node-target/release` (20 G, forces a full node rebuild on the next CI run). | options: A cap the cache — set `CARGO_TARGET_DIR` cleanup by size (e.g. prune when >80 G, oldest-first) in `prune-ci-cache-daily.sh`, so the guard acts on *size* not only *age*; B add disk / move `.ci-cache` to another volume (cost); C leave as-is and accept a manual 40 G cleanup whenever free space drops under 20 % | recommend: **A** — an age-based guard cannot see a tree that is always freshly written, which is exactly the observed failure; a size trigger of 80 G costs one incremental rebuild and removes the recurrence. Not done unilaterally because it changes CI cache behaviour for every build. | raised 2026-11-26 12:1x PT (daily audit)
