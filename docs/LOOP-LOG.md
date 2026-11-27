@@ -1,3 +1,63 @@
+## 18:14 PT AUDIT — fixed 1 (disk 24.8 G), chain/fleet/release all green
+
+**Disk first (owner rule).** `df -h /` before: `439G 331G 86G 80%` = **19.6% free**, under the 25%
+immediate-clean trigger. During a live release build, so no service restarts and no touching
+`~/.ci-cache`, `~/gpn-loop/*/target/release`, or `~/.cache/gpn-release-cut`.
+
+- Guarded before deleting: `pgrep -a -x cargo` ⇒ one build, cwd
+  `/home/jeremyg/actions-runner/_work/gpn_coin/gpn_coin/gpn-agent`, `CARGO_TARGET_DIR=
+  /home/jeremyg/.ci-cache/gpn-agent-target`; `lsof | grep 'gpn-loop/.*/target/'` ⇒ **empty**. So
+  `~/gpn-loop/gpn-agent/target/debug` (25 G, mtime `2026-11-26 07:05`) was not in use by the build.
+- Deleted: `~/gpn-loop/gpn-agent/target/debug` — **24.7 G** (du 25 G); plus `*/target/*/incremental`
+  (already inside it). Deleted stale `/tmp` files >7 d: `fleet.txt` 29 M, `ts.tgz` 28 M,
+  `gpn_node.exe` 12 M, `gpn_snapshot.exe` 4 M, `actionlint` 4 M, `pm.html` 3 M, `seen_slugs.txt` 2 M,
+  `a_neck_fan_portable.html` 2 M (lsof clean on all).
+- **After: `439G 307G 110G 74%` = 25.1% free** (BEFORE_MB 87621 → AFTER_MB 112375).
+- **Left deliberately:** `/tmp/v082` 1.3 G and `/tmp/wz` 524 M (0.3.82 verification extractions, 3 h
+  old — the rule keeps duplicates < 12 h); `~/.cache/gpn-release-cut` 575 M (holds the tarballs the
+  in-flight 0.3.82 deploy verifies); `.ci-cache` 96 G, `~/.cache/huggingface` 53 G, `~/.gpn` 24 G,
+  `~/ollama` 8.1 G, `~/.openclaw/workspace/shared` 15 G — all owner-protected, reported not touched.
+
+**Top five consumers (measured, with hidden paths):** `~/.ci-cache` **96 G** (2 top dirs:
+`gpn-node-target` mtime 11-24, `gpn-agent-target` hot; 38 files >7 d) · `~/.cache` **54 G**
+(`huggingface` 53 G models + `gpn-release-cut` 575 M + `dotslash` 287 M) · `~/.gpn` **24 G** chain data ·
+`~/.openclaw` **17 G** (`workspace/shared` 15 G data, `agents/main/sessions` 374 M = 183 jsonl >30 d,
+`plugin-runtime-deps` 1.5 G, `cron` 34 M) · `~/ollama` **8.1 G**. `/tmp` now 2.9 G. No `target/debug`
+left in `~/.openclaw/workspace/projectmanager07` (dirs gone); `~/gpn-loop/gpn-node/target/release` 3.9 G kept.
+
+**Units.** `systemctl --user list-units 'gpn*' --all` ⇒ 27 listed; every enabled unit
+(`gpn-fleet`, `gpn-accesspoint`, `gpn-provider`, `gpn-provider-heartbeat`, `gpn-diffusion`,
+`gpn-finetune`, `gpn-oracle`, `gpn-explorer`, `gpn-faucet`, `gpn-fleet-directive`) is `active running`.
+No enabled-but-dead unit. `gpn-node`/`gpn-update` are `disabled` by design (fleet runs the node,
+timer drives the updater).
+
+**Ports/chain.** 9944/8092/8093/8099/11434 all LISTEN. `system_chain` = `GPN Public Testnet`,
+`system_version` = `0.3.81`, `system_health` = `peers:3, isSyncing:false`, head `#370608`→`#370616`
+across the run (blocks advancing ~2 s). `GET :8092/v1/models` ⇒ 5 models.
+
+**Logs.** `journalctl --user -u gpn-fleet -n 300` ⇒ 300 lines, `grep -icE "panic|Reason:|Incompatible
+pruning|taskkill"` over 24 h = **0**; Started/Stopped = **2 pairs in 24 h** (21:05:50 = 0.3.80 apply,
+09:02:18 = 0.3.81 apply), both expected updater restarts, no loop. `gpn-incident-alarm` latest:
+`peers=3 height=370609/370616 jobs_seen=256 / ok: no incident conditions`.
+`~/.gpn/update/update-attempts.json`: last `0.3.81 outcome=confirmed attempts=1`;
+`journalctl --user -u gpn-update` hourly runs all `Finished`, no error lines.
+`openclaw cron runs --id feff1358…` ⇒ latest 6 runs all `status: ok` (513 s, 478 s, 64 s, 114 s,
+108 s, 73 s), no timeout/error.
+
+**Box 1 (SSH).** `Get-Process gpn-node` path `C:\gpn\data\update\current\gpn-node.exe`,
+`system_version` on its `:9944` ⇒ `0.3.81`. Healthy.
+
+**Release record.** `releases.json` 0.3.82 `published_at 2026-11-27T02:06:21Z`; local
+`~/.cache/gpn-release-cut/gpn-linux.tar.gz` sha256 `dee7a6a3…468b` == manifest sha256 (real publish
+verified). Tree `gpn-agent/Cargo.toml` = `0.3.82`; running node `0.3.81` — the expected transient:
+`gpn-update.timer` next fires `18:53`, and the canary gate (`canary.json` currently `0.3.81 ok:true`)
+must publish 0.3.82 proof first. **0.3.82 has no `INDEX.md` row, no `archive/0.3.82.md`, and 0 COMPLETE
+rows yet — not a fault: the release loop's own 18:09 entry says "Next run: §7b/§8 … then §9 deploy",
+so those land with deploy.** 0.3.81 is complete (INDEX row, `archive/0.3.81.md`, rows 278/279/282/283/284).
+
+**Verdict: fixed 1** (disk). Nothing else wrong. Next audit: check 0.3.82 INDEX/archive/COMPLETE after
+deploy, and delete `/tmp/v082`, `/tmp/wz` once they pass 12 h.
+
 ## 18:09 PT — 0.3.82 CUT AND PUBLISHED: CI green, release-cut ran for real, live manifest serves 0.3.82
 
 **A0.** `origin/main` HEAD `378c5f90` docs-only ⇒ `?head_sha=` `total_count: 0` (expected, paths-ignore).
