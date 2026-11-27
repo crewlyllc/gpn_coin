@@ -1,3 +1,35 @@
+## 14:40 PT 0.3.84 — §5 attestation + §6 scan/version TICKED on the shipping digest; release-cut ABORTed at the CI gate (run 46067336386 still in_progress, handle recorded)
+
+- **A0 CI:** `origin/main` = `ac58946a` (docs-only loop-log commit) ⇒ `total_count: 0` for the full
+  40-char sha, expected under `paths-ignore`; nothing to wait on.
+- **§5 (all three remaining boxes) — TICKED, cycle 2 / digest `25790a28…d178543`.**
+  Run `46067304988` job `140735652287` step order read from the API: 19 `Check attestation
+  availability` success → 20 `Attest build provenance (public)` **skipped** (private repo, correct)
+  → 21 `Sign release artifact keyless` success → 22 `Provenance gate` success → 23 `publish
+  windows-latest` success. `GET /releases/tags/windows-latest` ⇒ zip asset 802211798 253,327,068 B
+  `digest sha256:25790a28…d178543` (22:00:37Z) + bundle 802213353 9,033 B (22:01:18Z), both
+  downloaded **by asset id**; local hash == API digest. `cosign verify-blob --bundle … --certificate-
+  identity-regexp '^https://github\.com/jeremyzguo/gpn_coin/\.github/workflows/release-windows\.yml@.*$'`
+  ⇒ **`Verified OK`**.
+- **§6 — TICKED.** Unzipped the shipping zip: `gpn_node.exe` carries `the display-adapter list names
+  no usable GPU` (1 hit, row 293), `vcruntime140.dll`/`msvcp140.dll`/`visual-c++` and the
+  `aka.ms/vs/17/release/vc_redist.x64.exe` URL (row 292); `gpn-node.exe` carries `reorg=`,
+  `work ours=`. Version: binaries embed `0.3.84` only, `gpn_node.exe` embeds `bd36c4f`; live on box 1
+  over SSH from the deployed `C:\gpn\bin`: `gpn-node.exe --version` ⇒ `gpn-node 0.3.84`,
+  `gpn_node.exe --version` ⇒ `gpn_node 0.3.84 (spec 55, bd36c4f)` (pids 60752/61476 from
+  `C:\gpn\data\update\current\`).
+- **§7 cut — ATTEMPTED, not ticked, handle recorded.** `scripts/release-cut.sh --version 0.3.84
+  --timeout 300` cleared 0/6→3/6 (detect, download+verify both, version `0.3.84` from the
+  `gpn-build-v1` stamp) and then refused, quoting:
+  `ABORT: CI for bd36c4f is 'in_progress:None' -- refusing to sign an unverified build`.
+  Cause: release CI **`46067336386`** is still `in_progress` — its `Build + unit tests (windows,
+  self-hosted)` job `140735756078` only started 22:02:32Z after the release build vacated the
+  single-slot runner; every other job is `success` except the two known `continue-on-error` ones
+  (macos: no runner, 2 s; Dependency audit: row 298). The commit lock was released on exit (verified
+  `~/.gpn/release-in-flight` absent). Not a fault, not waited on.
+- No blocker, no decision needed. **Next pass: read `46067336386` once; on `success`, re-run the cut**
+  (then §7 surfaces, §7b, §7c canary proof, §8 verify-published, §9 deploy confirm, §10 proof).
+
 ## 14:13 PT 0.3.84 — windows cycle-2 build GREEN (28 min); §5 build box ticked with digest
 
 - **A0 CI:** `origin/main` = `d7e6bbf0` (docs-only) ⇒ `total_count: 0` for the full sha, expected
