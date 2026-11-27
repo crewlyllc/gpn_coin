@@ -1,3 +1,42 @@
+## 00:56 PT — stranger gate read on GPN-209: install+version PASS on a clean guest, step 3 fails on no OpenCL (consumer GeForce = no GPU-PV); venue narrowed to the Intel iGPU, no decision needed
+
+A0: origin/main HEAD `0b45d5f3` (docs: checklist §7c + 0.3.83 gate opening) ⇒ `?head_sha=` (full 40) ⇒
+`total_count: 0`, the correct answer for a docs-only SHA (`ci.yml` paths-ignore). Nothing red, nothing
+in flight. No release open (0.3.83 published, checklist archived), so this run worked the first
+IN-PROGRESS row: **256**.
+
+**What the dispatched gate actually produced** (the 23:33 PT run's log, read this run instead of
+guessed): box 1 `C:\gpn-vm\lifecycle-20261126-235900.log` — script fetched anonymously from the
+crewlyllc mirror, sha256 `ea819644…6232` == repo copy, on a wiped GPN-209:
+- **step 1 PASS** — `253335994 bytes, sha256 126b410c0abe250b == manifest`, `install.ps1 exit 0`
+- **step 2 PASS** — `C:\gpn\bin\gpn-node.exe reports 0.3.83`
+- **step 3 FAIL (exit 3)** — `[onboard] ! onboarding did not complete: GFLOPS benchmark: open GPU
+  matmul: no OpenCL platforms: DLOPEN_RUNTIME_LOAD_FAILED`
+
+Cause measured one layer down, not assumed: the guest's GPU is the paravirtual `PCI\VEN_1414&DEV_008E`
+under `vrd.inf` at `CM_PROB_FAILED_POST_START`, `nvidia-smi` ⇒ `couldn't communicate with the NVIDIA
+driver`; the 5070 Ti partition *is* attached and visible, but a consumer GeForce driver ships no
+GPU-PV user-mode ICD. That is a support-matrix fact, so no amount of driver staging in the guest fixes
+it (`Get-VM GPN-209` already had `GuestControlledCacheTypes True`, MMIO 1 GB/32 GB — config was right).
+
+**Boxes ticked (two, both with pasted evidence):** §0e "every step failure names a cause a stranger can
+act on" — the real refusal reads *"this machine has no usable OpenCL runtime: install or repair the
+vendor GPU driver (NVIDIA/AMD/Intel) and reboot, or, if this is a virtual machine, give it GPU
+passthrough"*; and §0e "if the lifecycle cannot be run this release, say so and why" — it ran as far as
+the venue allows. The lifecycle box itself **stays unticked**, as its own text requires.
+
+**No new version opened:** 0.3.83's batch is closed and the batch policy wants five fixes before the
+next cut, so 256 stays IN-PROGRESS rather than being bundled again.
+
+**Next run is work, not a decision:** re-add the **Intel UHD 630** partition with a real
+`MinPartitionCompute` and stage the Intel guest driver — an iGPU-only laptop is the modal stranger and
+needs no CUDA. Only if that fails does the venue become DDA of the 5070 Ti (host GPU offline on the live
+mining box) and that one goes to Jeremy. `docs/NEEDS-TRIAGE.md` item 256 records this; no [TRIAGE] needed
+this run.
+
+**273 (soak):** day 3 already recorded at height 371823 (15.24 s/block vs 13.4 baseline, marked drift);
+day 4 is due on the `gpn-soak-record.timer` tick, not this run. Row ticks 2026-12-02.
+
 ## 00:45 PT — canary proof for 0.3.83 published; fleet gate is OPEN; box 1 installed and now RUNS 0.3.83 (the start path fails silently when node.log is held)
 
 **The stall (AUDIT-2026-11-27a) is fixed.** The gate is `update::canary_gate`: a non-canary node
