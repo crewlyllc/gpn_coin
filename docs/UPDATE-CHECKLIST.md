@@ -328,6 +328,27 @@ Two different jobs use Windows, and they must not be confused (owner question, 2
       Both were only visible by **running the example with a real 5–15 s clip**, which is what the
       "example request actually works" clause means: paste the output, not the intent.)
 
+## 7c. Publish the canary proof — without it the fleet cannot update
+
+**The updater refuses to install a release on any non-canary node until
+`https://gpncoin.ai/canary.json` proves THAT version** (`update::canary_gate`). Publishing the
+proof is a release step, not an afterthought: 0.3.82 and 0.3.83 both shipped without it and the
+whole fleet stayed pinned to 0.3.81 for two releases (found 2026-11-27 00:20 PT).
+
+- [ ] **Generate the proof from the RUNNING process, never from a file.**
+      `scripts/canary-report.py --provider <canary provider account> --job-id <a job Completed on
+      this version>` — it reads `system_version` from the node's own RPC and a `Completed` row in
+      the AP's `/jobs`, and refuses to write anything if either is missing.
+      notes: The job must have been served AFTER the update — a stale job from the previous
+      version passes the script's checks and proves nothing. Send one with `"mode":"onchain"`
+      and confirm `/jobs` shows that job id `Completed` for the canary's provider.
+- [ ] **`scripts/canary-publish.sh --report <file>`** commits `website/canary.json` and pushes; it
+      refuses anything not green. Quote the commit sha it prints.
+- [ ] **`https://gpncoin.ai/canary.json` serves the new version twice, ten seconds apart** (the
+      site deploys on push; poll until it does, and do not tick on the repo file alone).
+- [ ] A non-canary node now updates unattended — `C:\gpn\update.log` (Windows) or
+      `journalctl --user -u gpn-update` (Linux) shows it installing instead of `HELD here`.
+
 ## 8. Verify as a stranger would
 
 **Run the command, do not hand-check** (queue #246). `archive/0.3.68.md` §8 was ticked green

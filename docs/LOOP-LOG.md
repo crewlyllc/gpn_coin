@@ -1,3 +1,51 @@
+## 00:45 PT — canary proof for 0.3.83 published; fleet gate is OPEN; box 1 installed and now RUNS 0.3.83 (the start path fails silently when node.log is held)
+
+**The stall (AUDIT-2026-11-27a) is fixed.** The gate is `update::canary_gate`: a non-canary node
+refuses to install unless `https://gpncoin.ai/canary.json` proves the *target* version. That file
+still said 0.3.81, so every node but this host was pinned two releases back. The proof had never
+been generated for 0.3.82/0.3.83 because the release checklist has no canary step at all.
+
+Evidence produced this run (all from the running system, not from a file):
+- `system_version` over RPC ⇒ `0.3.83` (this host is the declared canary, `GPN_CANARY=1`).
+- A job served **on 0.3.83**, chain job id **6602**, `state=Completed`, `provider=5ENqSp5Q65bx…` —
+  sent as `POST :8092/v1/chat/completions` with `"mode":"onchain"` at 00:19 PT; the fleet log
+  confirms the GPU was yielded to it (`miner parked: GPU yielded to an AI job`, 00:17:43). Jobs
+  6601/6603/6604 went to a 0.3.81 provider, so they prove nothing — only 6602 is evidence.
+- `scripts/canary-report.py --provider 5ENqSp5… --job-id 6602` ⇒
+  `{"version":"0.3.83","ok":true,"job_served":true,"confirmed_at":1795767761}`.
+- `scripts/canary-publish.sh --report /tmp/canary-0383.json` ⇒ committed **85f7b25d**, pushed to
+  `main`, "the fleet may now update".
+- `https://gpncoin.ai/canary.json` ⇒ HTTP 200 `{"version":"0.3.83","ok":true,"job_id":6602}`
+  (stale 0.3.81 at 00:26, green by 00:31 — the site deploys on push; poll, do not trust the repo file).
+
+**Box 1 (non-canary, Windows) took the update unattended.** `C:\gpn\update.log` before ⇒
+`0.3.83 is available, but this node is not the canary … holding (node NOT restarted)`. After the
+publish, `gpn_update --apply --state-dir C:\gpn\data\update` ⇒ `rc=0` and
+`update-attempts.json` ⇒ `{"version":"0.3.83","outcome":"installed","release_id":"126b410c0abe250b…"}`,
+current ⇒ `C:\gpn\data\update\versions\0.3.83`. The install did **not** restart the process: the
+node kept answering `system_version` = 0.3.81 from an image started 21:12 PT.
+
+**A second, unreported defect fell out of that restart.** `schtasks /End /TN GPN-Node` + `/Run`
+left box 1 with **no node at all**, silently: the old supervisor's provider children
+(`gpn_llm_provider`, `gpn_diffusion_provider`, `gpn_ml_provider`, `gpn_finetune_provider`,
+`gpn_provider_status`) outlived it and one kept `C:\gpn\node.log` open, so the worker died on
+`>> "C:\gpn\node.log"` with *"The process cannot access the file because it is being used by
+another process"* — and `hidden-launch.vbs` exits **0** in that case, so Task Scheduler reported
+`LastTaskResult 0`. A node-down with a success exit code. Killed the orphans (52000/62768/56188/
+55096/63460), restarted the tree, then let the **task** own it: `state=Running`, 2 processes,
+`system_version` ⇒ **0.3.83** at 00:41 PT. Filed as row 290/291.
+
+**Root cause of the stall, fixed in the template:** `docs/UPDATE-CHECKLIST.md` had no section
+that publishes the canary proof, so two releases shipped with a closed gate. Added **§7c
+"Publish the canary proof — without it the fleet cannot update"**: report from the *running*
+process with a job served **after** the update (a stale job passes the script's checks and proves
+nothing), publish, then poll the live URL twice.
+
+Not done / still open: the publish is still a **manual** step (option C of the audit — make the
+release driver publish it right after `confirmed <version> is running` — is row 290). Box 1 and
+the other nodes are on 0.3.83 now; the remaining 0.3.81 nodes (`5HVtpoz…`, `5FCws…`) update on
+their own hourly tick.
+
 ## 00:20 PT — AUDIT (fixed 1, needs-attention 1): disk 82G→106G free; canary proof for 0.3.83 was never published, so the whole fleet is held on 0.3.81
 
 **Disk first (free was 19%, below the 25% trigger).** `df -h /` before ⇒ `439G 335G 82G 81%`.
