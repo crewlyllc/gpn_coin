@@ -1,3 +1,24 @@
+## 16:45 PT — 0.3.82 §7: windows rebuild verified by hand (attested, correct strings); waiting only on same-sha CI
+
+**A0.** `origin/main` HEAD `46b65ca2` is docs-only ⇒ `?head_sha=` `total_count: 0` (expected).
+
+**Box worked: §7 `release-cut.sh`.** `Windows binaries` run `45908380728` (sha `50c9e9b8`) ⇒
+`completed/success` 23:01:20→00:27:52Z. Re-downloaded `windows-latest`: zip 253,301,460 B sha256
+`2c80da5d…e1151c555`, bundle 9,049 B sha256 `ee651b1a…6127c75`, both equal to the API digests;
+`cosign verify-blob` (identity `release-windows.yml@…`, github OIDC issuer) ⇒ `Verified OK`.
+§6 strings on the new bytes: `0.3.82` in `gpn-node.exe` (5) and `gpn_node.exe` (8);
+`gpn_scheduler.exe` carries `image service unavailable` 1 / `no channel render endpoint` 2.
+Linux leg was verified at 23:22Z on the same sha (`45908378111`, tarball `dee7a6a3…cce468b`,
+`Verified OK`) — both lanes now attested from one commit.
+
+**Remaining gate (handle for next run):** CI run `45908365338` (same sha `50c9e9b8`) was
+`in_progress` at 00:29Z (11 min) when this run ended; `release-cut.sh --version 0.3.82` refuses
+until `require_green_ci` passes. Next run: ask that run once — green ⇒ run `release-cut.sh
+--version 0.3.82`; red ⇒ read the failing job and fix (no rebuild needed, assets are attested).
+
+**Other pending boxes:** item 273 soak day 3 of 7 (13.58 s/block, height 370203; ticks 2026-12-02
+at the earliest). No blockers, no triage.
+
 ## 16:05 PT — 0.3.82 §7: cancelled the 118-min dead CI run holding box 1's single slot; release handles re-queued
 
 **A0.** `origin/main` HEAD `2228d0f6` is docs-only ⇒ `?head_sha=` `total_count: 0` (expected, `paths-ignore`).
