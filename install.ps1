@@ -3021,8 +3021,8 @@ if (-not $progOk) {
   try {
     if ($haveProg) { Remove-NetFirewallRule -DisplayName $RuleProg -ErrorAction SilentlyContinue }
     New-NetFirewallRule -DisplayName $RuleProg -Direction Inbound -Action Allow `
-      -Profile Private -Program $prog -Enabled True `
-      -Description 'GPN node peering (#208); Private only, program path is the stable update junction' | Out-Null
+      -Profile Any -Program $prog -Enabled True `
+      -Description 'GPN node peering (#208); all profiles so a Public-classified network (WiFi) never prompts; program path is the stable update junction' | Out-Null
     [void]$made.Add('program ' + $prog)
   } catch { FwLine ('could not create the program rule: ' + $_.Exception.Message) }
 }
@@ -3030,10 +3030,21 @@ if (-not $portOk) {
   try {
     if ($havePort) { Remove-NetFirewallRule -DisplayName $RulePort -ErrorAction SilentlyContinue }
     New-NetFirewallRule -DisplayName $RulePort -Direction Inbound -Action Allow `
-      -Profile Private -Protocol TCP -LocalPort 30333 -Enabled True `
-      -Description 'GPN node peering TCP 30333 (#208); Private only' | Out-Null
+      -Profile Any -Protocol TCP -LocalPort 30333 -Enabled True `
+      -Description 'GPN node peering TCP 30333 (#208); all profiles so a Public-classified network (WiFi) never prompts' | Out-Null
     [void]$made.Add('TCP 30333')
   } catch { FwLine ('could not create the TCP 30333 rule: ' + $_.Exception.Message) }
+}
+
+# 2026-11-27 (owner): an existing rule may be Private-only from an older install, so a
+# Public-classified WiFi network still prompts. Widen it once; the node is a network daemon
+# and the port is 30333, not a general-purpose service.
+foreach ($rn in @($RuleProg, $RulePort)) {
+  $r = Get-NetFirewallRule -DisplayName $rn -ErrorAction SilentlyContinue
+  if ($r -and ($r.Profile -ne 'Any')) {
+    try { Set-NetFirewallRule -DisplayName $rn -Profile Any -ErrorAction Stop; FwLine ('widened ' + $rn + ' to all profiles') }
+    catch { FwLine ('could not widen ' + $rn + ': ' + $_.Exception.Message) }
+  }
 }
 
 # A Private-scoped rule is inert while Windows classifies the network as Public
