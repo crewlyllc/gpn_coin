@@ -1,3 +1,26 @@
+## 14:13 PT 0.3.84 — windows cycle-2 build GREEN (28 min); §5 build box ticked with digest
+
+- **A0 CI:** `origin/main` = `d7e6bbf0` (docs-only) ⇒ `total_count: 0` for the full sha, expected
+  under `paths-ignore`.
+- **§5 windows — TICKED, cycle 2.** Run `46067304988` (`Windows binaries`, tag
+  `build/bd36c4f9d561`, sha `bd36c4f9d561`) **completed success** 22:01:26Z. Job `140735652287` on
+  `DESKTOP-USBUADL`, 21:33:23Z→22:01:26Z (28 min, warm cache). All 24 steps success: `build node`,
+  `ollama pre-flight (REQUIRED)`, retire legacy task, hidden launcher, `deploy binaries + restart
+  node to C:\gpn\bin`, launcher verify, package zip, attest-availability, `Attest build provenance`
+  **skipped** (private repo — correct), `Sign release artifact keyless` success, `Provenance gate`
+  success, `publish windows-latest` success. Published `gpn-windows.zip` id 802211798,
+  **253,327,068 B**, sha256 `25790a28…d178543` (22:00:37Z) + `gpn-windows.zip.bundle` 9,033 B
+  (22:01:18Z).
+  notes: cycle 1's `66f5353` asset is superseded; the remaining §5/§6 windows boxes are re-earned
+  against this digest next pass.
+- **Release CI `46067336386`** (same tag) in one query: secret-scan, fmt+clippy, two-node GPU
+  testnet, linux build all `success`; `windows, self-hosted` `140735756078` now `in_progress` on
+  `DESKTOP-USBUADL` (was queued behind the release build) — started ~22:01Z, well inside the 90-min
+  rule. The only `failure`s are the two already-diagnosed `continue-on-error` jobs (macos no runner;
+  Dependency audit licenses = row 298). `release-cut` will want this run green.
+- No blocker, no decision needed. Next pass: read `46067336386` once, then §5 attestation boxes
+  (private path: bundle verifies the published zip) against sha256 `25790a28…d178543`.
+
 ## 13:51 PT 0.3.84 — windows build read once (still building, not waited on); release CI mostly green
 
 - **A0 CI:** `origin/main` = `b93bdcb8` (docs-only) ⇒ `total_count: 0` for the full sha, expected
