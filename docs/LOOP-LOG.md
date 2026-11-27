@@ -1,3 +1,31 @@
+## 07:40 PT — box 256 (§3b of 0.3.83): GPU-PV ruled out by measurement; step 3 will run CPU-only
+
+**A0.** `origin/main` = `9ed69f35` (docs-only audit commit) — `GET /actions/runs?head_sha=9ed69f35e95f285a0e5d07a612722949120128b4` ⇒
+`total_count: 0`, exactly as expected for a `docs/**` push. No CI conclusion to act on.
+
+**Box worked: 256 — stranger lifecycle (first unticked box in `docs/releases/archive/0.3.83.md` §3b).** Not ticked yet; the
+box advanced one measured step and the venue question is settled without an owner decision.
+
+- The v2 offline apply **worked**: `gpn-apply210b` `LastTaskResult 0`, `apply-unattend rc=0`, `bcdboot rc=0`, VM started
+  04:07:05. GPN-210 now boots Win11 Enterprise Eval **26100**, account `gpn` present, PS Direct OK (heartbeat at 32 s,
+  uptime stable across two reboots — the earlier "reboot loop" was my own Stop/Start).
+- **Cause of the step-3 failure, measured at the device:** guest `Get-PnpDevice -Class Display` ⇒
+  `Intel(R) UHD Graphics 630 | Error | problem=CM_PROB_FAILED_POST_START`, InstanceId `PCI\VEN_1414&DEV_008E…`, driver
+  `Microsoft 10.0.26100.1150` (in-box `vrd.inf`). Host `Get-VMGpuPartitionAdapter -VMName GPN-210` ⇒ Intel partition
+  (VEN_8086&DEV_9BC5) attached with VRAM/encode/decode 1e9 but **`CurrentPartitionCompute = 0`**, and Hyper-V Worker
+  33101 at 06:23:06 ⇒ `requested unsupported Virtual PCI protocol version 0x10005` (`0x8007051A`), negotiated 0x10004;
+  33108 at 06:23:24 ⇒ guest powered the VPCI device off.
+- **Last variable tested, negative:** injected the host's own Intel DCH `31.0.101.2140` into the offline image
+  (`dism /Image:J:\ /Add-Driver … /ForceUnsigned` ⇒ `oem0.inf: successfully installed`, rc=0) and rebooted — the device
+  still binds Microsoft's driver and still returns problem 43, because the INF targets `VEN_8086` and the guest device is
+  `VEN_1414`. No guest OS and no driver on this host can make the iGPU partition a working adapter.
+- **Call made (implementation, not an owner decision):** step 3 does not need the GPU. gpn-node mines on CPU and ollama
+  serves CPU-only; the gate is about a stranger's machine, most of which have no supported GPU. Next run: detach the
+  unusable partition, install the 0.3.83 snippet in GPN-210, run `stranger-lifecycle.ps1` steps 3-6 CPU-only
+  (`qwen2.5:0.5b`). A GPU-specific stranger claim is a separate row, not this box.
+
+**Files.** `docs/releases/archive/0.3.83.md` §3b (256 note), `GPN-LIST.md` row 256 evidence.
+
 ## 06:12 PT — AUDIT (6-hourly): clean, 2.1 G of stale 0.3.82 verification copies removed, disk 24.8% → 25.3% free
 
 **Units.** `systemctl --user list-units 'gpn*' --all` = 27 units; every `enabled` one is `active/running`
