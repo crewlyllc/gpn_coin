@@ -1,3 +1,21 @@
+## 11:59 PT 0.3.84 §5 windows build unblocked — stale obsolete CI run cancelled off the single-slot Windows runner
+
+- **A0 CI:** `origin/main` = `2c79b4ef38c583ff6837f4af114b5bd6564e7c85`; `GET /actions/runs?head_sha=<full>`
+  ⇒ `total_count: 1`, run `46058162194` **pending** (queued) — no conclusion, so not a failure.
+  Not blocked on (A0 rule); continued to A.
+- **§5 windows build was starved, not slow.** `release-windows.yml` run `46053214955` (tag
+  `build/66f5353ba8c9`) sat `queued` since 18:57Z while runner `DESKTOP-USBUADL` was
+  `online busy=True` — occupied by `CI` run `46047494382` (sha `56fcd99d…`, started 18:10Z,
+  in progress 73 min, **linux job already `failure`** at step 13). That SHA is obsolete: main has
+  moved `56fcd99d`→`66f5353b`→`2c79b4ef`, and its linux red is already fixed in `2c79b4ef`.
+  Class: **environment/contention** (one single-slot runner, an abandoned run holding it).
+  Fix: `POST /runs/46047494382/cancel` ⇒ `202`; polled once ⇒ `conclusion: cancelled`.
+  `46053214955` then went `queued`→`in_progress` within ~60 s. Handle written into the §5 box.
+- Confirmed `release-windows.yml` runs no `.ps1` test suite (`grep run:` shows build/package/
+  attest steps only), so `2c79b4ef`'s ASCII fix is not a prerequisite of this build — the artifact
+  from tag `66f5353b` is still the same-SHA twin of the successful linux build `46053212209`.
+- No box could be ticked (build in flight). No blockers, no [TRIAGE] items.
+
 ## 11:36 PT 0.3.84 §5 linux build ticked + CI red fixed (ASCII guard on two .ps1 tests)
 
 - **A0 CI:** docs-only HEAD `de2603e7…` ⇒ `total_count: 0`, expected (`ci.yml` paths-ignore).
