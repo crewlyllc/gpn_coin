@@ -1,3 +1,57 @@
+## 00:20 PT — AUDIT (fixed 1, needs-attention 1): disk 82G→106G free; canary proof for 0.3.83 was never published, so the whole fleet is held on 0.3.81
+
+**Disk first (free was 19%, below the 25% trigger).** `df -h /` before ⇒ `439G 335G 82G 81%`.
+Measured (`du -sh`): `~/.ci-cache` 99G (gpn-agent-target 79G, gpn-node-target 21G), `~/.cache` 53G
+(huggingface/hub 53G), `~/.openclaw` 17G (workspace/shared 15G, plugin-runtime-deps 1.5G, agents 376M),
+`~/gpn-loop` 33G, `~/ollama` 8.1G, `/tmp` 4.5G.
+
+Deleted (all regenerable, no cargo/rustc running — `pgrep -x cargo`/`rustc` both empty):
+`~/gpn-loop/gpn-agent/target/debug` 24G, `*/target/release/incremental` (0), `~/.cache/gpn-release-cut`
+575M, `/tmp/winv` 242M (0.3.8x Windows verify copy, 15.7 h, `lsof +D` empty), `/tmp/win038` 29M
+(0.3.38, 40 h). `df` after ⇒ **`439G 311G 106G 75%`** (19% → 24% free); `~/gpn-loop` 33G → 8.7G.
+Left deliberately: `.ci-cache` (owner decision: stays; `find -mtime +7` = **0 files**, pruning buys nothing
+and costs a full rebuild), `~/.cache/huggingface/hub` + `~/ollama` (models, protected),
+`workspace/shared` 15G (data), `/tmp/v082|win083|wz|art083|cosigncheck` (~3.4G, all <12 h — the rule is
+delete >12 h), `~/tmp/rel082linux` 1.3G (9.7 h, will cross 12 h next run). 183 session transcripts
+>30 d exist (`find ~/.openclaw/agents -name '*.jsonl' -mtime +30`) — counted, not deleted, owner decision.
+
+**Services** — `systemctl --user list-units 'gpn*' --all`: 27 units, every enabled one ACTIVE.
+Running: gpn-fleet, accesspoint, provider, provider-heartbeat, diffusion, finetune, oracle, explorer,
+faucet, fleet-directive. `gpn-node.service` is `disabled` (fleet runs the node) — expected, not a fault.
+Ports: 9944/8092/8093/8099/11434 all OPEN; `:8099` loopback-only, `:8092`/`:8093` on 0.0.0.0.
+`gpn-fleet --since -6h` = 13,786 lines, **0** matches for `panic|"Reason"|banned|Incompatible pruning`.
+Chain: `system_chain` GPN Public Testnet, `system_version` 0.3.83, 4 peers, blocks 372053→372056 inside
+one minute, `system_health` ok. `gpn-incident-alarm` every minute: `peers=4 height=37205x jobs_seen=256`,
+`ok: no incident conditions`. `gpn-deploy-drift` 30-min runs all `Finished`. VRAM 1617/8188 MiB on the
+4060, `gpn-node` ~122% CPU, load 2.88 — the miner is working, not stuck.
+
+**Updater:** `~/.gpn/update/update-attempts.json` last two ⇒ `0.3.83 … "outcome": "confirmed"`
+(1795762330) and `0.3.82 … confirmed`. Release loop `openclaw cron runs` 50 entries: 48 ok, 1 error
+(`cron: job execution timed out`, 60.0 min, ts 1795762625) — one, not repeated; the next run finished ok
+in 49.8 min.
+
+**Release record:** `website/releases.json` 0.3.83 = `docs/releases/INDEX.md` 0.3.83 =
+`archive/0.3.83.md` present = `GPN-LIST.md` rows 287/288 `COMPLETE 0.3.83` = running node 0.3.83. Consistent.
+
+**The fault — box 1 is held two releases behind and nobody published the canary proof.**
+`C:\gpn\update.log` (00:00:04, 00:02:51):
+> `check: current 0.3.81   current -> (lower than the install dir's 0.3.83 at C:\gpn\bin\gpn_node.exe)`
+> `check: -> update available 0.3.83 but HELD here: 0.3.83 is available, but this node is not the canary — the published canary proof is for 0.3.81 not 0.3.83 — holding`
+> `holding - the release is available but not installable on this node yet (node NOT restarted)`
+
+`https://gpncoin.ai/canary.json` ⇒ 200 `{"version": "0.3.81", "job_served": true, "job_id": 6600}`.
+Mechanism (`gpn-agent/src/bin/gpn_update.rs:967-995`): only a node with `GPN_CANARY=1` installs first;
+everyone else holds unless `canary.json` proves the *target* version. This host IS the canary
+(`gpn-update.service.d/canary.conf` ⇒ `Environment=GPN_CANARY=1`) and it self-updated to 0.3.83 at
+22:52:10 PT (`confirmed 0.3.83 is running`), but `scripts/canary-report.py` / `canary-publish.sh` were
+never run for 0.3.82 or 0.3.83 — so `canary.json` still says 0.3.81 and **every non-canary node in the
+fleet is pinned to 0.3.81**. The proof material exists and is ready: job `1795762431371` served
+`Completed` on 0.3.83 by `5ENqSp5Q65bx…` at 06:53Z (the row 287 live proof).
+Not fixed by me: publishing the canary proof advances fleet deployment, which is release-lane, not audit.
+Escalated as `AUDIT-2026-11-27a` in `docs/NEEDS-TRIAGE.md` with the exact two commands.
+
+Nothing else needs attention. No [TRIAGE] beyond that item.
+
 ## 00:05 PT — 256 ran the whole way to step 3: 1/1b/2 PASS, 3 FAILS on OpenCL; gate venue now the only obstacle (+ new row 289)
 
 The dispatch recorded in the 23:34 entry came back. Read from the guest (`C:\lifecycle-report.txt`,
