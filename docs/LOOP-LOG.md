@@ -1,3 +1,25 @@
+## 18:58 PT 0.3.83 CUT — critical batch (rows 287 + 288), checklist generated
+
+0.3.82 is closed (published, archived, 285/286 COMPLETE); 273's seven-day soak is the only
+IN-PROGRESS row and stays carried. Two rows filed while proving 286 are the "AI does not work"
+rule, so 0.3.83 cuts immediately instead of waiting for five (owner batch policy 2026-11-25):
+
+- **287** an image/audio request that outlives the AP's 180 s hub deadline reports 503 while the
+  provider finishes the render (measured 276 s cold render at 18:28–18:32 PT).
+- **288** that timed-out job leaves a `pending` entry (one dated 2026-10-23 found live) which
+  blocks `pending_len()==0` settlement, and the 409 `StaleStateBefore` retry re-prices from the
+  AP's own stale mirror — every later media request 409s until a human intervenes.
+
+Done this run: `bump-version.py patch` ⇒ 0.3.83 (15 manifests + lockfiles + `network.json`),
+CHANGELOG section written, rows 287/288/256 marked IN-PROGRESS, checklist generated
+(`docs/releases/0.3.83.md`, 4 in-progress / 5 blocked). One commit, one push. No code fix is
+claimed yet — box 1 of 0.3.83 (287) is the next run's work.
+
+A0: HEAD `70dccbd7` is a docs/list commit ⇒ no CI run exists for it (`?head_sha=` total_count 0),
+which is the expected paths-ignore behaviour.
+
+Item 256 remains unanswered (§0e venue) and travels with 0.3.83 unticked, as in 0.3.81/0.3.82.
+
 ## 18:55 PT [TRIAGE] 0.3.82 CLOSED OUT — §7/§7b/§8/§9/§10 ticked with live proofs; image generation repaired and proven; two new rows filed
 
 Release 0.3.82 is published, deployed here, and proven on this host. Checklist moved to

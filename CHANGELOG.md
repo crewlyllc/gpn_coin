@@ -8,6 +8,26 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 versions are [Semantic Versioning](https://semver.org/spec/v2.0.0.html), with
 the GPN-specific meaning of each level documented in `docs/updates.md`.
 
+## [0.3.83] - 2026-11-26
+
+Bumped from 0.3.82 (`scripts/bump-version.py patch`). A **critical** cut under the batch policy
+(owner, 2026-11-25): both rows are the "AI does not work" rule — an image or speech request can be
+reported as failed after the work was actually done, and one timed-out request then makes every
+later media request fail until a human intervenes. That does not wait for a batch of five.
+
+### Fixed
+- **A slow media job is no longer reported as a failure** (row 287). The access point used
+  `hub.job_deadline_ms` (default 180 s, `gpn-agent/src/hub_ap.rs:114`) as the whole timeout for the
+  job POST, so a cold render after a restart — 276 s measured on 0.3.82 — timed out at the caller
+  while the provider went on to publish the PNG. The deadline now separates "the provider accepted
+  the job" from "the render finished", and the caller is told the job is still running rather than
+  that the service is unavailable.
+- **A timed-out job can no longer wedge a provider's channel** (row 288). A leaked `pending` entry
+  (one dated 2026-10-23 was found live) blocked `pending_len() == 0` settlement for five weeks,
+  while the 409 `StaleStateBefore` retry re-priced from the access point's own stale mirror three
+  times and never re-read the provider's state. Expired pending entries are now dropped on the
+  settlement path, and the stale-state retry re-reads the live channel state before giving up.
+
 ## [0.3.82] - 2026-11-26
 
 Bumped from 0.3.81 (`scripts/bump-version.py patch`). A **critical** cut under the batch policy
