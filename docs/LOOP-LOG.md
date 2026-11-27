@@ -1,3 +1,39 @@
+## 03:12 PT — 256: the Win11 guest never booted its install media at all (rig defect, measured), fixed by applying the image offline; DISM dispatch in flight
+
+A0: origin/main HEAD `2dbc9fff` ⇒ `?head_sha=2dbc9fffc4ccb838935831e025ee29770515e6e6` ⇒ `total_count: 0`
+— correct for a docs-only SHA (`ci.yml` paths-ignore). Nothing red, nothing in flight.
+
+**Box 256, first thing this run: the GPN-210 guest built at 02:14 never installed anything.**
+Evidence, measured:
+- host event **18603 `'GPN-210' failed to boot an operating system`** at 02:15:19, 02:43:21,
+  02:45:10, 02:48:09 and 02:50:45 — **exactly 63 s after each Start-VM**, no error-level events;
+- the 80 GB dynamic guest disk is still **4,194,304 B** (header only, never written) on every attempt;
+- boot order entry 1 is the DVD (`Drive: D:\iso\win11eval.iso`), DVD on SCSI 0/1;
+- the ISO is intact and bootable: mounted, `efi\boot\bootx64.efi` 2,759,624 B, `sources\boot.wim`
+  538,988,428 B, `sources\install.wim` 4,575,544,866 B; the download hash was recorded at 02:13;
+- **SecureBoot Off** (explicitly set) ⇒ same 63 s failure ⇒ not the secure-boot template;
+- automatic checkpoints were ON (a checkpoint at every start, `Automatic Checkpoint … 2:44:05`),
+  disabled + merged ⇒ same failure ⇒ not the checkpoint chain;
+- ISO copied to `C:\iso` (NVMe, 5,387,960,320 B in 38 s) and rebound ⇒ same failure ⇒ not the storage path.
+So the firmware never launches the media (the 63 s is the PXE timeout after the DVD entry is skipped);
+media, SecureBoot, checkpoints and the disk are all ruled out by measurement.
+
+**Fix in flight (dispatch-and-end):** bypass media boot entirely — apply `install.wim` offline.
+Task `gpn-apply210` (SYSTEM) → `C:\gpn-vm\apply-210.ps1` (sha256 `71861CE2…EF86`, transferred
+base64 and hash-verified) does: detach disks → fresh 80 GB GPT VHDX with EFI 300 MB / MSR 16 MB /
+NTFS primary → `dism /Apply-Image /Index:1` (`Windows 11 Enterprise Evaluation`) → `bcdboot /f UEFI`
+→ answer file staged at `Windows\Panther\unattend.xml` → attach at SCSI 0/0 → Start-VM.
+Log `C:\gpn-vm\apply210.log`; started 02:53:12 PT, at **1.0 %** (306 MB written) when this run ended.
+
+**Next run (256):** read `gpn-apply210` state + `apply210.log`. Guest credentials are `gpn` /
+**`Gpn210Test!`** (not `gpn` — that is why the two PS-Direct probes this run returned no session),
+so PowerShell Direct must use that password. Then: attach the **Intel UHD 630 partition only**,
+stage DCH `31.0.101.2140`, read `Get-PnpDevice -Class Display`; code 43 again on 26100 ⇒ GPU-PV is
+not a venue on this host on any guest OS (owner question, [TRIAGE]); device healthy ⇒ lifecycle
+steps 3-6.
+
+**273 (soak):** unchanged, the `gpn-soak-record.timer` tick's job.
+
 ## 02:17 PT — 256: the last unvaried variable is varied — a Windows 11 CLIENT guest (build 26100) is installed and installing unattended on box 1; GPU-PV verdict next run
 
 A0: origin/main HEAD `92308fe2` (docs: 256 iGPU partition + driver on GPN-209) ⇒
