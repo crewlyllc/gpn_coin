@@ -1,3 +1,41 @@
+## 07:03 PT [TRIAGE] — box 256: "CPU-only step 3" is impossible by measurement; the stranger-gate venue is now a real owner call
+
+**A0.** `origin/main` = `b4f894e8` (docs-only loop-log commit) — `GET /actions/runs?head_sha=b4f894e81ee05192a1fd554742ae0a7567de57b3` ⇒ `total_count: 0`,
+as expected for `docs/**` (paths-ignore). No CI conclusion to act on.
+
+**Box worked: 256 (stranger lifecycle, §3b of 0.3.83), and it produced a decision instead of a pass.**
+
+- Detached the Intel GPU partition from GPN-210 (`Stop-VM` → `Remove-VMGpuPartitionAdapter` ⇒ 100 %), config verified
+  `GuestControlledCacheTypes True / LowMemoryMappedIoSpace 1 GB / HighMemoryMappedIoSpace 32 GB`. The guest now has **no
+  compute GPU**: `Get-CimInstance Win32_VideoController` ⇒ only `Microsoft Hyper-V Video 10.0.26100.1150`;
+  `Get-PnpDevice -Class Display` ⇒ `Intel(R) UHD Graphics 630 | Unknown | CM_PROB_PHANTOM` ×2.
+- The 0.3.83 install survives (`C:\gpn` True, `gpn-node.exe 0.3.83`), so **steps 1, 1b, 2 remain PASS** on a clean guest.
+- **Last run's plan ("run step 3 CPU-only") cannot work on any machine.** Enrolment is `src/bin/gpn_node.rs:4690` →
+  `onboard::probe_local_gpu_for_genesis` → `gpu::GPUMonitor::get_gpu_info`, which probes only `nvidia-smi` and `rocm-smi`
+  (`src/gpu/mod.rs:38-53` ⇒ `no compute GPU detected: nvidia-smi and rocm-smi both unavailable`). `GPN_GFLOPS` skips the
+  benchmark but not that read. The Intel-capable Windows detector (`detect_gpu_capability`/`win_detect`, `src/gpu/mod.rs:770-784`)
+  is used only by `gpn_llm_provider`/`gpn_provider_status` — never by the entry path. Filed as **row 293** (NEW): an Intel-only
+  laptop is refused at enrolment with advice ("install ... NVIDIA/AMD/Intel") that cannot succeed in that code.
+- **No 22621 media for the VPCI test either:** box 1 has one ISO (`D:\iso\win11eval.iso`, 5,387,960,320 B, 26100); Microsoft's
+  eval centre serves only 24H2; a 22H2 image needs a UUP build (~2–3 h) or a non-Microsoft mirror (supply-chain risk — not on
+  the build box).
+
+**[TRIAGE] Question for Jeremy (item 256, row set AWAITING-OWNER): which machine runs the stranger gate's steps 3-6?**
+- (i) expose the 5070 Ti to the GPN-210 guest for the test window — `Get-VMHostAssignableDevice` ⇒ 0, so the card must be
+  dismounted and box 1's display goes offline during the window;
+- (ii) **recommended** — power box 4 back on (off the tailnet since 2026-11-25) and run steps 3-6 on real hardware with its
+  keystore preserved: the only version of this test that runs on a machine we never installed on;
+- (iii) accept the guest-proven halves and run steps 3-6 on a real GPU machine, documented as a "second-machine lifecycle"
+  (cannot catch install-path defects).
+
+The 0.3.83 §3b box for 256 is ticked `blocked — venue` so the release is not held hostage; row 256 is `AWAITING-OWNER`.
+
+**Alarm resolved.** ALARM-2026-11-27T12:19Z ("no block for 2.3 min") was transient: `chain_getHeader` ⇒ height **373598** at
+14:57:50Z vs **373033** at 12:17:09Z (565 blocks / 2 h 38 m ≈ 16.8 s/block, normal cadence). Marked RESOLVED in
+`docs/NEEDS-TRIAGE.md`; no diagnosis needed.
+
+No other box touched, nothing bundled (0.3.83 still in flight).
+
 ## 06:35 PT — box 256 (§3b of 0.3.83): GPU-PV ruled out by measurement; step 3 will run CPU-only
 
 **A0.** `origin/main` = `9ed69f35` (docs-only audit commit) — `GET /actions/runs?head_sha=9ed69f35e95f285a0e5d07a612722949120128b4` ⇒
