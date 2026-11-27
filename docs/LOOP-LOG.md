@@ -1,3 +1,44 @@
+## 02:55 PT — Intel iGPU partition attached and its driver installed on the clean guest; GPU-PV still fails at the guest driver (code 43) on BOTH GPUs, and DDA is unavailable on box 1 — venue question narrowed again, still no owner answer needed
+
+A0: origin/main HEAD `1665170e` (docs: 256 stranger gate on a clean guest) ⇒ `?head_sha=` (full 40)
+⇒ `total_count: 0` — correct for a docs-only SHA (`ci.yml` paths-ignore). The in-flight CI run on
+`c8d24525` (45955034447) finished `success` while this run worked, including its Windows job on
+DESKTOP-USBUADL; box 1's runner is idle now.
+
+**Work done on 256 (the announced next step, executed):**
+- attached the **Intel UHD 630** partition (`…VEN_8086&DEV_9BC5…`, `ValidPartitionCounts {32}`) to
+  GPN-209 with real budgets incl. compute (`Min/Max/OptimalCompute 80/100/90 MB`), and **removed the
+  NVIDIA partition** afterwards (`Remove-VMGpuPartitionAdapter` takes the adapter object, not
+  `-InstancePath`) — nothing was lost, the GeForce partition never worked;
+- staged the Intel DCH package into the guest (143 files, `31.0.101.2140`, the exact host version) and
+  installed it: `pnputil /add-driver iigd_dch.inf /install` ⇒ `Published Name: oem1.inf`, `exit 0`;
+- rebooted the guest and re-read the device: **`Intel(R) UHD Graphics 630` — `CM_PROB_FAILED_POST_START`,
+  `ConfigManagerErrorCode 43`**, OpenCL vendor keys still empty.
+
+**Cause measured (not guessed):** the partition is presented to the guest as Microsoft's *generic*
+virtual PCI device — host `Hyper-V-Worker-Admin` event **33103**: `PnpID = 'PCI\VEN_1414&DEV_008E&SUBSYS_00000000&REV_00', FunctionType = Virtual`;
+guest side binds the inbox **`vrd.inf`** (`vrd.sys 10.0.20348.1`), not any vendor INF. Intel's
+`iigd_dch.inf` contains **0** matches for `VEN_1414`/`DEV_008E` (it lists `PCI\VEN_8086&DEV_…`), so no
+vendor driver can bind that devnode at all. The virtual-PCI channel negotiates fine
+(`protocol version 0x10004`) and then the guest powers the device off (event **33108**, 1 s after
+power-on) — a guest-side `vrd` failure, identical for the GeForce partition, so it is not vendor
+support, a budget value, or a two-partition conflict (re-tested Intel-only).
+
+**Second finding: DDA is not a fallback on this host.** `Get-VMHostAssignableDevice` on box 1 ⇒ **0
+devices**, so "DDA the 5070 Ti for the test window" is not available without further host work either.
+Correction to the earlier plan that named DDA as the last option.
+
+**Also fixed in the tooling record:** `Copy-Item -ToSession` of the 1.3 GB driver tree to a guest dies
+mid-copy (two attempts died at 83/143 files); **`Copy-VMFile -FileSource Host` completed** and the guest
+extracted all 143 files. Use `Copy-VMFile` for anything over a few MB over PowerShell Direct.
+
+**Where 256 stands:** steps 1–2 PASS on a clean guest (0.3.83); step 3 blocked by the GPU-PV guest
+driver, not by the node. Next test is a **Windows 11 client guest** (host is `Win11 22621`, the failing
+`vrd.sys` is Server 2022's `20348.1` — the one variable not yet varied); that is provisioning work, not
+a decision. `docs/NEEDS-TRIAGE.md` 256 updated with the measurements; no [TRIAGE] needed this run.
+
+**273 (soak):** day 4 is due on the `gpn-soak-record.timer` tick, not this run.
+
 ## 00:56 PT — stranger gate read on GPN-209: install+version PASS on a clean guest, step 3 fails on no OpenCL (consumer GeForce = no GPU-PV); venue narrowed to the Intel iGPU, no decision needed
 
 A0: origin/main HEAD `0b45d5f3` (docs: checklist §7c + 0.3.83 gate opening) ⇒ `?head_sha=` (full 40) ⇒
