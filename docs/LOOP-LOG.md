@@ -1,3 +1,21 @@
+## 17:19 PT — 0.3.82: CI 45908365338 still on the windows agent build (step 7); cut still gated, nothing cancelled
+
+**A0.** `origin/main` HEAD `c0499987` docs-only ⇒ `?head_sha=` `total_count: 0` (expected). No red
+CI to work.
+
+**Box §7 `release-cut.sh` — asked once, gate not met, not waited on.** CI run `45908365338`
+(sha `50c9e9b8`) at 01:19Z ⇒ `in_progress`. Job detail this run: `secret-scan` success,
+`fmt + clippy` success (encoding guard green), `linux` success (all 27 steps, 00:02→00:30Z),
+windows job `140229656546` started 00:28:59Z — step 6 `Build + test gpn-node (release)`
+**success 00:29:17→01:08:19Z**, step 7 `Build + test gpn-agent (release)` `in_progress` since
+01:08:19Z (~11 min). Job age 50 min, run age 78 min ⇒ under the 90-minute stale threshold and
+making forward progress, so no cancel / no re-dispatch.
+
+Both artifacts are already attested from `50c9e9b8` (linux `45908378111`, windows `45908380728`
+`completed/success` 00:27:52Z), so a green CI needs no rebuild. Handle unchanged for next run:
+ask `45908365338` once — `completed/success` ⇒ `scripts/release-cut.sh --version 0.3.82`;
+`failure` ⇒ read the failing job, quote the line, fix the cause.
+
 ## 17:05 PT — 0.3.82: §1 closed 3/3 (n/a box), CI 45908365338 still building windows; no cut yet
 
 **A0.** `origin/main` HEAD `da4cf33e` is docs-only ⇒ `?head_sha=` `total_count: 0` (expected,
