@@ -1,4 +1,19 @@
-## 15:16 PT 0.3.84 — release CI still building (alive, not stalled); §7 cut handle re-armed, run ended per dispatch rule
+## 15:18 PT 0.3.84 — §5 closed on fresh API evidence (7/7); §7 cut still gated on CI run 46067336386 (windows gpn-agent test compiling)
+
+- **A0 CI:** `origin/main` = `0de82a7c` (docs-only loop-log) ⇒ no run expected. Release CI run
+  `46067336386` read once: `in_progress`; windows job `140735756078` step 7 `Build + test gpn-agent
+  (release)` running since 22:42:51Z. Liveness measured on box 1 over SSH at 23:16Z: `cargo` 60816,
+  **`rustc` 66136/66240 started 15:16:45/15:16:34 local** — new compiler children seconds old, so
+  the run is progressing; the 90-min stale rule is not applied (run-level 2 h 17 m, job-level 74 min).
+- **§5 ticked to DONE (7/7)** by re-earning the two open boxes from the API, not from old notes:
+  `GET /releases/tags/windows-latest` ⇒ zip asset `802211798` 253,327,068 B `digest
+  25790a28…d178543`, bundle asset `802213353` 9,033 B `a778a806…c8cc6e64`; both downloaded by
+  asset id, local `sha256sum` == API digest, and `cosign verify-blob` against the bundle ⇒
+  **`Verified OK`** (rc 0).
+- **§7 `release-cut` remains the first unticked box.** Handle for next pass: read `46067336386`
+  once; on `success` run `scripts/release-cut.sh --version 0.3.84 --timeout 300`.
+- No blocker, no decision needed.
+
 
 - **A0 CI:** `origin/main` = `c5c43b85` (docs-only loop-log commit) ⇒ `total_count: 0` for the full
   40-char sha, expected under `paths-ignore`; nothing to wait on.
