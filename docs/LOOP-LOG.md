@@ -1,3 +1,56 @@
+## 12:12 PT AUDIT — fixed 1 (disk), chain + fleet clean; one deferred re-workflow left red
+
+- **Disk first:** `df -h /` ⇒ 439G, 310G used, **107G free (24.4%)** — under the 25 % trigger, so
+  cleaned before anything else. Candidates measured, not assumed: `/tmp` 3.7G (nothing >3 d and
+  >3 MB: the >=3 d dirs are 3.3M/3.3M/2.7M — `/tmp` buys nothing), `~/.cache/gpn-release-cut` 4 KB,
+  `~/.cache/pip` 7.3M, `state/bin-snapshots` **does not exist**. Live build check first:
+  `pgrep -x cargo` ⇒ pid 1415126 `cargo build --release`, cwd
+  `/home/jeremyg/actions-runner/_work/gpn_coin/gpn_coin/gpn-agent` (the 0.3.84 CI linux job) — so
+  every `*/target` was off limits this pass.
+- **Deleted (all `lsof +D` empty, all >12 h and re-downloadable from GitHub):**
+  `/tmp/art083` 507M, `/tmp/win083` 766M, `/tmp/cosigncheck` 333M (0.3.83 verification copies),
+  `/tmp/gpn_scheduler.bak-073359` 29M, `/tmp/ap-probe` 29M, `/tmp/aprobe4` 29M ⇒ **1.69 GB**.
+  Kept deliberately: `/tmp/gpn-linux-0.3.84.tar.gz` (349M, 11:37 today — the in-flight 0.3.84
+  artifact), `.ci-cache` 78G and `~/.cache/huggingface` 53G (owner decision 2026-11-20).
+  **After: 109G free (24.8%)** — above trigger but still under 30 %; the next 30 G that vanish will
+  be `gpn-agent-target` (57G) and that is an owner call, not mine.
+- **Top consumers (measured):** `.ci-cache` 78G (touched today 09:34) · `~/.cache/huggingface` 53G
+  (models, protected) · `~/gpn-loop` 31G of which `gpn-agent/target` 26G (live build) and
+  `gpn-node/target` 3.9G · `~/.openclaw/workspace/shared` 15G (data) · `~/ollama` 8.1G ·
+  `plugin-runtime-deps` 1.5G · `/tmp` 2.0G · `~/.openclaw/agents` 375M (183 session files >30 d =
+  167.6 MB, reported not deleted) · `~/.openclaw/cron/runs` 34M (18 files >30 d = 9.2 MB, reported).
+- **Chain:** `system_chain` "GPN Public Testnet", `system_version` **0.3.83**, `system_peers` **4**
+  (AUTHORITY), head `0x5b813` = #374803 and sealing — journal shows `✅ Successfully mined block`
+  at 12:05:01 and `best: #374804`. `chain-work` cumulative 174.4e9. No genesis stall.
+- **Units:** `systemctl --user list-units 'gpn*'` ⇒ 29 units, no enabled-but-dead: accesspoint,
+  fleet, fleet-directive, provider, provider-heartbeat, oracle, diffusion, finetune, explorer,
+  faucet all `active`. `gpn-node.service` is `disabled` by design (the node runs as a child of
+  gpn-fleet, pid 969554 owns :9944). Ports: 9944 (405 = wrong method, expected), 8092 `/v1/models`
+  ⇒ 5 ollama models, 8093 `/health` ⇒ `{"status":"ok"}`, 8099 ⇒ 200, 11434 ⇒ 200.
+  GPU: RTX 4060 1617/8188 MiB, 100 % util (diffusion/provider working). RAM 22 Gi avail,
+  load 4.55.
+- **Logs:** `journalctl --user -u gpn-fleet -n 300` ⇒ **0** lines matching
+  `panic|Reason:|restart|Incompatible pruning|taskkill|error|warn` (300/300 lines are block
+  import/mine chatter). Only non-fleet hit in 2 h across all gpn units: one
+  `BrokenPipeError: [Errno 32] Broken pipe` at 12:04:09 from the fleet-directive HTTP handler
+  (`http/server.py copyfile`) — a client aborting a download, not a fault.
+  **Updater ledger:** `~/.gpn/update/update-attempts.json` last entry 0.3.83
+  `outcome: "confirmed"`, `release_id d9e663dd…4e6ca6`, `attempts: 1`, `reason: ""` at 22:51 PT;
+  `~/.gpn/update/current -> versions/0.3.83`. `journalctl --user -u gpn-update`: hourly runs,
+  all `Finished`, no failures since 00:11.
+- **Release loop:** `openclaw cron runs --id feff1358…` last entry 11:59 PT `status: ok`.
+- **Box 1:** `Get-Process gpn-node` ⇒ `C:\gpn\data\update\current\gpn-node.exe`,
+  `system_version` ⇒ **0.3.83** — matches the host.
+- **Release record (§4):** site `releases.json` version **0.3.83** == running node **0.3.83** ==
+  box 1 **0.3.83**; `docs/releases/INDEX.md` 32 version rows == 32 files in
+  `docs/releases/archive/`; `GPN-LIST.md` rows 287/288 `COMPLETE 0.3.83`. 0.3.84 is mid-build
+  (windows run 46053214955 `in_progress` at 11:58, no INDEX row yet — correct, not published).
+- **Remaining / deferred:** AUDIT-2026-11-25a (`release-unix.yml` still `failure` on its last
+  real run, 2026-11-26 04:03Z; 54 runs, never green) is **still deferred** — a windows release
+  build is in flight on the only windows runner, so I did not touch release-path code. Third
+  audit it has been deferred; recommendation stays **A** (drop the macOS job). Not [TRIAGE] — the
+  decision is already written in NEEDS-TRIAGE and is the assistant's to answer, not a new fault.
+
 ## 11:59 PT 0.3.84 §5 windows build unblocked — stale obsolete CI run cancelled off the single-slot Windows runner
 
 - **A0 CI:** `origin/main` = `2c79b4ef38c583ff6837f4af114b5bd6564e7c85`; `GET /actions/runs?head_sha=<full>`
