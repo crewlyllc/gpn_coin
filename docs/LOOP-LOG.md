@@ -1,3 +1,16 @@
+## 08:45 PT 0.3.84 box 289 ticked — ollama download is bounded, streamed and actionable
+
+- **A0 CI:** no run exists for `2f52a4ef` (docs-only SHA, `paths-ignore` working as intended).
+- **Box 289 (ollama install download)** — ticked with fresh evidence, not a re-print of the row note:
+  `scripts/tests/test-install-ollama-download.ps1` ⇒ `RESULT: PASS (17 checks)`;
+  dead-URL section (`http://127.0.0.1:1/OllamaSetup.exe`) B1–B9: names the URL, logs each bounded
+  attempt, gives up after the stated count, gives a next step, never blames ollama, leaves no partial
+  file, bounded at **5.8 s**; A1–A6 streaming path with sha256 match; C1/C2 `install.ps1` direct path
+  and the 371 MiB snapshot both stream. Failing-first still holds (pre-fix tree: 10 failed / 6 passed).
+- Guest proof carried from the 05:5x run on GPN-210: 1,953,587,080 B in 50 s, working set flat at 77 MB.
+- Commit `59ff192e` (docs + list row), pushed to main. Docs-only → no CI run expected.
+- No blockers, no [TRIAGE] items. Next run: box 290 (canary proof automated in the release driver).
+
 ## 08:2x PT — 0.3.84 box 1 (273, seven-day soak) ticked: day 3/7 with numbers
 
 **A0.** HEAD `8c2227be…f83e` — `GET /actions/runs?head_sha=…` ⇒ run `46029751951` (CI) status
