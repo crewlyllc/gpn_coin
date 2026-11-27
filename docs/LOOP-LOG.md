@@ -1,3 +1,22 @@
+## 11:16 PT 0.3.84 §5 (builds) — both dispatches still in flight; nothing tickable this pass
+
+- **A0 CI:** `origin/main` = `75baca815048792fc6f5e0ea54875a2b008675f2` (docs-only tick commit);
+  `GET /actions/runs?head_sha=<full 40>` ⇒ `total_count: 0` — expected for a docs SHA
+  (`ci.yml:36-42` paths-ignore). Not treated as a red flag.
+- **§5 linux build** (`release-linux-selfhosted.yml`, run `46053212209`, tag `build/66f5353ba8c9`):
+  `in_progress`, current step `build (waits for ~/.gpn/build.lock)` — i.e. contention with CI run
+  `46047494382` on the single-slot runner, not a fault.
+- **§5 windows build** (`release-windows.yml`, run `46053214955`, same tag): `queued`, runner
+  `DESKTOP-USBUADL` `online busy=True`. Same-SHA box stays satisfied by construction (one tag).
+- Runners API: `openclawassist` online busy=True, `DESKTOP-USBUADL` online busy=True.
+- Both build boxes stay unticked; run age ~19 min, well under the 90-min stale threshold, so no
+  cancel/redispatch. Next pass reads these handles and ticks or redispatches.
+- Read-only prep for the §5 attestation boxes: repo `jeremyzguo/gpn_coin` is `private: true`, so the
+  contract is the **cosign** path (`gpn-windows.zip.bundle` + `verify-blob`), not
+  `actions/attest-build-provenance`; both lane workflows already gate publish on it
+  (`release-windows.yml:718-780`, `release-linux-selfhosted.yml:110-160`). No change needed.
+- No blockers, no [TRIAGE] items.
+
 ## 10:37 PT 0.3.84 §4 (push) ticked — docs-only HEAD started no build, confirmed by the API
 
 - **A0 CI:** `origin/main` = `8ec8fc4c99c68abac620fa41afe532f6462a67f2`; `GET /actions/runs?head_sha=<full>`
