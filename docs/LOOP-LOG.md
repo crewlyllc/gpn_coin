@@ -1,6 +1,7 @@
 ## 08:59 PT 0.3.84 box 290 ticked — the canary proof publishes itself, and filing refuses without it
 
-- **A0 CI:** no run exists for `46809679` (docs-only SHA). Continued to A.
+- **A0 CI:** no run existed for `46809679` (docs-only SHA), so A proceeded. This box's commit `8778526a`
+  touches `scripts/`, so CI **did** start for it (run `46038256017`, `pending`) — noted, not waited on.
 - **Box 290 (canary proof no longer a manual step)** — ticked:
   - `scripts/canary-auto.sh` (new): published version from `releases.json` → running version over the node's
     RPC → `canary-report.py --auto` → `canary-publish.sh` → poll the LIVE `canary.json`. Exit 1 = waiting,
