@@ -215,6 +215,49 @@ function Add-SameSubnetBootnode {
 function Say  { param([string]$m) Write-Host "==> $m" -ForegroundColor Green }
 function Warn { param([string]$m) Write-Host " !  $m" -ForegroundColor Yellow }
 
+# Row 289: `Invoke-WebRequest -OutFile` in Windows PowerShell 5.1 buffers the whole
+# body in memory, so a 1.9 GB download on a 3 GB VM thrashes and makes no visible
+# progress (measured on GPN-210 2026-11-27: 0-byte file, ~300 s CPU, no timeout,
+# while a HEAD to the same URL answered 200 in 0.9 s). Everything large streams to
+# disk in 1 MiB chunks, retries a stated number of times, and names the URL plus
+# the HTTP status or exception when it gives up.
+function Save-FileStreaming {
+  param([string]$Url, [string]$Path, [int]$Attempts = 3, [int]$TimeoutSeconds = 3600)
+  # Synchronous HttpWebRequest, never HttpClient: .GetAwaiter().GetResult() deadlocked
+  # under pwsh and a hung download is the same defect as the buffering this replaced.
+  try { [System.Net.ServicePointManager]::SecurityProtocol = [System.Net.SecurityProtocolType]::Tls12 } catch { }
+  for ($attempt = 1; $attempt -le $Attempts; $attempt++) {
+    $resp = $null; $in = $null; $out = $null
+    try {
+      $req = [System.Net.HttpWebRequest]::Create($Url)
+      $req.Timeout = [int]([Math]::Min(120, $TimeoutSeconds) * 1000)
+      $req.ReadWriteTimeout = [int]([Math]::Min(300, $TimeoutSeconds) * 1000)
+      $req.UserAgent = 'gpn-installer'
+      $resp = $req.GetResponse()
+      $total = [int64]$resp.ContentLength
+      $in  = $resp.GetResponseStream()
+      $out = [System.IO.File]::Create($Path)
+      $buf = New-Object byte[] 1048576
+      $done = [int64]0
+      while (($n = $in.Read($buf, 0, $buf.Length)) -gt 0) { $out.Write($buf, 0, $n); $done += $n }
+      $out.Close(); $out = $null
+      $in.Close();  $in = $null
+      if ($total -gt 0 -and $done -ne $total) { throw "short read: $done of $total bytes" }
+      return $true
+    } catch {
+      $why = $_.Exception.Message
+      try { if ($_.Exception.Response) { $why = "HTTP $([int]$_.Exception.Response.StatusCode) $why" } } catch { }
+      if ($out) { try { $out.Close() } catch { } }
+      if ($in)  { try { $in.Dispose() } catch { } }
+      if ($resp) { try { $resp.Close() } catch { } }
+      Remove-Item -LiteralPath $Path -Force -ErrorAction SilentlyContinue
+      if ($attempt -lt $Attempts) { Warn "download attempt $attempt/$Attempts failed: $why -- retrying in 5s"; Start-Sleep -Seconds 5 }
+      else { Warn "download FAILED after $Attempts attempt(s): $Url -- $why" }
+    }
+  }
+  return $false
+}
+
 # All schtasks calls go through here: stderr is swallowed, rc returned.
 # schtasks messages are the only explanation we get for a failure, so keep them.
 # Discarding this output is why "rc=1" was undiagnosable on box 3 and on the
@@ -3306,7 +3349,10 @@ function Invoke-FastSync {
       return
     }
     try {
-      Invoke-WebRequest -Uri $SnapshotUrl -OutFile $arch -UseBasicParsing -TimeoutSec 3600 | Out-Null
+      if (-not (Save-FileStreaming -Url $SnapshotUrl -Path $arch -Attempts 3)) {
+        Invoke-FastSyncFallback "snapshot download failed after 3 attempt(s): $SnapshotUrl"
+        return
+      }
     } catch {
       Invoke-FastSyncFallback "snapshot download failed ($($_.Exception.Message))"
       return
@@ -3653,7 +3699,11 @@ if (Test-Ollama) {
         }
         if (-not (Get-Command ollama -ErrorAction SilentlyContinue)) {
           $setup = Join-Path $env:TEMP 'OllamaSetup.exe'
-          Invoke-WebRequest -Uri 'https://ollama.com/download/OllamaSetup.exe' -OutFile $setup
+          if (-not (Save-FileStreaming -Url 'https://ollama.com/download/OllamaSetup.exe' -Path $setup -Attempts 3)) {
+            Write-Host 'Could not download the ollama installer from https://ollama.com/download/OllamaSetup.exe' -ForegroundColor Red
+            Write-Host 'This is a download failure, not an ollama problem. Fix the network/firewall, then rerun install.ps1.' -ForegroundColor Red
+            exit 1
+          }
           Start-Process -FilePath $setup -ArgumentList '/VERYSILENT' -Wait
         }
       }

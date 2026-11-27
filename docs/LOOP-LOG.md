@@ -1,3 +1,46 @@
+## 06:10 PT — 289: the ollama download buffered 1.9 GB in RAM on a 3 GB guest and blamed ollama for it — fixed to a streaming download with bounded retries; the same guest now installs to a running node
+
+A0: origin/main HEAD `bdf9d6036eee` (row 292 docs) ⇒ CI run `46005222188` `in_progress` at start and still in flight at
+the end — noted, not waited on; nothing red.
+
+**Row 289 root cause, measured.** The GPN-210 guest ran the published `install.ps1` (0.3.83) at 05:12 and its ollama
+step sat with a **0-byte** `%TEMP%\OllamaSetup.exe`, ~300 s of CPU in the helper, no timeout and no retry — while a
+`HEAD https://ollama.com/download/OllamaSetup.exe` from the same guest answered `200 / 1,953,587,080 B` in 0.9 s. The
+guest has **3 GB RAM, 1.4 GB free**. Cause: `Invoke-WebRequest -OutFile` on Windows PowerShell 5.1 buffers the response
+body in memory instead of streaming it, so a 1.9 GB download thrashes; and when it gave up, the message named ollama
+("ollama did not answer … within 60s"), not the download that had actually failed.
+
+**Fix.** `Save-FileStreaming` — one helper, both files (`scripts/install-ollama.ps1`, and `install.ps1` for its direct
+ollama fallback and for the 371 MiB weekly snapshot): synchronous `HttpWebRequest`, streamed to disk in 1 MiB chunks,
+3 attempts with a 5 s gap, connect/read timeouts, an exact Content-Length check, and a failure message carrying the
+URL + HTTP status/exception + `rerun install.ps1`. Synchronous on purpose: the first draft used
+`HttpClient.GetAsync(...).GetAwaiter().GetResult()` and **deadlocked** under pwsh (measured while writing this fix) —
+a hung download is the same defect as the buffering it replaced.
+
+**Tests.** `scripts/tests/test-install-ollama-download.ps1` ⇒ **17 checks passed, 0 failed**: real 3 MiB payload over a
+raw TcpListener (sha256 identical), and a dead URL that reports `attempt 1/2 failed` → `download FAILED after 2
+attempt(s)` naming the URL, exits 1, leaves no partial file, and never says "ollama did not answer". The same test
+against the pre-fix tree ⇒ **10 failed / 6 passed** (failing-first). `Parser::ParseFile` 0 errors on all three files.
+
+**Guest proof (mechanism).** The fixed downloader, run inside GPN-210, pulled the real installer to
+**1,953,587,080 bytes** (= the URL's own Content-Length) in **50 s**, with the downloader's working set **flat at
+77 MB** and free RAM *rising* 1,294 → 1,529 MB — the old path wrote 0 bytes in 18 min. Also measured: the published
+helper (pid 6484) was still alive from 05:24 holding the same file, which is why the first attempt wrote nothing.
+
+**End to end on the same clean guest.** With the download no longer in the way, the published `install.ps1` went
+`binaries installed` → `weekly snapshot: block 372969` → `OllamaSetup.exe /VERYSILENT` → `ollama serve` →
+`pulling baseline model: llama3.2:1b` → `GPN-Update registered (RunLevel=Highest)` → **`GPN-Node` running**:
+`gpn-node` + `gpn_node` + all five provider children live, chain at `#373391` (`ADJUST now=373391`,
+`chain-work … at #373391`). Row 292's own caveat stands: the VC++ runtime was installed by the previous run's
+`Process.Start` probe, so install.ps1's shell-free branch was not re-exercised on this guest — it ships in the next
+batch and the stranger gate must re-prove it on a wiped guest.
+
+**Rows:** 289 NEW → IN-PROGRESS (code + tests + guest evidence in the row). 292 annotated with the running-node
+milestone. **No version opened:** 289/290/291/292 = 4 of the 5 needed by the batch policy; 0.3.83 is the published head.
+
+**Next run:** re-read the guest (`system_version`, registration, one AI job) to carry 289's *stranger* half and 292's
+verification clause, and keep collecting the batch.
+
 ## 05:14 PT — 256: a clean Win11 guest with a real `gpn` admin and a vGPU that enumerates; the gate ran and found a real stranger defect (VC++ runtime on a headless install)
 
 A0: origin/main HEAD `6c932be1` (docs: 256 unattend staging) ⇒ `?head_sha=6c932be1…` ⇒ **total_count 0** —

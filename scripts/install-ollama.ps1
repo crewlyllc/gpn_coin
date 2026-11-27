@@ -29,17 +29,90 @@ function Test-OllamaListening {
     } catch { return $false }
 }
 
+# ---- download ----------------------------------------------------------------------------------------------------------------------------------
+# Row 289. `Invoke-WebRequest -OutFile` in Windows PowerShell 5.1 buffers the body
+# in memory instead of streaming it to disk, so the 1.9 GB ollama installer on a
+# 3 GB VM thrashed and sat at a 0-byte file for 18 min with ~300 s of CPU, no
+# timeout and no retry -- measured on GPN-210 2026-11-27 05:12-05:32 PT (a HEAD to
+# the same URL answered 200 / 1,953,587,080 B in 0.9 s). This streams to disk in
+# 1 MiB chunks, bounds each attempt, retries a stated number of times, and names
+# the URL plus the HTTP status or the exception when it gives up.
+function Save-FileStreaming {
+    param(
+        [string]$Url,
+        [string]$Path,
+        [int]$Attempts = 3,
+        [int]$TimeoutSeconds = 3600
+    )
+    # Synchronous HttpWebRequest on purpose: HttpClient's .GetAwaiter().GetResult()
+    # deadlocked under pwsh (measured 2026-11-27 while writing this fix), and a
+    # deadlock on a download is the same defect as the buffering it replaced.
+    try { [System.Net.ServicePointManager]::SecurityProtocol = [System.Net.SecurityProtocolType]::Tls12 } catch { }
+    for ($attempt = 1; $attempt -le $Attempts; $attempt++) {
+        $resp = $null; $in = $null; $out = $null
+        try {
+            $req = [System.Net.HttpWebRequest]::Create($Url)
+            $req.Timeout = [int]([Math]::Min(120, $TimeoutSeconds) * 1000)
+            $req.ReadWriteTimeout = [int]([Math]::Min(300, $TimeoutSeconds) * 1000)
+            $req.UserAgent = 'gpn-installer'
+            $resp = $req.GetResponse()
+            $total = [int64]$resp.ContentLength
+            $in  = $resp.GetResponseStream()
+            $out = [System.IO.File]::Create($Path)
+            $buf  = New-Object byte[] 1048576
+            $done = [int64]0
+            $nextReport = [int64](250MB)
+            while (($n = $in.Read($buf, 0, $buf.Length)) -gt 0) {
+                $out.Write($buf, 0, $n)
+                $done += $n
+                if ($done -ge $nextReport) {
+                    Info "  $([math]::Round($done/1MB,0)) MiB downloaded"
+                    $nextReport += 250MB
+                }
+            }
+            $out.Close(); $out = $null
+            $in.Close();  $in = $null
+            if ($total -gt 0 -and $done -ne $total) {
+                throw "short read: $done of $total bytes"
+            }
+            Info "downloaded $([math]::Round($done/1MB,0)) MiB from $Url"
+            return $true
+        } catch {
+            $why = $_.Exception.Message
+            $status = $null
+            try { if ($_.Exception.Response) { $status = "HTTP $([int]$_.Exception.Response.StatusCode)" } } catch { }
+            if ($status) { $why = "$status $why" }
+            if ($out) { try { $out.Close() } catch { } }
+            if ($in)  { try { $in.Dispose() } catch { } }
+            if ($resp) { try { $resp.Close() } catch { } }
+            Remove-Item -LiteralPath $Path -Force -ErrorAction SilentlyContinue
+            if ($attempt -lt $Attempts) {
+                Warn "download attempt $attempt/$Attempts failed: $why -- retrying in 5s"
+                Start-Sleep -Seconds 5
+            } else {
+                Warn "download FAILED after $Attempts attempt(s): $Url -- $why"
+            }
+        }
+    }
+    return $false
+}
+
 # ---- 1. install --------------------------------------------------------------------------------------------------------------------------------
 function Update-PathNow {
     # winget / the installer write to the MACHINE+USER PATH, but this process keeps
     # its old copy. Without this, the check right after a successful winget install
     # still says "not found" and we download the 1.5 GB installer a second time.
-    $env:Path = [System.Environment]::GetEnvironmentVariable("Path", "Machine") + ";" +
-                [System.Environment]::GetEnvironmentVariable("Path", "User")
-    foreach ($p in @(
-            (Join-Path $env:LOCALAPPDATA 'Programs\Ollama'),
-            (Join-Path $env:ProgramFiles 'Ollama'),
-            (Join-Path ${env:ProgramFiles(x86)} 'Ollama'))) {
+    $machine = [System.Environment]::GetEnvironmentVariable("Path", "Machine")
+    $user    = [System.Environment]::GetEnvironmentVariable("Path", "User")
+    if ($machine -or $user) { $env:Path = "$machine;$user" }
+    # Each root is optional: on a non-Windows host (the test suite runs this file
+    # under pwsh 7 on Linux) LOCALAPPDATA/ProgramFiles are unset and Join-Path
+    # would throw instead of simply finding nothing.
+    $roots = @()
+    if ($env:LOCALAPPDATA)   { $roots += (Join-Path $env:LOCALAPPDATA 'Programs\Ollama') }
+    if ($env:ProgramFiles)   { $roots += (Join-Path $env:ProgramFiles 'Ollama') }
+    if (${env:ProgramFiles(x86)}) { $roots += (Join-Path ${env:ProgramFiles(x86)} 'Ollama') }
+    foreach ($p in $roots) {
         if ($p -and (Test-Path (Join-Path $p 'ollama.exe'))) {
             if ($env:Path -notlike "*$p*") { $env:Path = "$p;$env:Path" }
         }
@@ -68,14 +141,21 @@ if ($ollama) {
     }
 
     if (-not $ollama) {
-        $setup = Join-Path $env:TEMP "OllamaSetup.exe"
+        $setup = if ($env:GPN_OLLAMA_SETUP_PATH) { $env:GPN_OLLAMA_SETUP_PATH } else { Join-Path $env:TEMP "OllamaSetup.exe" }
+        if (-not (Test-Path (Split-Path -Parent $setup))) { New-Item -ItemType Directory -Force -Path (Split-Path -Parent $setup) | Out-Null }
         $haveIt = (Test-Path $setup) -and ((Get-Item $setup).Length -gt 100MB)
         if (-not $haveIt) {
-            Info "downloading the official ollama installer (~1.5 GB, no progress bar) ..."
-            try {
-                Invoke-WebRequest -Uri "https://ollama.com/download/OllamaSetup.exe" -OutFile $setup -UseBasicParsing
-            } catch {
-                Warn "download failed: $($_.Exception.Message)"
+            $url = if ($env:GPN_OLLAMA_SETUP_URL) { $env:GPN_OLLAMA_SETUP_URL } else { "https://ollama.com/download/OllamaSetup.exe" }
+            $attempts = 3
+            if ($env:GPN_OLLAMA_DOWNLOAD_ATTEMPTS -as [int]) { $attempts = [int]$env:GPN_OLLAMA_DOWNLOAD_ATTEMPTS }
+            Info "downloading the official ollama installer (~1.9 GB, streamed to disk, no progress bar) ..."
+            $ok = Save-FileStreaming -Url $url -Path $setup -Attempts $attempts
+            if (-not $ok) {
+                Warn "could not download the ollama installer from $url"
+                Warn "this is a download failure, NOT an ollama problem: nothing was installed and the node was not started"
+                Warn "fix the network or firewall, then retry: rerun install.ps1 (or this script), it resumes this step"
+                Warn "if winget exists: winget install --id Ollama.Ollama -e"
+                exit 1
             }
         }
         if ((Test-Path $setup) -and ((Get-Item $setup).Length -gt 100MB)) {
