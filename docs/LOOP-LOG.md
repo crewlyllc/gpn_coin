@@ -1,3 +1,28 @@
+## 08:2x PT — 0.3.84 box 1 (273, seven-day soak) ticked: day 3/7 with numbers
+
+**A0.** HEAD `8c2227be…f83e` — `GET /actions/runs?head_sha=…` ⇒ run `46029751951` (CI) status
+`pending`. Not waited on (A0: only a conclusion is actionable); noted and the checklist worked.
+
+**Box worked: §3b 273 (seven-day soak against `docs/STABILITY-GATE.md`).** The day-3 record was
+already taken today by `gpn-soak-record.timer` at 15:17 UTC, so the box is ticked on it rather
+than on a fresh 1-hour re-record (a second same-day run would *shrink* the effective-interval
+window — the day-2 65-second-window error, noted in the soak doc, is exactly that failure).
+
+Numbers (day 3, this host, 2026-11-27 15:17 UTC): height **373682**; effective interval
+**15.37 s** over 15.61 h / 3655 blocks vs the 13.4 s baseline — **drift, named as drift**
+(day 2 was 15.42 s, so the move is flat day-over-day, not a new stall); authored p50 **12.94 s**
+/ p95 **48.97 s**; peers **3** (min 1 / max 4 over 11,508 idle journal lines, **0 lines at 0
+peers**); imports 3796 blocks, longest gap 216 s; **0 unexplained** node terminations (2 stops,
+both adjacent to a systemd `Stopping`); NRestarts=0; update path confirmed 0.3.83 running;
+gate 6 `unfunded` / `Incompatible pruning modes` / `update declined` all **0**; `Reason:`/ban
+lines **0**; box 1 peers 2, height 373684 (1 block ahead, not diverged).
+
+Checklist: §3b-273 ticked with the evidence inline; the box's final tick is **2026-12-02**
+(day 7 of 7), consistent with the 0.3.80–0.3.83 archives. Remaining unticked in this release:
+289, 290, 291, 292 (code in the 0.3.84 tree; each owes the live/guest proof written in its row).
+
+`[TRIAGE]` none new — item 256 remains the only open decision (`docs/NEEDS-TRIAGE.md`).
+
 ## 08:15 PT — box 293 code done: Intel-only Windows boxes now pass the entry GPU probe
 
 **A0.** HEAD `52c8da47…00ca7` (release 0.3.84 bump commit) — `GET /actions/runs?head_sha=…` ⇒ run
