@@ -1,3 +1,31 @@
+## 20:2x PT — 0.3.83 §3/§4 recorded; §5 builds dispatched, run ended (linux `45939162066`, windows `45939164076`)
+
+A0: `origin/main` HEAD `750ab092` (docs log commit) ⇒ `?head_sha=750ab0921742550387baa8f95c6ff655daac4048`
+`total_count: 0` (expected, `paths-ignore`). The code CI run **`45937187011`** (sha `a57f030f`) read once:
+`pending` at 04:17Z. Not waited on; this box is a build, and the run is only ~20 min queued.
+
+**Ticked (evidence in the file):** §3 all four — `bump-version.py --check` ⇒ `lockstep: 15 manifest(s)
+and 14 lockfile entr(ies) agree` / `gpn version: 0.3.83` rc 0; `CHANGELOG.md:11` `## [0.3.83] - 2026-11-26`,
+0 `_TODO_`; seeds/installs parity ⇒ `test-autostart-installers.sh` all assertions passed,
+`test-referral.sh` 26/0, `node --test access-points+nodes-directory` 19 pass / 0 fail.
+§4 docs-only-no-build (total_count 0 on `750ab092`), one-commit batching, CI observed-not-waited
+(run id noted). §4 "run for this SHA must conclude success" left unticked — `45937187011` is still pending.
+§5 linux + windows dispatched on the same tag, `build/a57f030f6322` ⇒ `a57f030f6322…`; the per-item SSH
+box stays open until 287/288's live halves run after §9's update.
+
+**Dispatched, not waited:** tag `build/a57f030f6322` pushed for `a57f030f` (workflow_dispatch refuses a
+raw sha; the first tag I made pointed at docs HEAD `750ab092` and was deleted before dispatch — no build
+ever ran on it). `release-linux-selfhosted.yml` run **`45939162066`** (`in_progress` 04:18:23Z) and
+`release-windows.yml` run **`45939164076`** (`queued` 04:18:25Z). Handles written into the §5 boxes; run
+ended immediately.
+
+**Next run:** ask once for `45939162066` + `45939164076` conclusions; if success, work §5 attestation
+boxes (private user-owned repo ⇒ cosign bundle) → §6 scan/`--version` → §7 `release-cut.sh`. If red,
+quote the failing step and fix the cause. Also re-read `45937187011` (CI gate for `release-cut.sh`).
+
+**Open:** row 256 (stranger lifecycle on GPN-209) and row 273 (soak, day 7 = 2026-12-02) still
+IN-PROGRESS. No blockers, no [TRIAGE].
+
 ## 19:5x PT 0.3.83 box 2 (row 288) — stale-state 409 now adopts the provider's state; expired pendings swept
 
 A0: `origin/main` HEAD `d08d6a6f80ef9c17900c0317b243dbe0ae52bccc` (docs) had nothing red when this
