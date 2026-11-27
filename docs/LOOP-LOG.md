@@ -1,3 +1,35 @@
+## 21:2x PT — 0.3.83: windows build green, both assets cosign-verified; cut gated on CI
+
+A0: `origin/main` HEAD before this run `0ea55efd` (docs) — `2026-11-27T05:18Z`. The code CI run
+**`45937187011`** (`a57f030f`) is `in_progress`: linux, `fmt + clippy` and `secret-scan` green; the
+windows job claimed box 1 at **05:17:24Z** and is at step 6/14 (`Build + test gpn-node`). Not waited on.
+
+**Build handle `45939164076` re-read ⇒ `success`** (05:16:18Z). `windows-latest` carries
+`gpn-windows.zip` 253,335,994 B, digest `sha256:126b410c…4f12`, uploaded 05:16:10Z, and
+`gpn-windows.zip.bundle` 9,049 B at 05:16:11Z.
+
+**Verified both assets by hand (§5/§6/§7 pre-cut):**
+- downloaded the zip + bundle through the API; local `sha256sum` = `126b410c0abe…4f12` == the API digest;
+- `cosign verify-blob --bundle gpn-windows.zip.bundle --certificate-identity-regexp
+  '^https://github\.com/jeremyzguo/gpn_coin/\.github/workflows/release-windows\.yml@.*$'
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com gpn-windows.zip` ⇒ **`Verified OK` (rc 0)**;
+- windows binary grep (71 entries): `gpn_scheduler.exe` carries `GPN_HUB_MEDIA_DEADLINE_MS`,
+  `past their deadline`, `adopted provider state on channel`, `state_before is not the current channel state`;
+  both providers carry `assignment rejected: ` + the state_before string; `0.3.83` in all three.
+
+Boxes ticked (commit `f79507fa`): §5 windows build, §5 attestation-exists, §5 verifier, §7 refuse-to-cut
+pre-check; §6 scan notes extended with the windows evidence.
+
+**§7 cut NOT run — and it is a gate, not a skip.** `release-cut.sh` step 3 calls `require_green_ci` on the
+bundle stamp `a57f030f` and aborts unless CI is `completed:success`. `ALLOW_RED=1` is emergency-only and
+was not used. Handle: **CI `45937187011`**.
+
+**Next run:** re-read `45937187011`. `success` ⇒ §7 `release-cut.sh --version 0.3.83 --timeout 300`, then
+§7 network.json / releases.json twice, §7b surfaces, §8 `--verify-published`, §9 deploy + 287/288 live
+halves, §10. Still `in_progress` >90 min from 03:58Z ⇒ cancel the stale run and re-dispatch CI (the
+windows job only claimed the slot at 05:17Z, so the 90-min clock starts there for practical purposes).
+No blockers, no [TRIAGE].
+
 ## 21:0x PT — 0.3.83: cosign verification mechanism proven host-side; windows build running, run ended
 
 A0: `origin/main` HEAD `459f0707` (docs) ⇒ `?head_sha=459f0707db06f06ca41fc811fc2b373ea6d5670d`
