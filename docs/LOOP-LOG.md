@@ -8723,3 +8723,19 @@ NRestarts=0; jobs 256 attempted / 227 ok; gate-6 0/0/0; box 1 peers 2 at the sam
 unchanged: test 3 INCOMPLETE (day 3 of 7), ticks 2026-12-02 at the earliest.
 
 No blockers, no [TRIAGE].
+## 10:57 PT 0.3.84 §5 build dispatched from tag `build/66f5353ba8c9` — run ended (linux `46053212209`, windows `46053214955`)
+
+- **A0 CI:** `origin/main` = `66f5353ba8c98b9f81f212a6792b736735fb348e` (docs-only); `GET /actions/runs?head_sha=<full>`
+  ⇒ `total_count: 0` — expected for a docs SHA, nothing waited on. Older CI run `46047494382` (for `56fcd99d`)
+  was `in_progress` at 18:10Z→18:57Z; observed, not blocked on.
+- **§5 box 1 (per-item Windows evidence over SSH) TICKED** with live output at 10:5x PT:
+  `scripts/box1.sh '…Get-Process gpn_node,gpn-node; gpn-node.exe --version'` ⇒
+  `gpn_node 65192 C:\gpn\data\update\current\gpn_node.exe`, `gpn-node 53912 …`, `gpn-node.exe 0.3.83` (rc 0).
+  Cites row 291's SSH proofs already in §3b (`test-start-node-fail-loudly.ps1` 17/17, `job-object-probe.ps1` 7/7).
+  The one pending Windows per-item step — `job-object-probe.ps1 -NodeExe <0.3.84 gpn_node.exe>` — needs the build.
+- **§5 builds dispatched, run ended (dispatch-and-end):** tag `build/66f5353ba8c9` pushed for `66f5353b`;
+  `release-linux-selfhosted.yml` ⇒ run `46053212209` (queued) and `release-windows.yml` ⇒ run `46053214955`
+  (queued), both at 18:57Z, both `head_sha` = `66f5353ba8c9`. Handles written into the two boxes.
+- **Runners:** at dispatch both were `busy` (`DESKTOP-USBUADL`, `openclawassist`) — the linux build queues
+  behind CI `46047494382` on the single-slot runner. Contention, not a fault.
+- Checklist tally now **24/62**, §5 at 1/7. No blockers, no [TRIAGE] items.
