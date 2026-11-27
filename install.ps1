@@ -484,6 +484,23 @@ REM  bin\ stays as the fallback for a first install or a broken link.
 set "GPN_BIN=__INSTALL_DIR__\data\update\current"
 if not exist "%GPN_BIN%\gpn_node.exe" set "GPN_BIN=__INSTALL_DIR__\bin"
 
+REM --- FAIL FAST if the log cannot be opened (row 291) ----------------------
+REM  A supervisor killed without running its shutdown code (schtasks /End,
+REM  Task Manager, an OOM kill) used to leave its provider children alive. They
+REM  keep this log open, so the NEXT start died on its own `>> node.log`
+REM  redirect -- with LastTaskResult 0, i.e. the node was down and the machine
+REM  reported success (box 1, 2026-11-27 00:35 PT).
+REM  Probe by opening the file with NO sharing (exactly what the orphan holds),
+REM  before doing any work, and exit non-zero with the holders named. 78 =
+REM  'cannot start: log is locked', the same shape as the other start-path
+REM  refusals.
+REM  PowerShell, not `type nul >> log`: cmd does NOT set ERRORLEVEL when a
+REM  redirect cannot open its file -- verified on box 1, 2026-11-27 -- so the old
+REM  worker printed the error and carried on to exit 0. A cmd-side probe cannot
+REM  be trusted to fail.
+powershell -NoProfile -ExecutionPolicy Bypass -Command "try { $s = [IO.File]::Open('__LOG__', [IO.FileMode]::Append, [IO.FileAccess]::Write, [IO.FileShare]::None); $s.Close(); exit 0 } catch { exit 1 }" >nul 2>&1
+if errorlevel 1 goto :log_locked
+
 REM --- per-machine node identity (a shared key makes boxes collide) ----------
 REM  NO cmd-side probing. `if not exist` reported a present, readable, unlocked
 REM  key as MISSING on box 2 (2026-11-06) and the launcher then blamed the
@@ -539,6 +556,31 @@ echo [gpn] node stopped (exit %RC%); retrying in 10s...
 ping -n 11 127.0.0.1 >nul 2>&1
 goto :run
 :done
+REM --- a worker that exits without a live supervisor FAILED (row 291) -------
+REM  Falling off the end of this script left cmd's errorlevel at whatever the
+REM  last command set, so `hidden-launch.vbs` returned 0 and Task Scheduler
+REM  logged success while no gpn_node.exe was running. Say what happened and
+REM  report a failure instead.
+set "FINALRC=%RC%"
+tasklist /FI "IMAGENAME eq gpn_node.exe" /NH 2>nul | find /I "gpn_node.exe" >nul
+if errorlevel 1 (
+  echo [gpn] ERROR: this worker is exiting and NO gpn_node.exe is running -- the node is DOWN.
+  echo [gpn] ERROR: the reason is above, and in __LOG__.
+  if "%FINALRC%"=="0" set "FINALRC=79"
+)
+exit /b %FINALRC%
+
+:log_locked
+echo [gpn] ERROR: the node log cannot be opened: __LOG__
+echo [gpn] ERROR: another process is holding it -- almost always provider children left
+REM  `schtasks /End` and Task Manager kill the supervisor but not its children;
+REM  that is the case this message exists for.
+echo [gpn] ERROR: behind by a supervisor that was killed (schtasks /End, Task Manager, a crash).
+echo [gpn] ERROR: the node did NOT start.
+echo [gpn] next step: run  "%GPN_BIN%\gpn_node.exe" --stop  to kill the orphans, then start again.
+echo [gpn] holders:
+powershell -NoProfile -ExecutionPolicy Bypass -Command "Get-Process gpn_node,gpn_llm_provider,gpn_diffusion_provider,gpn_ml_provider,gpn_finetune_provider,gpn_provider_status -ErrorAction SilentlyContinue | Select-Object ProcessName,Id,StartTime | Format-Table -AutoSize | Out-String -Width 120"
+exit /b 78
 '@
 
 # ------------------------------------------------------- hidden launcher ---
@@ -566,21 +608,38 @@ $HiddenLaunchTemplate = @'
 ' Task Scheduler gives wscript.exe no console, so nothing of the node is visible
 ' and there is no window whose close could kill it.
 Option Explicit
-Dim fso, sh, q, here, worker, wmi, procs
+Dim fso, sh, q, here, worker, wmi, procs, proc, mine, rc
 Set fso = CreateObject("Scripting.FileSystemObject")
 Set sh  = CreateObject("WScript.Shell")
 q = Chr(34)
 here = fso.GetParentFolderName(WScript.ScriptFullName)
 
-' One supervisor only: an /End can leave a node behind, and a second /Run would
-' then put two supervisors on the same ports and the same chain database.
+' One supervisor only, PER INSTALL: an /End can leave a node behind, and a second
+' /Run would then put two supervisors on the same ports and the same chain
+' database. The test is the supervisor's own path, not its name: a second node
+' installed elsewhere on the same machine is not our collision (and a bare
+' name check made this file refuse to run in any test directory on a box whose
+' production node was up).
+mine = False
 Set wmi = GetObject("winmgmts:\\.\root\cimv2")
-Set procs = wmi.ExecQuery("SELECT ProcessId FROM Win32_Process WHERE Name='gpn_node.exe'")
-If procs.Count > 0 Then WScript.Quit 0
+Set procs = wmi.ExecQuery("SELECT ProcessId, ExecutablePath FROM Win32_Process WHERE Name='gpn_node.exe'")
+For Each proc In procs
+  If IsNull(proc.ExecutablePath) Then
+    ' Cannot see the path (another user's process): keep the old, safe guess.
+    mine = True
+  ElseIf LCase(Left(proc.ExecutablePath, Len(here))) = LCase(here) Then
+    mine = True
+  End If
+Next
+If mine Then WScript.Quit 0
 
 worker = "cmd /c " & q & q & here & "\start-node.cmd" & q & " --task" & q
 ' 0 = hidden, True = wait (keeps this task instance alive while the node runs).
-sh.Run worker, 0, True
+rc = sh.Run(worker, 0, True)
+' PROPAGATE the worker's exit code (row 291). Without this, wscript exited 0 no
+' matter what the worker did, so Task Scheduler logged LastTaskResult 0 for a
+' start that produced no node at all (box 1, 2026-11-27 00:35 PT).
+WScript.Quit rc
 '@
 
 function Write-HiddenLaunch {

@@ -1,3 +1,41 @@
+## 09:5x PT 0.3.84 box 291 ticked — a start that does not start now FAILS, and a killed supervisor takes its children
+
+- **A0 CI:** `origin/main` = `da9f25e1` (docs-only, `total_count: 0` — expected). Run `46038256017`
+  for `8778526a` was `pending` at 09:16 and had reached its build+test step by 09:4x; observed,
+  never waited on. (My own `cargo test` was killed when I saw it queueing behind CI's build lock —
+  CI owns this box's target dir.)
+- **Box 291 (Windows start path reports success when it did not start the node)** — ticked, with the
+  binary half named as pending:
+  - **Root cause, measured not guessed:** cmd does **not** set ERRORLEVEL when its own output
+    redirect cannot open the file. The old worker printed "The process cannot access the file…" and
+    carried on; `hidden-launch.vbs` then discarded the worker's code, so Task Scheduler logged
+    `LastTaskResult 0` for a start that produced no node. Both halves had to be fixed.
+  - Launchers (`install.ps1` template + the one `release-windows.yml` deploys): share-mode log probe
+    before any work → `goto :log_locked` → **exit 78**, message names the log, the cause and
+    `gpn_node --stop`; tail checks for a live `gpn_node.exe` and exits **79** instead of falling
+    through; `hidden-launch.vbs` returns the worker's code (`WScript.Quit rc`) and its single-instance
+    guard is now per-install (path), not per-name.
+  - Supervisor (`attach_kill_on_close_job` in `gpn_node.rs`): job object with
+    `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`, the supervisor puts **itself** in it, so a kill that runs no
+    shutdown code takes the providers with it. New `--job-selftest` proves it against the shipped
+    binary. `Win32_System_JobObjects` + `Win32_Security` added to the windows-sys features.
+  - **Evidence on box 1 (SSH, real cmd/cscript):** `scripts/tests/test-start-node-fail-loudly.ps1`
+    **17/17** — locked log ⇒ worker `rc=78`, message names log + `--stop` + "did NOT start",
+    `cscript hidden-launch.vbs` ⇒ `rc=78`; controls: pre-fix worker `rc=1` while the pre-fix vbs
+    reports **0** (field defect reproduced). Static half on Linux pwsh 10/10; 4 failures on the
+    pre-fix tree (failing-first). `scripts/tests/job-object-probe.ps1` **7/7** — compiled reference
+    with the identical three-call sequence: the child died with the hard-killed supervisor.
+    A PowerShell-only version of that probe gave a **false negative**; that is written into the
+    script so nobody trusts it again.
+  - Rust: `clippy --release --all-targets` with CI's exact allow-list green, `fmt --check` clean, job
+    module `cargo check`ed for `x86_64-pc-windows-msvc` in a scratch crate (full cross-check is
+    impossible here — libp2p/ring need `lib.exe`).
+  - **Pending, stated in the box:** `gpn_node.exe --job-selftest` needs the 0.3.84 Windows build;
+    run `job-object-probe.ps1 -NodeExe <that binary>` at §5/§6.
+  - Workflow cap: the deploy step's `run:` went 19,353 → **20,733** escaped chars against GitHub's
+    21,000 wall. 267 chars of headroom; further additions must move out of that step.
+- No blockers, no [TRIAGE] items. Next run: box 292.
+
 ## 08:59 PT 0.3.84 box 290 ticked — the canary proof publishes itself, and filing refuses without it
 
 - **A0 CI:** no run existed for `46809679` (docs-only SHA), so A proceeded. This box's commit `8778526a`

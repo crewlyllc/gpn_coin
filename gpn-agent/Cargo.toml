@@ -78,6 +78,13 @@ windows-sys = { version = "0.59", features = [
     # GetSystemMetrics(SM_SHUTTINGDOWN) — tell a real machine shutdown from a
     # console teardown (#234, gpn_node console-control handler)
     "Win32_UI_WindowsAndMessaging",
+    # Job objects — KILL_ON_JOB_CLOSE so a supervisor that is killed without
+    # running its shutdown code (schtasks /End, Task Manager, OOM) cannot leave
+    # its provider children behind (row 291, box 1 2026-11-27).
+    "Win32_System_JobObjects",
+    "Win32_System_Threading",
+    # SECURITY_ATTRIBUTES: CreateJobObjectW's first parameter type.
+    "Win32_Security",
 ] }
 
 [dev-dependencies]

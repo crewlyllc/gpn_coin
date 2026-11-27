@@ -209,16 +209,32 @@ jobs:
             ' MultipleInstances=IgnoreNew still guards against a second tree and
             ' `schtasks /End` still has a task process to end.
             Option Explicit
-            Dim fso, sh, q, here, worker, wmi, procs
+            Dim fso, sh, q, here, worker, wmi, procs, proc, mine, rc
             Set fso = CreateObject("Scripting.FileSystemObject")
             Set sh  = CreateObject("WScript.Shell")
             q = Chr(34)
             here = fso.GetParentFolderName(WScript.ScriptFullName)
+            ' One supervisor only, PER INSTALL: an /End can leave a node behind and a
+            ' second /Run would put two supervisors on the same ports and chain DB.
+            ' Test the supervisor's own path, not its name: another node installed
+            ' elsewhere on the machine is not our collision.
+            mine = False
             Set wmi = GetObject("winmgmts:\\.\root\cimv2")
-            Set procs = wmi.ExecQuery("SELECT ProcessId FROM Win32_Process WHERE Name='gpn_node.exe'")
-            If procs.Count > 0 Then WScript.Quit 0
+            Set procs = wmi.ExecQuery("SELECT ProcessId, ExecutablePath FROM Win32_Process WHERE Name='gpn_node.exe'")
+            For Each proc In procs
+              If IsNull(proc.ExecutablePath) Then
+                mine = True
+              ElseIf LCase(Left(proc.ExecutablePath, Len(here))) = LCase(here) Then
+                mine = True
+              End If
+            Next
+            If mine Then WScript.Quit 0
             worker = "cmd /c " & q & q & here & "\start-node.cmd" & q & " --task" & q
-            sh.Run worker, 0, True
+            rc = sh.Run(worker, 0, True)
+            ' PROPAGATE the worker's exit code (row 291): without this wscript exited
+            ' 0 whatever the worker did, so Task Scheduler logged success for a start
+            ' that produced no node at all (box 1, 2026-11-27 00:35 PT).
+            WScript.Quit rc
             '@
             Set-Content -Path 'C:\gpn\hidden-launch.vbs' -Value $vbs -Encoding ascii
             Write-Host 'wrote C:\gpn\hidden-launch.vbs (node runs with no console window)'
@@ -284,6 +300,11 @@ jobs:
           REM  stays as the fallback for a first install or a broken link.
           set "GPN_BIN=C:\gpn\data\update\current"
           if not exist "%GPN_BIN%\gpn_node.exe" set "GPN_BIN=C:\gpn\bin"
+          REM -- FAIL FAST if the log cannot be opened (row 291). Share-mode open:
+          REM  a failed cmd redirect does NOT set ERRORLEVEL (box 1, 2026-11-27).
+          set "GPN_LOG=C:\gpn\node.log"
+          powershell -NoProfile -ExecutionPolicy Bypass -Command "try { $s = [IO.File]::Open('%GPN_LOG%', [IO.FileMode]::Append, [IO.FileAccess]::Write, [IO.FileShare]::None); $s.Close(); exit 0 } catch { exit 1 }" >nul 2>&1
+          if errorlevel 1 goto :log_locked
           REM -- Money identity: create once, then NEVER replace --------------
           REM Fails loudly (and the node does not start) if the keystore is
           REM corrupt: silently generating a new one would move this node's
@@ -402,7 +423,26 @@ jobs:
           REM GPN_BIN is the versioned tree when the updater has installed one
           REM (see above), so this line must NOT hard-code bin\: that literal is
           REM what kept box 1 on the old build after a staged update.
-          "%GPN_BIN%\gpn_node.exe" >> "C:\gpn\node.log" 2>&1
+          "%GPN_BIN%\gpn_node.exe" >> "%GPN_LOG%" 2>&1
+          set "RC=%ERRORLEVEL%"
+          REM -- a worker that exits without a live supervisor FAILED (row 291) --
+          REM  Falling off the end of this script left cmd's errorlevel at
+          REM  whatever the last command set, so hidden-launch.vbs returned 0 and
+          REM  Task Scheduler logged success while no gpn_node.exe was running.
+          tasklist /FI "IMAGENAME eq gpn_node.exe" /NH 2>nul | find /I "gpn_node.exe" >nul
+          if errorlevel 1 (
+            echo [gpn] ERROR: this worker is exiting and NO gpn_node.exe is running -- the node is DOWN.
+            echo [gpn] ERROR: the reason is above, and in %GPN_LOG%.
+            if "%RC%"=="0" set "RC=79"
+          )
+          exit /b %RC%
+
+          :log_locked
+          echo [gpn] ERROR: the node log cannot be opened: %GPN_LOG%
+          echo [gpn] ERROR: another process holds it -- almost always provider children left behind
+          echo [gpn] ERROR: by a supervisor that was killed (schtasks /End, Task Manager, a crash).
+          echo [gpn] ERROR: the node did NOT start. Fix: "%GPN_BIN%\gpn_node.exe" --stop, then start again.
+          exit /b 78
           '@
           $script = $script.Replace('__CHAIN__', $chain)
 

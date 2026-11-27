@@ -2108,6 +2108,156 @@ fn record_console_close(detail: &str) {
 #[cfg(not(windows))]
 fn install_console_control_handler() {}
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Windows: a supervisor that is killed must not leave its children behind
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// Row 291, measured on box 1 2026-11-27 00:35 PT: `schtasks /End /Run /TN
+// GPN-Node` terminated the task tree (wscript -> cmd -> gpn_node.exe), but the
+// five provider children survived. They kept `C:\gpn\node.log` open, so the new
+// worker died on its `>> node.log` redirect with "The process cannot access the
+// file because it is being used by another process", and nothing reported a
+// failure: hidden-launch.vbs exited 0, Task Scheduler logged LastTaskResult 0.
+//
+// The ordered-shutdown path (SIGTERM -> wait -> SIGKILL) cannot help here: a
+// killed process runs no code. The OS has to do it, and it can — a job object
+// with `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE` kills every member when the last
+// handle to the job closes, which is exactly when this process dies, however it
+// dies. Children inherit membership because `std::process::Command` does not set
+// `CREATE_BREAKAWAY_FROM_JOB`.
+
+/// Windows: put this process (and therefore every child it spawns) into a job
+/// object that dies with it. Keeping the returned value alive for the lifetime
+/// of `main` is what holds the handle open; dropping it early would kill the
+/// children.
+///
+/// Failure is reported and survivable: a machine where the job cannot be
+/// created still runs the node, it just does not get the orphan guarantee.
+#[cfg(windows)]
+fn attach_kill_on_close_job() -> Option<SupervisorJob> {
+    use windows_sys::Win32::System::JobObjects::{
+        AssignProcessToJobObject, CreateJobObjectW, JobObjectExtendedLimitInformation,
+        SetInformationJobObject, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
+        JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+    };
+    use windows_sys::Win32::System::Threading::GetCurrentProcess;
+
+    // SAFETY: all four calls are given valid, owned handles and a correctly
+    // sized struct; no pointer outlives this function.
+    unsafe {
+        let job = CreateJobObjectW(std::ptr::null(), std::ptr::null());
+        if job.is_null() {
+            log_event(
+                "node",
+                "could not create the supervisor job object - provider children will NOT be \
+                 killed if this process is killed",
+            );
+            return None;
+        }
+        let mut info: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = std::mem::zeroed();
+        info.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+        let set = SetInformationJobObject(
+            job,
+            JobObjectExtendedLimitInformation,
+            &info as *const _ as *mut std::ffi::c_void,
+            std::mem::size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32,
+        );
+        if set == 0 {
+            log_event(
+                "node",
+                "could not set KILL_ON_JOB_CLOSE on the supervisor job - provider children will \
+                 NOT be killed if this process is killed",
+            );
+            return None;
+        }
+        if AssignProcessToJobObject(job, GetCurrentProcess()) == 0 {
+            // Windows 8+ supports nested jobs, so this normally succeeds even
+            // when a task or the installer already put us in a job. Say so when
+            // it does not, rather than pretending the guarantee holds.
+            log_event(
+                "node",
+                "could not put this supervisor into its own job - provider children will NOT be \
+                 killed if this process is killed",
+            );
+            return None;
+        }
+        Some(SupervisorJob(job))
+    }
+}
+
+/// Owns the job handle. Dropping it closes the handle, which (with
+/// KILL_ON_JOB_CLOSE) terminates every member — so this is dropped only when
+/// `main` returns, i.e. on a deliberate exit.
+#[cfg(windows)]
+struct SupervisorJob(windows_sys::Win32::Foundation::HANDLE);
+
+#[cfg(windows)]
+impl Drop for SupervisorJob {
+    fn drop(&mut self) {
+        // SAFETY: the handle came from CreateJobObjectW and is closed once.
+        unsafe {
+            windows_sys::Win32::Foundation::CloseHandle(self.0);
+        }
+    }
+}
+
+/// Off Windows there is nothing to attach: children are killed by the normal
+/// signal path, and `PR_SET_PDEATHSIG` is not equivalent (it is per-child and
+/// does not survive an `exec`).
+#[cfg(not(windows))]
+fn attach_kill_on_close_job() -> Option<SupervisorJob> {
+    None
+}
+
+#[cfg(not(windows))]
+struct SupervisorJob;
+
+/// `--job-selftest`: prove the orphan guarantee on the machine it matters on,
+/// without touching the chain, the wallet, the ports or the installed node.
+///
+/// Starts a harmless long-lived child (`ping` for a minute), prints its pid,
+/// then exits immediately via `std::process::exit` — i.e. exactly like a killed
+/// supervisor: no shutdown code runs. The caller then checks that the child is
+/// gone. Exit 0 = the mechanism that was installed (see the printed line).
+fn run_job_selftest() -> i32 {
+    let job = attach_kill_on_close_job();
+    asciiprintln!(
+        "job-selftest: kill-on-close job {}",
+        if job.is_some() {
+            "attached"
+        } else {
+            "NOT attached"
+        }
+    );
+    #[cfg(windows)]
+    let mut cmd = {
+        let mut c = Command::new("cmd");
+        c.args(["/c", "ping", "-n", "60", "127.0.0.1"]);
+        c
+    };
+    #[cfg(not(windows))]
+    let mut cmd = {
+        let mut c = Command::new("sleep");
+        c.arg("60");
+        c
+    };
+    cmd.stdout(Stdio::null()).stderr(Stdio::null());
+    let child = match cmd.spawn() {
+        Ok(c) => c,
+        Err(e) => {
+            asciiprintln!("job-selftest: could not start the probe child: {e}");
+            return 2;
+        }
+    };
+    asciiprintln!("job-selftest: child pid {}", child.id());
+    // Keep both alive and exit WITHOUT running any destructor or child cleanup:
+    // `std::process::exit` skips Drop, so whatever happens to the child next is
+    // the OS's doing (job-object close), not ours.
+    let _keep_job = job;
+    let _keep_child = child;
+    std::process::exit(0);
+}
+
 /// Send SIGTERM on Unix (taskkill on Windows) so the child can shut down cleanly.
 fn send_term(pid: u32) {
     #[cfg(unix)]
@@ -4758,6 +4908,17 @@ async fn main() {
     }
     let argv: Vec<String> = std::env::args().collect();
     set_ascii_mode(ascii_mode_default(&argv));
+
+    // ── Row 291: whatever kills this process, its children go with it. ──────
+    // Attached before `Config::load()` so even an early exit (a bad config, a
+    // failed first-run check) leaves nothing behind.
+    let _supervisor_job = attach_kill_on_close_job();
+
+    // `--job-selftest`: prove the mechanism on the machine itself. Touches no
+    // chain, wallet, port or installed file — see `run_job_selftest`.
+    if argv.iter().any(|a| a == "--job-selftest") {
+        std::process::exit(run_job_selftest());
+    }
 
     // ── Referral capture: `--ref CODE` / `--ref=CODE` (write-once). ─────────
     // Applied before the informational flags so a `--help`/`--version` probe
