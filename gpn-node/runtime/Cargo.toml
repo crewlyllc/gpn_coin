@@ -1,6 +1,6 @@
 [package]
 name = "gpn-runtime"
-version = "0.3.83"
+version = "0.3.84"
 edition = "2021"
 build = "build.rs"
 

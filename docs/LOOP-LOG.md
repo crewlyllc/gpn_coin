@@ -1,3 +1,32 @@
+## 07:37 PT — batch of five opened as 0.3.84 (289, 290, 291, 292, 293)
+
+**A0.** `origin/main` = `30ad7e8d30d25d4d9ef0456a75ef2554765a8894` (docs-only soak/box-256 commit) —
+`GET /actions/runs?head_sha=30ad7e8d…8894` ⇒ `total_count: 0`, the expected answer for a `docs/**` push.
+The newest run on `main` (`46012801152`, head `9c3a5826`, the row-289 code commit) was `in_progress`
+at 91 min — noted, not waited on (A0: only a conclusion on HEAD's sha is actionable).
+
+**Batch rule fired: five fixes ready, none critical.** NEW/IN-PROGRESS fixes waiting were
+289 (ollama download streaming — code+test done, guest-proven), 292 (VC++ redist headless —
+code+mechanism proven, needs a wiped-guest re-run), 290 (canary proof is a manual step),
+291 (Windows start path reports success when the node is down), 293 (Intel-only Windows box
+can never register). 256 stays `AWAITING-OWNER`; 273 (soak, day 3/7) carries as a box.
+
+**Actions (section C):**
+- `GPN-LIST.md`: 290, 291, 293 `NEW` → `IN-PROGRESS` with a BUNDLED note. No rows deleted.
+- `scripts/bump-version.py patch` ⇒ `0.3.84` across 15 manifests + `network.json` `latest_version`
+  + 14 lockfile entries; `--check` ⇒ `lockstep: 15 manifest(s) and 14 lockfile entr(ies) agree`.
+  `spec_version` deliberately untouched (no consensus change).
+- `CHANGELOG.md`: 0.3.84 section written for all five rows (no TODO left), stating the batch rule
+  and that none is critical.
+- `docs/releases/0.3.84.md` generated from the template — 6 in-progress boxes (273, 289, 290, 291,
+  292, 293), 5 blocked rows excluded as the generator intends.
+
+**Not claimed:** 290, 291 and 293 have no code yet — the checklist drives them, box by box, starting
+next run at box 1. 289/292 are in the tree but their wizard-visible halves still owe the
+clean-guest proof written in their rows.
+
+`[TRIAGE]` none new — item 256 remains the only open decision (`docs/NEEDS-TRIAGE.md`).
+
 ## 07:2x PT — 0.3.83: soak day 3 recorded (gate test 2 now PASSES); box 256's checkbox repaired to a real `blocked — venue`
 
 **A0.** `origin/main` = `41c4b56aed34d777c9b38190b8346d422c0780af` (docs-only box-256 commit) —

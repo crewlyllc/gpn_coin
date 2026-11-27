@@ -8,6 +8,39 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 versions are [Semantic Versioning](https://semver.org/spec/v2.0.0.html), with
 the GPN-specific meaning of each level documented in `docs/updates.md`.
 
+## [0.3.84] - 2026-11-27
+
+Bumped from 0.3.83 (`scripts/bump-version.py patch`). A **batch** cut under the batch policy
+(owner, 2026-11-25): five fixes were waiting and none of them is on the critical list (nobody is
+locked out and AI keeps working), so they ship together instead of costing five fleet-wide
+restarts. Three of the five came out of the stranger gate on a clean Windows guest — the class of
+defect that cost the fifth machine two days.
+
+### Fixed
+- **A stranger's first install no longer dies on the ollama download** (row 289). `Invoke-WebRequest
+  -OutFile` on Windows PowerShell 5.1 buffers the whole 1.9 GB installer in memory, so a 3 GB guest
+  sat with a 0-byte file and no timeout — then the installer blamed ollama. The download now streams
+  to disk in 1 MiB chunks with three bounded attempts, an exact size check, and a message that names
+  the URL, the HTTP status and `rerun install.ps1`.
+- **A headless install can install the Visual C++ runtime it needs** (row 292). `Start-Process -Wait`
+  takes the shell-execute path and fails with `No such interface supported` in exactly the contexts
+  our own update path uses. It is now retried through a shell-free `Process.Start` that reports the
+  redist's own exit code, and the advice names the direct `aka.ms` URL instead of `winget`, which a
+  Server or Enterprise Evaluation image does not have.
+- **A Windows node that did not start no longer reports success** (row 291). A worker that could not
+  open `C:\gpn\node.log` (because orphaned provider children still held it) exited 0, Task Scheduler
+  logged `LastTaskResult 0`, and the node was down with no alarm. The start path now requires a live
+  `gpn_node.exe` and a writable log, and refuses to leave provider children orphaned.
+- **An Intel-only Windows machine can register as a provider** (row 293). The entry path measured
+  GFLOPS through OpenCL and then asked only `nvidia-smi`/`rocm-smi` for the identity, so the modal
+  stranger laptop — Intel UHD/Iris, working OpenCL, no CUDA — was refused with advice ("install the
+  Intel driver") that this code could never satisfy. The entry path now falls back to the same
+  `Win32_VideoController` detection `gpn_llm_provider` already used.
+- **The canary proof publishes itself** (row 290). 0.3.82 and 0.3.83 shipped while every non-canary
+  node was held, because the proof that opens the gate was a hand-run step. The release driver now
+  writes it immediately after `confirmed <version> is running`, and the release cannot be filed
+  until `https://gpncoin.ai/canary.json` proves that version.
+
 ## [0.3.83] - 2026-11-26
 
 Bumped from 0.3.82 (`scripts/bump-version.py patch`). A **critical** cut under the batch policy
