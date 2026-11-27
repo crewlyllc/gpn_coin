@@ -1,3 +1,26 @@
+## 17:05 PT — 0.3.82: §1 closed 3/3 (n/a box), CI 45908365338 still building windows; no cut yet
+
+**A0.** `origin/main` HEAD `da4cf33e` is docs-only ⇒ `?head_sha=` `total_count: 0` (expected,
+`paths-ignore`). No red CI to work.
+
+**Box worked: §1 third box** ("If the change cannot be tested, stop and tell Jeremy") ⇒ ticked
+**n/a with notes** — 285/286 each have failing-before/passing-after tests plus A/B live walks;
+the only untested-by-design item is 273 (seven real days) and it is carried as a measured day-by-day
+record. §1 header renamed `DONE 2026-11-27 (3/3)`; `checklist-status.py` ⇒ §1 DONE, TOTAL 30/56.
+
+**§7 `release-cut.sh` not run — the gate is CI, measured once, not waited on.** CI run
+`45908365338` (sha `50c9e9b8`) at 00:59Z ⇒ `in_progress` (58 min since 23:01Z; windows job
+`1402056xxxx` started 00:28:59Z). Job-level state: `secret-scan` success, `fmt + clippy` success
+(step 4 encoding guard green on `50c9e9b8`), `linux` success through all 27 steps, windows job
+at step 6 `Build + test gpn-node (release)` with step 7 `Build + test gpn-agent (release)` pending.
+Not stale (<90 min), so nothing cancelled or re-dispatched. Both assets are already attested from
+this same sha (linux `45908378111`, windows `45908380728`), so a green CI needs **no rebuild** —
+handle for next run: ask `45908365338` once; green ⇒ `scripts/release-cut.sh --version 0.3.82`;
+red ⇒ read the failing job and fix.
+
+**Other pending boxes:** 273 soak day 3 of 7 (ticks 2026-12-02); §0e stranger-lifecycle remains
+AWAITING-OWNER on venue (triage 256). No new blockers, no triage raised.
+
 ## 16:45 PT — 0.3.82 §7: windows rebuild verified by hand (attested, correct strings); waiting only on same-sha CI
 
 **A0.** `origin/main` HEAD `46b65ca2` is docs-only ⇒ `?head_sha=` `total_count: 0` (expected).
