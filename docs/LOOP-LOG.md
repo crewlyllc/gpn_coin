@@ -1,3 +1,26 @@
+## 17:52 PT — 0.3.82: cut dry-run reaches the CI gate only; windows CI build proven alive on box 1, not cancelled
+
+**A0.** HEAD `16c7f6b8` (docs-only) ⇒ `?head_sha=` `total_count: 0`, expected. Nothing red to work.
+
+**Box §7 `release-cut.sh` — the one box left before the cut, and the gate is measured, not guessed.**
+`scripts/release-cut.sh --dry-run --version 0.3.82` ran the whole path short of mirror/publish:
+assets paired (linux 349,013,725 B `dee7a6a3…`, windows 253,301,460 B `2c80da5d…` — both the
+`50c9e9b8` pair), `commit 50c9e9b resolves to 50c9e9b85b06…`, then
+`ABORT: CI for 50c9e9b is 'in_progress:None' -- refusing to sign an unverified build`.
+So every gate except `require_green_ci` passes.
+
+CI run `45908365338` ⇒ `in_progress` at 01:47Z, created 23:01:12Z = **106 min, past the 90-min
+threshold**, so the stale rule was applied with evidence instead of a stopwatch: runners API
+`DESKTOP-USBUADL online busy=True`; SSH (`box1.sh`) showed `cargo` pid 62704 since 17:30:03 PT and
+`rustc` pids 62216/62220 since 17:47:05/17:47:23 PT ⇒ **actively compiling**. Cancelled runs this
+week were cancelled because they could never go green (fmt+clippy already red); this run has all
+completed jobs green. Cancelling would burn 106 min on a single-slot runner and re-earn them.
+**Not cancelled, not re-dispatched.**
+
+Next run: ask `45908365338` once — `completed/success` ⇒ `scripts/release-cut.sh --version 0.3.82`;
+`failure` ⇒ read the failing job and fix; still `in_progress` **with no cargo/rustc on box 1** ⇒
+cancel then.
+
 ## 17:19 PT — 0.3.82: CI 45908365338 still on the windows agent build (step 7); cut still gated, nothing cancelled
 
 **A0.** `origin/main` HEAD `c0499987` docs-only ⇒ `?head_sha=` `total_count: 0` (expected). No red
