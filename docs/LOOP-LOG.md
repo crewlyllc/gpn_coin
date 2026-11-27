@@ -1,4 +1,41 @@
-## 22:57 PT — 0.3.83 RELEASED, DEPLOYED AND ARCHIVED; 287/288 proven live
+## 23:34 PT — 273 day 3 re-recorded; 256 venue BUILT and the stranger gate DISPATCHED on GPN-209
+
+A0: origin/main HEAD `2c78181e` (docs) ⇒ `?head_sha=` `total_count: 0` — correct for a docs-only SHA
+(`ci.yml` paths-ignore). Nothing red, nothing in flight. No release open: 0.3.83 is published, its
+checklist archived 51/51, so this run worked the two open IN-PROGRESS rows (batch policy: no new
+version until five fixes are ready).
+
+**273 (seven-day soak) — day 3 recorded.** `scripts/soak-record.py --days 7` ⇒
+`recorded day 3 at height 371823`, 1796 blocks in 7.60 h ⇒ **15.24 s/block** vs the 13.4 s baseline
+(marked as drift, not a stall: authored p50 10.65 s / p95 49.12 s). Peers 3, 0 lines at 0 peers,
+imports 3819 with a 151 s longest gap, 3 node terminations all adjacent to a systemd `Stopping`
+(0 unexplained), `gpn-fleet` NRestarts=0, jobs 256 attempted / 227 ok, 0 `Reason:`/ban lines, gate-6
+all zero, box 1 at the same height 371823 on 0.3.83. Row stays IN-PROGRESS until day 7 (2026-12-02).
+
+**256 (stranger lifecycle) — the "no GPU venue" block is gone, and it was work, not a decision.**
+The 2026-11-25 note said GPN-209 has only the Intel iGPU with no compute share. Re-measured with
+`Get-VMHostPartitionableGpu`: box 1 exposes **both** the Intel UHD 630 and `VEN_10DE&DEV_2C05`
+(RTX 5070 Ti). Removed the Intel partition adapter and attached the NVIDIA one (80/100/90 MB
+budgets; `ADAPTERS: 1`, `STATE: Running`), and the guest now lists `NVIDIA GeForce RTX 5070 Ti`.
+Driver staged the GPU-PV way (VHDX mounted offline → 360-file package copied → `robocopy /E /B`
+into guest DriverStore → `pnputil /add-driver nv_dispig.inf /install` ⇒ `Published Name: oem0.inf`,
+`Indexed 213 device IDs`). **Unresolved and stated plainly:** the paravirtual GPU
+`PCI\VEN_1414&DEV_008E` (`vrd.inf`) reports `CM_PROB_FAILED_POST_START` and `nvidia-smi` answers
+`couldn't communicate with the NVIDIA driver`; the NVIDIA INF correctly logs `Unable to find any
+matching devices` (GPU-PV binds user-mode DLLs, not the synthetic device). Whether OpenCL works
+through that stack is being measured by the gate, not assumed.
+
+Guest wiped to clean-machine state (`GPN-*` tasks unregistered, `C:\gpn` + `%USERPROFILE%\.gpn`
+removed, `tasks left: 0`), then the gate **dispatched at 23:33 PT** — host `Start-Process
+C:\gpn-vm\run209-lifecycle.ps1` (pid 63000) → guest downloads `scripts/stranger-lifecycle.ps1`
+anonymously from the crewlyllc mirror (sha256 `ea8196440f5e…6232` == repo copy) and runs it
+`-Report C:\lifecycle-report.txt`; log `C:\gpn-vm\lifecycle-20261126-233353.log`. Not waited on.
+
+**Next run:** read that log/report ⇒ tick steps 1-2 with the digest+version lines, record steps 3-6;
+if step 3 dies on OpenCL, that `vrd` failure is the venue answer ⇒ DDA of the 5070 Ti or a Win11
+client guest. Then 273 day 4.
+
+No blockers, no [TRIAGE] items.
 
 A0: HEAD `38647ef1` (docs) ⇒ `total_count: 0`, correct for a docs-only SHA. The code run
 **`45937187011`** (`a57f030f`) was `in_progress` at the start and finished **`success`** at
