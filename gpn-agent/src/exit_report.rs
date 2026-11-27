@@ -538,8 +538,9 @@ pub fn default_fix(kind: ExitKind) -> &'static str {
         ExitKind::CONSOLE_TEARDOWN => CONSOLE_TEARDOWN_REMEDIATION,
         ExitKind::SYSTEM_SHUTDOWN => SYSTEM_SHUTDOWN_REMEDIATION,
         ExitKind::VC_RUNTIME => {
-            "install the Microsoft Visual C++ runtime: winget install --id \
-             Microsoft.VCRedist.2015+.x64 -e"
+            "install the Microsoft Visual C++ runtime: download \
+             https://aka.ms/vs/17/release/vc_redist.x64.exe and run it (or, if \
+             winget exists: winget install --id Microsoft.VCRedist.2015+.x64 -e)"
         }
         ExitKind::PORT_IN_USE => {
             "stop the process holding the port, or move this node with GPN_RPC_PORT / \
@@ -783,6 +784,23 @@ mod tests {
         );
         assert_eq!(kind_for_text("something else entirely").code, 1);
         assert!(!default_fix(ExitKind::PORT_IN_USE).is_empty());
+    }
+
+    #[test]
+    fn vc_runtime_fix_names_the_direct_download_first_not_winget() {
+        // Row 292: a clean Windows Server / Enterprise Evaluation machine has no
+        // winget, so a winget-only remedy is unusable advice. The direct aka.ms
+        // installer must be the primary path and winget only an alternative.
+        let fix = default_fix(ExitKind::VC_RUNTIME);
+        assert!(
+            fix.contains("https://aka.ms/vs/17/release/vc_redist.x64.exe"),
+            "the remedy must name the direct download: {fix}"
+        );
+        let aka = fix.find("aka.ms").expect("aka.ms present");
+        let winget = fix
+            .find("winget install")
+            .expect("winget present as alternative");
+        assert!(aka < winget, "aka.ms must precede winget: {fix}");
     }
 
     #[test]

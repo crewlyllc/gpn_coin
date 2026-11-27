@@ -1135,7 +1135,8 @@ fn check_vc_runtime() -> Check {
                 "missing {} — without it every GPN .exe dies at load with 0xC0000135 and prints nothing",
                 missing.join(", ")
             ),
-            "winget install --id Microsoft.VCRedist.2015+.x64 -e",
+            "download https://aka.ms/vs/17/release/vc_redist.x64.exe and run it \
+             (or, if winget exists: winget install --id Microsoft.VCRedist.2015+.x64 -e)",
         )
     }
 }

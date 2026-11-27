@@ -1,3 +1,29 @@
+## 10:2x PT 0.3.84 box 292 ticked — a headless install installs the VC++ runtime itself, proven on a guest with the runtime removed
+
+- **A0 CI:** `origin/main` = `d02f6a62` (docs-only, `total_count: 0` — expected). Run `46043468441` for
+  `6aec4f04` concluded **cancelled** after 9 min (17:38→17:47Z); not this box (docs work), not waited on.
+- **Box 292 (headless install cannot install the VC++ runtime / names winget)** — ticked on live evidence:
+  - Venue: GPN-210 cleaned (`tasks left: 0`, `C:\gpn` removed) and the **VC++ redist uninstalled**
+    (`VC_redist.x64.exe /uninstall /quiet /norestart` ⇒ rc=0, `vcruntime140.dll`/`msvcp140.dll`
+    False/False).
+  - The released zip carries the pre-fix installer, so the fixed `install.ps1` (sha256 `a49a73aa…1ca7`
+    == repo copy) was placed in the extracted 0.3.83 archive and run **headlessly** over PowerShell
+    Direct — the exact path where `Start-Process -Wait` used to die. `C:\install-log-292b.txt`:
+    `the binaries cannot load: missing Visual C++ runtime (0xC0000135) -- installing it` →
+    `vc_redist exit code: 0` → `Visual C++ runtime installed`; DLLs `True/True` afterwards.
+  - The same run installed to a **running node**: `node is running (witness: process)`,
+    `gpn_node:4924` + `gpn-node:2452`, `--version` ⇒ `0.3.83`, chain advancing
+    (`ADJUST now=22671`, `Syncing … target=#374365`).
+  - Text half: `exit_report::default_fix(VC_RUNTIME)` and the `visual-c++` doctor check still named
+    `winget` alone — both now offer the aka.ms download first, winget as alternative. New test
+    `vc_runtime_fix_names_the_direct_download_first_not_winget`; `exit_report::` tests **13/13**;
+    clippy (CI allow-list) + fmt green.
+- **New defect filed (row 297):** the released `gpn-node.exe` has empty `ProductVersion`/`FileVersion`,
+  so the row-247 "refuse an older install" guard silently prints `version check skipped` on every
+  Windows install. Not fixed here (separate box), recorded with the measurement.
+- No blockers, no [TRIAGE] items. Next run: box 292's neighbours are done; proceed to the §3 bump
+  boxes (release 0.3.84 code boxes 291/292/293 now all ticked).
+
 ## 09:5x PT 0.3.84 box 291 ticked — a start that does not start now FAILS, and a killed supervisor takes its children
 
 - **A0 CI:** `origin/main` = `da9f25e1` (docs-only, `total_count: 0` — expected). Run `46038256017`
