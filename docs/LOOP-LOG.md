@@ -1,3 +1,33 @@
+## 13:36 PT 0.3.84 — stale CI run cancelled, windows build now RUNNING; two CI failures diagnosed
+
+- **A0 CI:** `origin/main` = `635c60f4` (docs-only) ⇒ `total_count: 0` for the full sha, expected.
+  The release's own CI run `46067336386` (dispatch on `build/bd36c4f9d561`) is live: secret-scan,
+  fmt+clippy, two-node GPU testnet **success**; linux build job `140743287977` in progress since
+  21:20:34Z.
+- **§5 windows: blocker was a stale run, and cancelling it started the build.** `DESKTOP-USBUADL`
+  was held by job `140712499859` (windows `Build + test gpn-agent (release)`) of CI run
+  `46058162194` — sha `2c79b4ef`, superseded by `bd36c4f9`, in progress since 19:38Z (**1 h 55 m**,
+  past the 90-min rule). `POST /runs/46058162194/cancel` ⇒ 202 → `completed cancelled`; 60 s later
+  the release job `140735652287` of run `46067304988` was `in_progress` on `DESKTOP-USBUADL`
+  (started 21:33:23Z), confirmed on box 1 over SSH (`Runner.Worker` pid 60968, new
+  `Worker_20261127-213323-utc.log` receiving console batches). Handle recorded; not waited on.
+- **Two CI failures read, quoted, classified — neither fixed, neither blocks:**
+  - `Dependency audit` job `140735756100` ⇒ `advisories ok, bans ok, licenses FAILED, sources ok`,
+    exit 4. Errors: `error[unlicensed]: gpn-node = 0.3.84 is unlicensed` (+ `gpn-runtime` and all
+    ten `pallet-gpn-*`), and `error[rejected] … GPL-3.0-or-later WITH Classpath-exception-2.0 …
+    license is not explicitly allowed` on every `sc-*`/`sp-*` crate. Cause measured: the 12
+    workspace members carry no `license` key — `[workspace.package] license` is opt-in, each needs
+    `license.workspace = true` (`gpn-shield` is the only one that has it); `deny.toml`'s allow
+    list has no classpath-exception entry. **Filed as row 298**, not fixed mid-release (editing 12
+    `Cargo.toml`s changes the tree 0.3.84 was built from). Job is `continue-on-error`, which is why
+    a permanently red gate went unread.
+  - `Build + unit tests (macos, manual)` job `140735756065` ⇒ `runner_name: ""`, zero steps,
+    `20:59:56Z → 20:59:58Z` (2 s), log `BlobNotFound`. No runner was ever assigned; `/actions/runners`
+    has no macOS host. Environment, not our code; job is `continue-on-error` and macOS is not in the
+    release manifest.
+- Next pass: read `46067304988` once (windows artifact), then `46067336386` for the CI verdict
+  `release-cut` needs.
+
 ## 13:33 PT 0.3.84 — stale CI run cancelled; windows build + release CI freed
 
 - **A0 CI:** `origin/main` = `635c60f45882` (docs-only: cycle-2 linux proof + windows handle) ⇒
