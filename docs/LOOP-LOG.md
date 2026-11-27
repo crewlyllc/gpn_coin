@@ -7274,3 +7274,26 @@ reading today would replace day 1, not add a day). Timer verified `gpn-soak-reco
 **Next run:** read `C:\gpn\update.log` + box 1/local `system_version` once ⇒ if 0.3.81, tick §9 and §10 (and re-stamp the two doc pages); if still 0.3.80, quote the update line that refused and fix it. Then §3b 282/283/284 evidence, 273 soak day 4.
 
 **No [TRIAGE] items.**
+
+## 00:20Z (16:20 PT) — 0.3.82 §7: windows build finally took box 1 (queued 59 min, contended); soak day 3 recorded
+
+**A0.** `origin/main` HEAD `935295f6` is docs-only ⇒ `?head_sha=` `total_count: 0` (expected, `paths-ignore`).
+The sha that matters is the rebuild commit `50c9e9b8`: `CI` run `45908365338` **queued** (created 23:01:12Z).
+
+**§7 box 2 (`release-cut.sh`) — still cannot run, and the reason is measured.**
+`Windows binaries` run `45908380728` (sha `50c9e9b8`) was `queued` 23:01:20Z → `in_progress` **00:01:24Z**
+(59 min of contention behind the single-slot box 1, cleared when the cancelled CI session released it).
+Steps 1–9 green (`encoding guard` success, `build agent` success, `pre-checkout polkadot-sdk` success
+00:07:20Z), step 10 `build node` in_progress at 00:20Z. Release build ≈ 60–75 min, so it is mid-flight,
+not stale — nothing cancelled, nothing re-dispatched. `CI 45908365338` takes the slot after it, so
+`release-cut.sh`'s `require_green_ci` cannot pass this run either way.
+Next run: check `45908380728` conclusion → `cosign verify-blob` the new zip + §6 strings on the new bytes
+→ then `45908365338` for the green gate → `release-cut.sh --version 0.3.82`.
+
+**§3b 273 (soak)** day 3 of 7 recorded (`scripts/soak-record.py`, height 370203, 176 blocks/0.66 h ⇒
+**13.58 s/block** vs 13.4 s baseline; authored p50 9.99 s / p95 40.57 s; peers 3; 0 lines at 0 peers;
+imports 3819 / longest gap 151 s; 1 termination adjacent to a systemd `Stopping`, 0 unexplained;
+NRestarts=0; jobs 256 attempted / 227 ok; gate-6 0/0/0; box 1 peers 2 at the same height). Verdict
+unchanged: test 3 INCOMPLETE (day 3 of 7), ticks 2026-12-02 at the earliest.
+
+No blockers, no [TRIAGE].
