@@ -1,4 +1,4 @@
-## 18:55 PT 0.3.82 CLOSED OUT — §7/§7b/§8/§9/§10 ticked with live proofs; image generation repaired and proven; two new rows filed
+## 18:55 PT [TRIAGE] 0.3.82 CLOSED OUT — §7/§7b/§8/§9/§10 ticked with live proofs; image generation repaired and proven; two new rows filed
 
 Release 0.3.82 is published, deployed here, and proven on this host. Checklist moved to
 `docs/releases/archive/0.3.82.md` (only box 273, the seven-day soak, stays open until 2026-12-02) and
@@ -27,6 +27,11 @@ Release 0.3.82 is published, deployed here, and proven on this host. Checklist m
   expired pending entry, restarted the AP, settler logged `[hub] channel 7 settled on chain` (18:44:32),
   next request opened channel 9 and completed. Both rows are "AI does not work" class ⇒ **critical per the
   batch policy, so 0.3.83 may cut immediately rather than waiting for five.**
+
+**[TRIAGE]** item 256 is still the only thing standing between a stranger and a working install, and it
+needs a venue decision (attach a partition of box 1's 5070 Ti to GPN-209, or power box 4 back on). §0e's
+three boxes are carried unticked in this release for that reason — same as 0.3.81. Everything else in the
+checklist is ticked or explained.
 
 Never ticked without evidence; nothing claimed untested. CI at HEAD (`c95901c4`) had no run (docs-only sha).
 ## 18:14 PT AUDIT — fixed 1 (disk 24.8 G), chain/fleet/release all green
