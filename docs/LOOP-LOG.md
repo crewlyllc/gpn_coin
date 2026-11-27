@@ -1,3 +1,27 @@
+## 15:52 PT 0.3.84 PUBLISHED — §7 cut 6/6 exit 0 on CI success; §7b ticked; a real mirror-provenance defect found and fixed (row 299)
+
+- **A0 CI:** `origin/main` = `240074b3` (docs-only) ⇒ `total_count: 0`, expected. The gating release
+  run `46067336386` read once ⇒ **`success`** (23:25:15Z), so the §7 gate opened.
+- **§7 CUT DONE:** `scripts/release-cut.sh --version 0.3.84 --timeout 300` ⇒ 0/6→6/6, exit 0.
+  Mirror digests verified (`linux 660f7585…`, `windows 25790a28…`, bundle `a778a806…`), anonymous
+  GETs 206 with matching sha256 and sizes (349,136,775 / 253,327,068 B), manifest signed and pushed
+  as commit `ae6ed963`, `live manifest is 0.3.84`, stranger check anonymous, `release-lock: released`.
+  `network.json latest_version` ⇒ `0.3.84`; live `releases.json` polled twice 10 s apart ⇒ `0.3.84`
+  both times.
+- **§7b ticked:** site surfaces stamped `0.3.84` (`download.html` fallback literal + `docs/run-a-node`
+  "verified against" line, commit `8eec2021`, both re-read on the live site after Cloudflare deploy);
+  GitHub `jeremyzguo` and mirror `crewlyllc` hold `0.3.84` at identical digests; capability box ticked
+  as "no new capability in this bundle". `seeds.json` named by the checklist does not exist in the
+  repo (stale checklist line; seed list is `network.json.seeds`) — recorded, not silently skipped.
+- **NEW DEFECT FOUND + FIXED (row 299):** the mirror's `gpn-linux.tar.gz.bundle` was 0.3.83's —
+  `cosign verify-blob` on the anonymously downloaded mirror pair failed (`bundle="d9e663dd…",
+  payload="660f7585…"`). Cause: `release-cut.sh` §4b mirrored only the windows bundle. Fixed the
+  script (both bundles mirrored with the same source-digest check) and repaired the live mirror;
+  anonymous re-download now verifies `Verified OK` for linux and windows.
+- **Handle for next pass:** §7 is closed; the first unticked box is now **§7c — publish the canary
+  proof for 0.3.84**. Then §8 (stranger verify) and §9 (self-update + running process reports).
+- No blocker, no decision needed.
+
 ## 15:18 PT 0.3.84 — §5 closed on fresh API evidence (7/7); §7 cut still gated on CI run 46067336386 (windows gpn-agent test compiling)
 
 - **A0 CI:** `origin/main` = `0de82a7c` (docs-only loop-log) ⇒ no run expected. Release CI run
