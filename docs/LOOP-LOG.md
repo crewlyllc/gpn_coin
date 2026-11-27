@@ -1,3 +1,20 @@
+## 11:36 PT 0.3.84 §5 linux build ticked + CI red fixed (ASCII guard on two .ps1 tests)
+
+- **A0 CI:** docs-only HEAD `de2603e7…` ⇒ `total_count: 0`, expected (`ci.yml` paths-ignore).
+  But `CI` run `46047494382` (sha `56fcd99d…`, still in progress, Windows leg) had its **linux**
+  job **failed**: `scripts/tests/test-autostart-installers.sh` printed
+  `FAIL …/test-install-ollama-download.ps1 contains non-ASCII bytes (breaks Windows PowerShell 5.1 parsing)`
+  and the same for `…/job-object-probe.ps1`. Class: **our test** (ASCII guard doing its job).
+  Cause: a `…` ellipsis in a Check() message and `─` box-drawing in two comment banners.
+  Fixed both to ASCII (`...`, `--`); local `bash scripts/tests/test-autostart-installers.sh` ⇒
+  `all autostart/installer assertions passed`. Pushed once.
+- **§5 linux build ticked:** run `46053212209` success 19:27Z; `linux-latest` asset sha256
+  `99d15a48…399275a` = API digest, re-downloaded and hash-matched; `gpn-node 0.3.84` /
+  `gpn_node 0.3.84 (spec 55, 66f5353)` from the extracted tarball.
+- **§5 windows build** still `queued` (run `46053214955`, since 18:57Z) — the Windows runner is
+  busy with CI `46047494382`'s windows job. No wait, no redispatch.
+- No blockers, no [TRIAGE] items.
+
 ## 11:16 PT 0.3.84 §5 (builds) — both dispatches still in flight; nothing tickable this pass
 
 - **A0 CI:** `origin/main` = `75baca815048792fc6f5e0ea54875a2b008675f2` (docs-only tick commit);

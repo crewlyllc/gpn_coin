@@ -89,7 +89,7 @@ $runner = ''
 $label = ''
 
 
-# ── Mode A: the shipped binary's own self-test ──────────────────────────────
+# -- Mode A: the shipped binary's own self-test ------------------------------
 if ($NodeExe) {
   Check (Test-Path -LiteralPath $NodeExe) 'binary exists' $NodeExe
   $prev = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
@@ -113,7 +113,7 @@ if ($NodeExe) {
   exit 0
 }
 
-# ── Mode B: the compiled reference, held alive then hard-killed ─────────────
+# -- Mode B: the compiled reference, held alive then hard-killed -------------
 $csc = @(
   'C:\Windows\Microsoft.NET\Framework64\v4.0.30319\csc.exe',
   'C:\Windows\Microsoft.NET\Framework\v4.0.30319\csc.exe'

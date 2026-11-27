@@ -94,7 +94,7 @@ $logA = (Get-Content -LiteralPath $outA -Raw)
 Check (Test-Path $dest) "A1 the download created its destination file"
 if (Test-Path $dest) {
   $got = (Get-FileHash -Algorithm SHA256 -LiteralPath $dest).Hash
-  Check ($got -eq $sha) "A2 the downloaded bytes are identical (sha256 $($sha.Substring(0,12))…)"
+  Check ($got -eq $sha) "A2 the downloaded bytes are identical (sha256 $($sha.Substring(0,12))...)"
 }
 Check ($logA -match 'downloaded 3 MiB from http://127\.0\.0\.1') "A3 the log reports the streaming download and its URL"
 Check ($logA -notmatch 'Invoke-WebRequest') "A4 no Invoke-WebRequest path is exercised any more"
