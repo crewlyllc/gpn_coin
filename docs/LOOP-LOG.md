@@ -1,3 +1,51 @@
+## 05:15 PT — 256: the Win11 guest gets a real local admin — `dism /Apply-Unattend` never stages the answer file, so specialize/oobe ran with none; hand-staged `Panther\unattend.xml` on the offline volume and `gpn` now exists (PS Direct OK)
+
+A0: origin/main HEAD `2e48315f` (docs: 256 specialize 0x13 diagnosis) ⇒ `?head_sha=2e48315f…`
+⇒ **total_count 0** — docs-only, correct under `ci.yml` paths-ignore. Nothing red, nothing in flight.
+
+**v2 offline apply succeeded.** `gpn-apply210b` `LastTaskResult 0`:
+`[04:06:40] image applied` → `[04:06:48] apply-unattend rc=0` → `[04:06:54] bcdboot rc=0` →
+`[04:07:05] started state=Running`.
+
+**But the answer file was still never consumed, and the mechanism is now measured, not inferred.**
+VM was off'ed and `D:\gpn-vm\GPN-210os.vhdx` mounted read-only on box 1. On the Windows volume:
+`\Users` = `All Users`, `Default`, `Default User`, `Public`, `desktop.ini` — no `gpn`; no
+`unattend.xml` at `Windows\Panther\`, `Windows\Panther\unattend\`, `Windows\System32\Sysprep\`, or
+the volume root; and `Windows\Panther\setupact.log` says it plainly:
+
+    04:17:16 Callback_Unattend_InitEngine: Didn't find unattend file for this phase of Setup.
+    04:17:16 Callback_Unattend_InitiatePass: No unattend file was present, skipping unattend settings passes
+    04:17:18 InstallWindows:First boot phase of setup done!!!!
+    04:17:18 InstallWindows:Exiting with return code [0x0]
+
+So `dism /Image:J:\ /Apply-Unattend:` reports success because it applied the **offlineServicing**
+settings of the file — it does not lay the file down for the specialize/oobeSystem passes. Phase 4
+then ran clean (no 0x13 this time) and rebuilt the boot store, but with no settings at all.
+
+**Fix (done, measured):** the same answer file (sha256 `BC6F231A714A16B4…14BA13`) was written to
+`J:\Windows\Panther\unattend.xml` **and** `J:\Windows\System32\Sysprep\unattend.xml` while the VHDX
+was mounted read-write, then dismounted and the VM booted. Result, via PowerShell Direct as
+`gpn` / `Gpn210Test!`:
+
+    gpn                 True      (Get-LocalUser, Enabled)
+    OOBEInProgress=0  SystemSetupInProgress=0  SetupType=0
+    explorer: 1                   (desktop shell up)
+    Windows 11 Enterprise Evaluation build 26100
+
+**Two residuals, both stated so the next run does not re-derive them:**
+1. `ComputerName` came up `DESKTOP-OGCJ5B8`, not `GPN-210` — only the oobeSystem pass consumed the
+   file this boot (specialize had already run), so the specialize-only setting did not apply. Fix is
+   `Rename-Computer -NewName GPN-210 -Restart` from PS Direct.
+2. No GPU partition is attached: the v2 rebuild detached it. Attaching Intel UHD 630
+   (`VEN_8086&DEV_9BC5`) + staging DCH `31.0.101.2140` is still the open question for step 3.
+
+The session user is OOBE's `defaultuser0` (explorer runs in that session); a reboot lands on the
+normal login screen with `gpn` available. VM `GPN-210` left **Running**, guest reachable by PS Direct.
+
+Next run: rename + attach the partition + read `Get-PnpDevice -Class Display`, then lifecycle step 2.
+
+No [TRIAGE] items.
+
 ## 04:05 PT — 256: the Win11 guest boots but its specialize pass aborts (0x13) — that, not the GPU, is why `gpn` never existed; offline unattend re-applied via DISM /Apply-Unattend
 
 A0: origin/main HEAD `8d5a1316` (docs: 256 guest install) ⇒ `?head_sha=8d5a1316…` ⇒ **total_count 0** —
