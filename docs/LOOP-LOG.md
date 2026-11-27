@@ -1,3 +1,18 @@
+## 10:2x PT 0.3.84 §3 (bump and record) ticked — lockstep 15 manifests + bootnode parity 8/8 green
+
+- **A0 CI:** `origin/main` = `56fcd99d`; run `46047494382` was `pending` at 10:17 (created 18:10Z).
+  Not blocked on it (docs/checklist work).
+- **§3 boxes (bump-version, CHANGELOG, lockstep, seed-list parity)** — all four ticked with evidence:
+  - version already bumped in `52c8da47`; `bump-version.py --check` → `lockstep: 15 manifest(s) and
+    14 lockfile entr(ies) agree`, `gpn version: 0.3.84`.
+  - `CHANGELOG.md:11` `## [0.3.84] - 2026-11-27`, five `### Fixed` bullets (rows 289/292/291/293/290),
+    no `_TODO_` in the section.
+  - `cargo test --test launcher_bootnodes --test shipped_bootnodes` → **8 passed, 0 failed**.
+    Note: `seeds.json` does not exist in this repo; `network.json` is the bootnode registry
+    (2 bootnodes, mirrored on every shipped surface).
+- No blockers, no [TRIAGE] items. Next run: §4 push boxes, then §5 build dispatch (builds are
+  dispatched and the run ends — see the dispatch rule).
+
 ## 10:2x PT 0.3.84 box 292 ticked — a headless install installs the VC++ runtime itself, proven on a guest with the runtime removed
 
 - **A0 CI:** `origin/main` = `d02f6a62` (docs-only, `total_count: 0` — expected). Run `46043468441` for
