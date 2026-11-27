@@ -1,3 +1,42 @@
+## 03:35 PT — 256: the Win11 24H2 guest installs headlessly at last (media boot bypassed entirely); Intel partition attached; the answer file's own deprecated OOBE flags were why no account existed — rebuilt
+
+A0: origin/main HEAD `19be4e7d` (docs: 256 GPN-210 media-boot diagnosis) is docs-only ⇒
+`?head_sha=19be4e7de73b693438bdfe19ea3201f26fb9d56a` ⇒ **total_count 0** — correct under
+`ci.yml` paths-ignore. Nothing red, nothing in flight.
+
+**Box 256, offline DISM apply: it worked.** `gpn-apply210` finished `LastTaskResult 0`:
+`[02:57:52] image applied` → `[02:58:03] bcdboot rc=0` → `[02:58:04] unattend staged` →
+`[02:58:13] started state=Running`. So last run's 63-s `event 18603` media-boot failure is bypassed
+entirely — an 80 GB GPT VHDX with EFI 300 MB / MSR 16 MB / NTFS primary, `install.wim` index 1
+(`Windows 11 Enterprise Evaluation`), `bcdboot /f UEFI`. Disk grew 4 MB → 12.3 GB inside the first
+10 min of first boot; guest reached `Heartbeat: OK` on all six integration services and pulled DHCP
+**172.29.4.90** — the guest OS is genuinely up.
+
+**Intel UHD 630 partition attached to GPN-210** while the VM was off (no adapter existed before):
+`Add-VMGpuPartitionAdapter` on `VEN_8086&DEV_9BC5` (instance `#3&11583659&0&10`) with 80/100/90 MB
+VRAM/Encode/Decode/Compute; read back `MinPartitionVRAM 80000000`, `MinPartitionCompute 80000000`.
+Both partitionable GPUs are still offered by the host (`VEN_10DE&DEV_2C05` RTX 5070 Ti and
+`VEN_8086&DEV_9BC5` UHD 630, `ValidPartitionCounts {32}`).
+
+**The real blocker was the answer file, measured:** PowerShell Direct with `gpn` / `Gpn210Test!`
+answered **`The credential is invalid`** on first boot. `C:\gpn-vm\unattend210.xml` carried
+`<SkipMachineOOBE>true` and `<SkipUserOOBE>true`, both removed from the Windows 10/11 `oobeSystem`
+schema — a pass with an unsupported setting is discarded, so the local account (`gpn`,
+Administrators) was never created and OOBE stayed interactive. Console thumbnail via
+`Msvm_VirtualSystemManagementService.GetVirtualSystemThumbnailImage` (parameter is `TargetSystem`,
+not `TargetSettingData`; payload is a 4-byte header + 640x480 RGB565, not PNG) rendered a blank
+console, consistent with an OOBE window no unattended pass had closed.
+
+**Rebuild dispatched, run ended (dispatch-and-end):** answer file patched (both deprecated flags
+removed, `HideLocalAccountScreen` added, backup at `unattend210.bak.xml`, parse check = 3 settings
+components), `gpn-apply210` re-run at **03:19:50** — `[03:19:52] disks detached` on a fresh VHDX.
+Next run: wait for `LastTaskResult 0` + first boot, then PS Direct `gpn` / `Gpn210Test!` ⇒
+`Get-PnpDevice -Class Display` on 26100 (expect `PCI\VEN_1414&DEV_008E` under in-box `vrd.inf`).
+Device healthy ⇒ stage DCH `31.0.101.2140` and run lifecycle steps 3-6; code 43 again ⇒ GPU-PV is
+answered on this host for 26100 too, and DDA (host GPU offline) is the owner call.
+
+No [TRIAGE] items.
+
 ## 03:12 PT — 256: the Win11 guest never booted its install media at all (rig defect, measured), fixed by applying the image offline; DISM dispatch in flight
 
 A0: origin/main HEAD `2dbc9fff` ⇒ `?head_sha=2dbc9fffc4ccb838935831e025ee29770515e6e6` ⇒ `total_count: 0`
