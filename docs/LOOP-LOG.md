@@ -35,6 +35,9 @@
   - Workflow cap: the deploy step's `run:` went 19,353 → **20,733** escaped chars against GitHub's
     21,000 wall. 267 chars of headroom; further additions must move out of that step.
 - No blockers, no [TRIAGE] items. Next run: box 292.
+  - **Handle for the next run:** this commit `6aec4f04` touches code, so CI started — run
+    **46043468441**, `pending` at 09:5x PT. Not waited on (A0). Run `46038256017` for `8778526a`
+    was still in flight for the same box; the next run should read its conclusion before anything else.
 
 ## 08:59 PT 0.3.84 box 290 ticked — the canary proof publishes itself, and filing refuses without it
 
