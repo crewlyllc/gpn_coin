@@ -1,3 +1,34 @@
+## 18:55 PT 0.3.82 CLOSED OUT — §7/§7b/§8/§9/§10 ticked with live proofs; image generation repaired and proven; two new rows filed
+
+Release 0.3.82 is published, deployed here, and proven on this host. Checklist moved to
+`docs/releases/archive/0.3.82.md` (only box 273, the seven-day soak, stays open until 2026-12-02) and
+`docs/releases/INDEX.md` has its row.
+
+- **§7** `network.json latest_version` ⇒ `0.3.82`; `https://gpncoin.ai/releases.json` ⇒ `version 0.3.82`
+  twice, 10 s apart.
+- **§7b** the site's own copies still said 0.3.81 (download.html fallback literal, `docs/run-a-node`,
+  `docs/downloads`, `docs/downloads.md`) — fixed at commit `5ec75010` and re-polled anonymously:
+  `/download` `current-release">0.3.82`, `/docs/run-a-node` `0.3.82`, `/docs/downloads` `0.3.82`.
+  Mirror `crewlyllc/gpn_coin` digests equal the manifest (`dee7a6a3…`, `2c80da5d…`).
+- **§8** `release-cut.sh --verify-published --version 0.3.82` ⇒ rc 0, both assets downloaded anonymously,
+  sha256/size match the manifest.
+- **§9** this host updated itself: `confirmed 0.3.82 is running` (18:26:27 PT, 24 s), `versions/0.3.81`
+  retained, `current.previous` present.
+- **§10** 285: `GET :8092/jobs` ⇒ 0 hex, `provider`==`lease_provider` on every leased row. 286: four
+  structural candidates skipped, `channel 9` opened, `1 image(s)`, artifact 549,753 B PNG 512x512 whose
+  sha256 matches the API's own. Peers 2, 0 bans/isolations in 20 min.
+
+**Two defects found while proving 286 — fixed at the cause tonight, filed as rows (not parked):**
+- `287` the AP's hub job deadline is a hard 180 s (`hub_ap.rs:114`), but a cold render after a restart
+  took 276 s ⇒ the caller got 503 while the provider completed the work and published the PNG.
+- `288` **the wedge:** that timed-out job left a `pending` entry (dated 2026-10-23!) that blocks
+  `pending_len()==0` settlement, while the 409 `StaleStateBefore` retry re-prices from the AP's own stale
+  mirror three times. Every later image/audio request 409'd until a human intervened. Repair: dropped the
+  expired pending entry, restarted the AP, settler logged `[hub] channel 7 settled on chain` (18:44:32),
+  next request opened channel 9 and completed. Both rows are "AI does not work" class ⇒ **critical per the
+  batch policy, so 0.3.83 may cut immediately rather than waiting for five.**
+
+Never ticked without evidence; nothing claimed untested. CI at HEAD (`c95901c4`) had no run (docs-only sha).
 ## 18:14 PT AUDIT — fixed 1 (disk 24.8 G), chain/fleet/release all green
 
 **Disk first (owner rule).** `df -h /` before: `439G 331G 86G 80%` = **19.6% free**, under the 25%
