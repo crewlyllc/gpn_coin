@@ -1,3 +1,26 @@
+## 18:09 PT — 0.3.82 CUT AND PUBLISHED: CI green, release-cut ran for real, live manifest serves 0.3.82
+
+**A0.** `origin/main` HEAD `378c5f90` docs-only ⇒ `?head_sha=` `total_count: 0` (expected, paths-ignore).
+Handle from last run: CI `45908365338` (sha `50c9e9b8`) ⇒ **`completed/success`** (updated 01:49:59Z).
+
+**Box §7 `release-cut.sh` — TICKED.** Ran `scripts/release-cut.sh --version 0.3.82 --timeout 300`
+(real, not dry-run). Its log: version stamp `0.3.82`; content gate `OK: 0.3.82 artifacts verified on
+linux, windows — 5 marker(s) present in each`; mirrored `linux-latest` digest `dee7a6a3…` and
+`windows-latest` digest `2c80da5d…`; signed and published `[main 04f97480] release: sign 0.3.82
+(linux 349.0MB dee7a6a3, windows 253.3MB 2c80da5d)` (`378c5f90..04f97480`); post-publish anonymous
+GET 206 on both assets with digests matching the manifest; `stranger check: https://gpncoin.ai/releases.json
+serves version 0.3.82 (anonymous, no token, no cookie jar)`; both exact filenames present in
+`crewlyllc/gpn_coin@{linux,windows}-latest`. Final line `released 0.3.82`.
+
+**Incident, recorded not hidden:** mid-flight I read `pgrep -x release-cut` (empty) as "process
+dead" and released the repo lock at step 4c while pid 734562 was still alive — `pgrep -x` does not
+match `release-cut.sh`'s truncated comm name. Publish then committed without the lock and the
+script's own 6b printed `release-lock: no lock held`. No artifact, manifest or commit was affected;
+the lock is genuinely clear now, so the next docs commit is not blocked.
+
+Next run: §7b/§8 — `network.json` `latest_version`, `releases.json` twice 10s apart, gpncoin.ai and
+GitHub surfaces vs binaries, then §9 deploy (dispatch and end the run).
+
 ## 17:52 PT — 0.3.82: cut dry-run reaches the CI gate only; windows CI build proven alive on box 1, not cancelled
 
 **A0.** HEAD `16c7f6b8` (docs-only) ⇒ `?head_sha=` `total_count: 0`, expected. Nothing red to work.
