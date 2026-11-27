@@ -32,8 +32,12 @@ tests `a_pending_job_past_its_deadline_is_swept_so_settlement_is_not_blocked` an
 ci.yml's CLIPPY_ALLOWS + `-D warnings` clean.
 
 **Not ticked:** both 287 and 288 need the 0.3.83 binary for their live half (a channel already
-carrying the stale pending must settle by itself after the update restart). Same sha must go green
-in CI, then §5 build → §7 cut → §9 deploy. Next box: §4 green check on this commit's run.
+carrying the stale pending must settle by itself after the update restart).
+
+**Handle for the next run:** code commit `a57f030f6322d2b4fd5fe69cfccdb13d1bab0ce8` → `CI` run
+**`45937187011`** (`pending` at 03:39Z, queued behind the single-slot runner). Not waited on.
+Next run: ask once for `45937187011`'s conclusion → if `success`, §4 is green and the next box is
+§5 (build both platforms, dispatch + end the run); if `failure`, read the failing job log and fix.
 No blocker, no [TRIAGE].
 
 ## 20:0x PT 0.3.83 box 1 (row 287) — media jobs get their own deadline; code+test green, live half rides §7/§9
