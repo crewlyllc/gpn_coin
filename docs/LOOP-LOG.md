@@ -1,3 +1,50 @@
+## 21:0x PT — 0.3.83: cosign verification mechanism proven host-side; windows build running, run ended
+
+A0: `origin/main` HEAD `459f0707` (docs) ⇒ `?head_sha=459f0707db06f06ca41fc811fc2b373ea6d5670d`
+`total_count: 0` — expected (`paths-ignore`), nothing red. The code CI run `45937187011` (`a57f030f`)
+is still `queued` (created 03:58:16Z, updated 04:49:15Z) behind the windows lane. Not waited on.
+
+**Build handles re-read once.** `release-windows.yml` run **`45939164076`** ⇒ **`in_progress`**: the
+`windows` job started **04:49:16Z** (it spent 31 min queued behind `Build + unit tests (windows)` of
+run `45931500621`; runners API `DESKTOP-USBUADL online busy=True` is contention, not a fault). At
+05:00Z its last executed steps were still the pre-attestation build; steps 21 cosign sign / 22
+provenance gate / 23 publish were all `pending`. **Run ended rather than wait** — the next run reads
+the handle. `release-linux-selfhosted.yml` `45939162066` remains `success`.
+
+**What this run actually added — the §5 verifier is no longer a cut-time unknown.** `cosign` exists
+at `/home/jeremyg/.local/bin/cosign`; `gh` does **not** exist on this host (consistent with the
+private-repo cosign path). I downloaded the published linux asset through the API (`gpn-linux.tar.gz`,
+348,901,423 B, `sha256 d9e663dd…6ca6` == the release digest) with its `gpn-linux.tar.gz.bundle`
+(9,229 B) and ran the exact §5 command shape against the linux workflow identity:
+
+```
+cosign verify-blob --bundle gpn-linux.tar.gz.bundle \
+  --certificate-identity-regexp '^https://github\.com/jeremyzguo/gpn_coin/\.github/workflows/release-linux-selfhosted\.yml@.*$' \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com gpn-linux.tar.gz
+⇒ Verified OK   (rc 0)
+```
+
+Bundle mode verifies offline, so this host's broken IPv6 fallback (NEEDS-TRIAGE `self-heal/IPv6`)
+does not block the check. Written into the §5 verify box and the §7 "refuse to cut unless §5's
+attestation checks passed" box as a note; **neither box is ticked** — they need the windows zip and
+its bundle, which `45939164076` produces.
+
+**Also checked, no action needed:** `~/.gpn/release-in-flight` does not exist (no stale cut lock, row
+277's failure mode), `website/releases.json` still serves `0.3.82` (expected until the cut), and
+`network.json` already carries `latest_version 0.3.83`.
+
+**Boxes not worked, with the reason:** §3b 256 (stranger lifecycle) is still the venue decision in
+`docs/NEEDS-TRIAGE.md` item 256 — GPN-209's only partitionable adapter is the Intel UHD 630 iGPU,
+which `classify_gpu_name` rejects by design, so steps 3-6 cannot pass there; no re-run performed.
+§3b 273 (seven-day soak) is on day 3 of 7 — the recorder is alive (`gpn-soak-record.timer` active,
+day 3 written at 00:20:37Z by `scripts/soak-record-daily.sh`), so this run's contribution is that the
+day-3 numbers exist. §3b 287/288 need the **published** 0.3.83 binary for their live halves.
+
+**Next run:** re-read `45939164076`. If `success` ⇒ grep the windows zip for the §6 strings, tick §5
+windows + digest + verify boxes with `cosign verify-blob`, then §7 `release-cut.sh --timeout 300`.
+If it is still queued/in-progress and the CI windows job is >90 min old, cancel the stale CI run and
+re-dispatch. No blockers, no [TRIAGE].
+
 ## 20:5x PT — 0.3.83 §5 linux build green + §6 artifact verified; windows build still queued behind CI
 
 A0: `origin/main` HEAD `d7513a35` (docs) ⇒ `total_count: 0` for
