@@ -1,3 +1,18 @@
+## 16:05 PT 0.3.84 §7c published — the fleet is unheld; this host is the canary on 0.3.84
+
+- **Canary update (this host, `GPN_CANARY=1`):** `systemctl --user start gpn-update.service` ⇒
+  `confirm: process=up rpc=yes 26s version=0.3.84` → **`confirmed 0.3.84 is running`**; RPC
+  `system_version` ⇒ `0.3.84`.
+- **Served a job on the new build:** `POST :8092/v1/chat/completions {"model":"qwen2.5:7b"}` ⇒ 200
+  `"Ok"`, job `1795823422019` channel 9; `/jobs` ⇒ `6604 Completed`.
+- **Proof published:** `scripts/canary-auto.sh --version 0.3.84` ⇒ green, commit **`f6feb493`**
+  pushed, `bridged: https://gpncoin.ai/canary.json serves 0.3.84`; two live reads 10 s apart ⇒
+  `0.3.84 True 6604 True`.
+- **§7c ticked (3 of 4).** The 4th box (a NON-canary node updating unattended) is left unticked on
+  purpose: box 1's next hourly cycle is the witness. Handler for next pass: read box 1's
+  `update.log` / this host's `gpn-update` journal for an install, then §8 (stranger verify).
+- No blocker, no decision needed.
+
 ## 15:52 PT 0.3.84 PUBLISHED — §7 cut 6/6 exit 0 on CI success; §7b ticked; a real mirror-provenance defect found and fixed (row 299)
 
 - **A0 CI:** `origin/main` = `240074b3` (docs-only) ⇒ `total_count: 0`, expected. The gating release
