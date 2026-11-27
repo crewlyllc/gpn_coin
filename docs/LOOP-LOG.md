@@ -1,3 +1,33 @@
+## 08:15 PT — box 293 code done: Intel-only Windows boxes now pass the entry GPU probe
+
+**A0.** HEAD `52c8da47…00ca7` (release 0.3.84 bump commit) — `GET /actions/runs?head_sha=…` ⇒ run
+`46026635610`, status `pending`. Not waited on (A0: only a conclusion is actionable); noted and the
+checklist was worked meanwhile.
+
+**Box worked: §3b 293 (Intel iGPU can never register).** The defect was structural: the entry path's
+`GPUMonitor::get_gpu_info` probed only `nvidia-smi` and `rocm-smi`, so an Intel-only box failed at
+enrolment even with working OpenCL, while the repo already had a `Win32_VideoController` detector
+used only by `gpn_llm_provider`/`gpn_provider_status`.
+
+- `gpn-agent/src/gpu/mod.rs`: `get_gpu_info` gains a last-resort `query_display_adapters()`
+  (Windows: `Get-CimInstance Win32_VideoController | Select-Object Name,DriverVersion,AdapterRAM`
+  → CSV, `wmic` for older builds; Linux: `lspci` display-controller lines), folded by the new pure
+  `gpu_info_from_adapters()` (discrete > integrated; `compute_capability="adapter-probe"`; never
+  invents a UUID). Anti-fabrication kept: a software-only adapter list ("Microsoft Basic Display
+  Adapter") returns `None`, so a machine with no GPU is still refused.
+- Tests: `cargo test --release --lib gpu::` ⇒ **31 passed / 0 failed / 5 ignored**, incl. the new
+  `adapter_probe_accepts_an_intel_only_machine`, `adapter_probe_refuses_a_machine_with_no_real_gpu`,
+  `adapter_probe_prefers_discrete_over_integrated`, `lspci_adapter_records_parse_intel_igpu` and
+  `live_lspci_folds_into_a_gpu_info` (real host: `10:00.0 VGA compatible controller: NVIDIA
+  Corporation AD107 [GeForce RTX 4060]`). `cargo fmt --check` rc 0; clippy `--release --all-targets`
+  with CI's allow-list `-D warnings` ⇒ `Finished release profile`.
+- Checklist: §1 (3 boxes), §2 (6 boxes) and §3b-293 ticked with the evidence inline.
+  **Scope stated, not hidden:** no real Intel-only Windows machine with working OpenCL exists on the
+  tailnet (box 1's guests have no OpenCL — rows 256/292), so the Windows adapter read is unit- and
+  data-path-proven but not guest-proven. That remaining half is written in the box.
+
+`[TRIAGE]` none new — item 256 remains the only open decision (`docs/NEEDS-TRIAGE.md`).
+
 ## 07:37 PT — batch of five opened as 0.3.84 (289, 290, 291, 292, 293)
 
 **A0.** `origin/main` = `30ad7e8d30d25d4d9ef0456a75ef2554765a8894` (docs-only soak/box-256 commit) —

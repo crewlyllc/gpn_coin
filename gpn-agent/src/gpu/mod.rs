@@ -43,6 +43,15 @@ impl GPUMonitor {
         if let Ok(info) = Self::query_rocm_smi() {
             return Ok(info);
         }
+        // Last resort: the OS display-adapter list. This is the only path that
+        // can see an Intel iGPU (queue #293): the modal stranger laptop has
+        // working OpenCL but no nvidia-smi/rocm-smi, so the two probes above
+        // fail and enrolment used to refuse a machine that can serve jobs.
+        // `gpu_info_from_adapters` returns None for an adapter list with no
+        // recognisable GPU, so this cannot invent hardware.
+        if let Some(info) = Self::query_display_adapters() {
+            return Ok(info);
+        }
 
         // **No fabrication.** This used to return a plausible-looking device
         // ("Unknown GPU", 8 GB VRAM, compute capability 8.0) when both probes
@@ -50,7 +59,17 @@ impl GPUMonitor {
         // any attestation built on it would have been a lie about hardware.
         // A failed read is an error, never a default (owner rule: Unknown, not
         // a plausible number).
-        Err("no compute GPU detected: nvidia-smi and rocm-smi both unavailable".into())
+        Err("no compute GPU detected: nvidia-smi and rocm-smi both unavailable, and the display-adapter list names no usable GPU".into())
+    }
+
+    /// Fold the OS display-adapter list into a `GPUInfo` (see
+    /// [`gpu_info_from_adapters`]).
+    fn query_display_adapters() -> Option<GPUInfo> {
+        #[cfg(windows)]
+        let rows = win_adapter_records();
+        #[cfg(not(windows))]
+        let rows = unix_adapter_records();
+        gpu_info_from_adapters(&rows)
     }
 
     fn query_nvidia_smi() -> Result<GPUInfo, Box<dyn std::error::Error>> {
@@ -1146,6 +1165,109 @@ const PS_QW_MEMORY_SIZE: &str = "Get-ItemProperty -Path 'HKLM:\\SYSTEM\\CurrentC
 
 /// PowerShell: adapter names only (`AdapterRAM` deliberately not requested —
 /// classification never needs it, and the field is 32-bit capped).
+/// One display adapter as the OS lists it. `vram_mib` is 0 when the platform
+/// does not report it (Intel iGPUs share system RAM; AdapterRAM is absent).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AdapterRecord {
+    pub name: String,
+    pub vram_mib: u64,
+    pub driver_version: String,
+}
+
+/// Fold enumerated display adapters into a `GPUInfo`.
+///
+/// Preferred adapter: discrete beats integrated; within a class the first one
+/// wins. Returns `None` when no adapter classifies as a known GPU — that is the
+/// anti-fabrication rule: "Microsoft Basic Display Adapter" and friends are a
+/// machine with no usable GPU, not a device we may name.
+pub fn gpu_info_from_adapters(rows: &[AdapterRecord]) -> Option<GPUInfo> {
+    let mut best: Option<&AdapterRecord> = None;
+    let mut best_rank = 0u8; // 0 = unknown, 1 = integrated, 2 = discrete
+    let mut usable: u8 = 0;
+    for r in rows {
+        let rank = match classify_gpu_name(&r.name) {
+            "discrete" => 2,
+            "integrated" => 1,
+            _ => 0,
+        };
+        if rank == 0 || r.name.trim().is_empty() {
+            continue;
+        }
+        usable = usable.saturating_add(1);
+        if rank > best_rank {
+            best_rank = rank;
+            best = Some(r);
+        }
+    }
+    let r = best?;
+    Some(GPUInfo {
+        model_name: r.name.clone(),
+        driver_version: r.driver_version.clone(),
+        vram_total_bytes: r.vram_mib.saturating_mul(1024 * 1024),
+        vram_used_mb: 0,
+        temperature_celsius: 0.0,
+        gpu_utilization_percent: 0,
+        current_hashrate_mhs: 0.0,
+        // Not a vendor compute capability: says which probe produced this row.
+        compute_capability: "adapter-probe".to_string(),
+        cuda_version: None,
+        gpu_count: usable.max(1),
+        gpu_uuid: None,
+    })
+}
+
+/// Parse `Name,DriverVersion,AdapterRAM` CSV in any column order (CIM or wmic).
+pub fn parse_adapter_records(out: &str) -> Vec<AdapterRecord> {
+    let mut rows = Vec::new();
+    let mut name_idx: Option<usize> = None;
+    let mut drv_idx: Option<usize> = None;
+    let mut ram_idx: Option<usize> = None;
+    for line in out.lines() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        let cells = split_csv_fields(line);
+        if name_idx.is_none() {
+            for (i, c) in cells.iter().enumerate() {
+                let cl = c.to_ascii_lowercase();
+                if cl == "name" {
+                    name_idx = Some(i);
+                } else if cl.contains("adapterram") {
+                    ram_idx = Some(i);
+                } else if cl.contains("driverversion") {
+                    drv_idx = Some(i);
+                }
+            }
+            if name_idx.is_some() {
+                continue;
+            }
+            continue; // a first line with no header is not a data row
+        }
+        let Some(name) = cells.get(name_idx.unwrap_or(0)) else {
+            continue;
+        };
+        if name.trim().is_empty() || name.eq_ignore_ascii_case("name") {
+            continue;
+        }
+        let vram_mib = ram_idx
+            .and_then(|i| cells.get(i))
+            .and_then(|s| parse_size_number(s))
+            .map(|b| b / (1024 * 1024))
+            .unwrap_or(0);
+        let driver_version = drv_idx
+            .and_then(|i| cells.get(i))
+            .cloned()
+            .unwrap_or_default();
+        rows.push(AdapterRecord {
+            name: name.clone(),
+            vram_mib,
+            driver_version,
+        });
+    }
+    rows
+}
+
 #[cfg(windows)]
 const PS_ADAPTER_NAMES: &str =
     "Get-CimInstance Win32_VideoController | Select-Object Name | ConvertTo-Csv -NoTypeInformation";
@@ -1308,6 +1430,82 @@ fn win_detect() -> (String, f64) {
         return scan_names(names.iter().map(|n| n.as_str()));
     }
     ("unknown".to_string(), 0.0)
+}
+
+#[cfg(windows)]
+const PS_ADAPTER_RECORDS: &str = "Get-CimInstance Win32_VideoController | Select-Object Name,DriverVersion,AdapterRAM | ConvertTo-Csv -NoTypeInformation";
+
+#[cfg(windows)]
+fn win_adapter_records() -> Vec<AdapterRecord> {
+    if let Some(s) = run_powershell(PS_ADAPTER_RECORDS) {
+        let rows = parse_adapter_records(&s);
+        if !rows.is_empty() {
+            return rows;
+        }
+    }
+    // Older Windows without CIM: classic wmic CSV (Node,AdapterRAM,Name).
+    if let Ok(o) = Command::new("wmic")
+        .args([
+            "path",
+            "win32_VideoController",
+            "get",
+            "name,adapterram",
+            "/format:csv",
+        ])
+        .output()
+    {
+        if o.status.success() {
+            let rows = parse_adapter_records(&String::from_utf8_lossy(&o.stdout));
+            if !rows.is_empty() {
+                return rows;
+            }
+        }
+    }
+    Vec::new()
+}
+
+/// Non-Windows fallback: `lspci` display-controller lines (covers Intel iGPUs
+/// and AMD APUs when neither vendor CLI is installed). No driver version or
+/// VRAM is reported by lspci without elevated commands, so those stay empty.
+#[cfg(not(windows))]
+fn unix_adapter_records() -> Vec<AdapterRecord> {
+    let Ok(o) = Command::new("lspci").output() else {
+        return Vec::new();
+    };
+    if !o.status.success() {
+        return Vec::new();
+    }
+    adapter_records_from_lspci(&String::from_utf8_lossy(&o.stdout))
+}
+
+/// Parse `lspci` output for display controllers (pure, so it is testable).
+#[cfg(not(windows))]
+pub fn adapter_records_from_lspci(s: &str) -> Vec<AdapterRecord> {
+    let mut rows = Vec::new();
+    for line in s.lines() {
+        let l = line.to_ascii_lowercase();
+        if !(l.contains("vga compatible controller")
+            || l.contains("3d controller")
+            || l.contains("display controller"))
+        {
+            continue;
+        }
+        let name = match line.split_once("controller:") {
+            Some((_, rest)) => rest.trim(),
+            None => continue,
+        };
+        // Drop the PCI id suffix (`… [8086:46a6]`) — it is not a model name.
+        let name = match name.rsplit_once(" [") {
+            Some((head, tail)) if tail.ends_with(']') => head.trim(),
+            _ => name,
+        };
+        rows.push(AdapterRecord {
+            name: name.to_string(),
+            vram_mib: 0,
+            driver_version: String::new(),
+        });
+    }
+    rows
 }
 
 /// Classify raw `lspci` lines; keep the strongest (discrete beats integrated).
@@ -1542,6 +1740,96 @@ GPU[0]\t\t: VRAM Total Used Memory (B): 12345678\n";
         let json = r#"{"card0": {"VRAM Total Memory (B)": "17163091968"}}"#;
         assert_eq!(parse_rocm_smi_vram_mb(json), Some(16368));
         assert_eq!(parse_rocm_smi_vram_mb("nothing"), None);
+    }
+
+    // ── Windows adapter-probe fallback (queue #293) ─────────────────────────
+
+    #[test]
+    fn adapter_probe_accepts_an_intel_only_machine() {
+        // The modal stranger laptop: Intel iGPU, OpenCL works, no CUDA/ROCm.
+        let rows = parse_adapter_records(
+            "\"Name\",\"DriverVersion\",\"AdapterRAM\"\n\
+             \"Intel(R) Iris(R) Xe Graphics\",\"31.0.101.4502\",\"1073741824\"\n\
+             \"Microsoft Basic Render Driver\",\"10.0.22621.1\",\"\"\n",
+        );
+        assert_eq!(rows.len(), 2);
+        let info = gpu_info_from_adapters(&rows).expect("an Intel iGPU must be usable");
+        assert!(info.model_name.contains("Intel"), "{}", info.model_name);
+        assert_eq!(info.driver_version, "31.0.101.4502");
+        assert_eq!(info.vram_total_bytes, 1024 * 1024 * 1024);
+        assert_eq!(info.compute_capability, "adapter-probe");
+        assert!(info.gpu_uuid.is_none(), "no fabricated hardware identity");
+    }
+
+    #[test]
+    fn adapter_probe_refuses_a_machine_with_no_real_gpu() {
+        // Anti-fabrication: a software display driver is not a GPU.
+        let rows = parse_adapter_records(
+            "\"Name\",\"DriverVersion\",\"AdapterRAM\"\n\
+             \"Microsoft Basic Display Adapter\",\"10.0.19041.1\",\"\"\n",
+        );
+        assert!(gpu_info_from_adapters(&rows).is_none());
+        assert!(gpu_info_from_adapters(&[]).is_none());
+    }
+
+    #[test]
+    fn adapter_probe_prefers_discrete_over_integrated() {
+        let rows = vec![
+            AdapterRecord {
+                name: "Intel(R) UHD Graphics 630".into(),
+                vram_mib: 128,
+                driver_version: "27.20.100.9316".into(),
+            },
+            AdapterRecord {
+                name: "NVIDIA GeForce RTX 4060".into(),
+                vram_mib: 8192,
+                driver_version: "551.23".into(),
+            },
+        ];
+        let info = gpu_info_from_adapters(&rows).unwrap();
+        assert_eq!(info.model_name, "NVIDIA GeForce RTX 4060");
+        assert_eq!(info.gpu_count, 2);
+    }
+
+    #[test]
+    #[cfg(not(windows))]
+    fn lspci_adapter_records_parse_intel_igpu() {
+        // Shape of a real `lspci` line; the PCI id suffix is stripped.
+        let text = "\
+00:02.0 VGA compatible controller: Intel Corporation Raptor Lake-P [Iris Xe Graphics] (rev 04)\n\
+01:00.0 3D controller: NVIDIA Corporation AD106M [GeForce RTX 4070 Max-Q] (rev a1) [10de:2860]\n\
+00:1f.0 ISA bridge: Intel Corporation Device 519d (rev 01)\n";
+        let rows = adapter_records_from_lspci(text);
+        assert_eq!(rows.len(), 2, "only display controllers: {rows:?}");
+        assert!(rows[0].name.contains("Intel Corporation"));
+        assert!(
+            !rows[1].name.contains("[10de:2860]"),
+            "pci id stripped: {}",
+            rows[1].name
+        );
+        let info = gpu_info_from_adapters(&rows).expect("Intel iGPU via lspci");
+        assert_eq!(info.compute_capability, "adapter-probe");
+    }
+
+    /// Live data path: the real `lspci` on this host folds into a usable
+    /// `GPUInfo`. Skips silently on a box with no display controller (a
+    /// headless CI container), so it never turns hardware absence into red.
+    #[test]
+    #[cfg(not(windows))]
+    fn live_lspci_folds_into_a_gpu_info() {
+        let Ok(o) = Command::new("lspci").output() else {
+            return;
+        };
+        if !o.status.success() {
+            return;
+        }
+        let rows = adapter_records_from_lspci(&String::from_utf8_lossy(&o.stdout));
+        if rows.is_empty() {
+            return; // no display controller on this host
+        }
+        let info = gpu_info_from_adapters(&rows).expect("a listed display adapter must fold");
+        assert!(!info.model_name.is_empty());
+        assert_eq!(info.compute_capability, "adapter-probe");
     }
 
     #[test]
