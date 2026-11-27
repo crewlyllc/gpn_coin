@@ -1,3 +1,32 @@
+## 20:5x PT — 0.3.83 §5 linux build green + §6 artifact verified; windows build still queued behind CI
+
+A0: `origin/main` HEAD `d7513a35` (docs) ⇒ `total_count: 0` for
+`d7513a350d408cc622a863c93b33e394c67364f4` — expected (`paths-ignore`). The code CI run
+**`45937187011`** (`a57f030f`) is still `pending` (updated_at == created_at 03:58:17Z): it is queued
+behind run `45931500621`, whose `Build + unit tests (windows)` job has been on box 1 since 03:27:44Z.
+Not waited on.
+
+**Read the dispatched handles (as planned last run).**
+- `release-linux-selfhosted.yml` run **`45939162066`** ⇒ **`success`** — job `140309237974`, 04:18:27Z →
+  04:32:23Z (13m56s). `linux-latest` carries a re-uploaded `gpn-linux.tar.gz` (348,901,423 B,
+  `sha256:d9e663dd99a5…`) at 04:30:03Z plus `gpn-linux.tar.gz.bundle` (9,229 B) at 04:32:19Z.
+- `release-windows.yml` run **`45939164076`** ⇒ still **`queued`** at 04:45Z (27 min). Runners API:
+  `DESKTOP-USBUADL online busy=True` — contention with CI's own windows job, not a fault. Handle left
+  in the box; no re-dispatch.
+
+**Ticked:** §5 linux (success + asset = built bytes: re-downloaded sha256 == release digest); §5
+attestation-ordering (repo `visibility: private`, user-owned ⇒ cosign path; step order in
+`release-windows.yml` L678 visibility → L698 cosign sign → **L720 provenance gate, no `if:`** → L748
+publish; the linux lane already ships its `.bundle`); §6 both (downloaded the published tarball and
+grepped: `gpn_scheduler` FOUND `GPN_HUB_MEDIA_DEADLINE_MS`, `past their deadline`, `adopted provider
+state on channel`; both providers FOUND `assignment rejected: ` and `state_before is not the current
+channel state`; `./gpn-node --version` ⇒ `gpn-node 0.3.83`).
+
+**Next run:** re-read `45939164076` (windows) and `45937187011` (CI). If windows is `success`, re-run
+the §6 grep on `gpn-windows.zip`, tick §5's windows/digest/verify boxes with `cosign verify-blob`,
+then §7 `release-cut.sh`. If still queued behind a >90 min CI windows job, cancel the stale CI run
+first. No blockers, no [TRIAGE].
+
 ## 20:2x PT — 0.3.83 §3/§4 recorded; §5 builds dispatched, run ended (linux `45939162066`, windows `45939164076`)
 
 A0: `origin/main` HEAD `750ab092` (docs log commit) ⇒ `?head_sha=750ab0921742550387baa8f95c6ff655daac4048`
