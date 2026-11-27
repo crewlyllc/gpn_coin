@@ -38,6 +38,8 @@ const PNG: &[u8] = &[
 #[derive(Clone, Copy, PartialEq)]
 enum Behaviour {
     Serve,
+    /// Render that takes this long before answering — the cold-start case.
+    ServeSlowMs(u64),
     Refund,
     Reject409,
     GarbageResult,
@@ -160,7 +162,12 @@ fn start_stub(
             })
             .to_string();
             let msg = match behaviour {
-                Behaviour::Serve => ch.sign_result(&signer, a.job_id, &output, 0, 0),
+                Behaviour::Serve | Behaviour::ServeSlowMs(_) => {
+                    if let Behaviour::ServeSlowMs(ms) = behaviour {
+                        std::thread::sleep(Duration::from_millis(ms));
+                    }
+                    ch.sign_result(&signer, a.job_id, &output, 0, 0)
+                }
                 Behaviour::Refund => ch.sign_refund(&signer, a.job_id, "VRAM refusal"),
                 _ => ch.sign_refund(&signer, a.job_id, "unused"),
             };
@@ -195,6 +202,22 @@ struct Fixture {
 }
 
 fn fixture(behaviour: Behaviour, artifact_server: bool) -> Fixture {
+    fixture_with_deadlines(
+        behaviour,
+        artifact_server,
+        10_000,
+        gpn_agent::hub_ap::DEFAULT_MEDIA_DEADLINE_MS,
+    )
+}
+
+/// Like [`fixture`], but with explicit text/media job deadlines so a test can
+/// prove which of the two a render is actually bounded by (row 287).
+fn fixture_with_deadlines(
+    behaviour: Behaviour,
+    artifact_server: bool,
+    job_deadline_ms: u64,
+    media_deadline_ms: u64,
+) -> Fixture {
     let ap = Sr25519Signer::from_uri("//Alice").unwrap();
     let prov = Arc::new(Sr25519Signer::from_uri("//Bob").unwrap());
     let provider_key = PubKey(prov.public_key()).to_hex();
@@ -228,7 +251,8 @@ fn fixture(behaviour: Behaviour, artifact_server: bool) -> Fixture {
         settle_secs: 86_400,
         close_at: DEPOSIT / 2,
         close_nonce: 500,
-        job_deadline_ms: 10_000,
+        job_deadline_ms,
+        media_deadline_ms,
         unsupported: Mutex::new(HashMap::new()),
         submit_locks: Mutex::new(HashMap::new()),
     });
@@ -460,6 +484,84 @@ fn a_missing_artifact_fails_the_job_instead_of_publishing_garbage() {
     assert!(!image_jobs::artifact_path(&id, 0).exists());
     let _ = std::fs::remove_dir_all(f.state_path.parent().unwrap());
 }
+
+#[test]
+fn a_slow_media_render_is_not_bounded_by_the_text_deadline() {
+    // Row 287. The AP used one deadline (180 s by default) for text and for
+    // renders; a cold sd-turbo render after a restart was measured at 276 s, so
+    // the AP logged "unreachable", fell back and the caller got a 503 while the
+    // provider went on to publish the PNG. Here the TEXT deadline is 4 s and the
+    // stub takes 6 s: on the old code the transport bound is `max(deadline, 5 s)`
+    // = 5 s and this render fails; with the media deadline (20 s) it succeeds.
+    let _s = serialize();
+    let f = fixture_with_deadlines(Behaviour::ServeSlowMs(6_000), true, 4_000, 20_000);
+    let started = std::time::Instant::now();
+    let out = run(&f, 10).expect("a slow render must not be declared unavailable");
+    assert!(
+        started.elapsed() >= Duration::from_millis(6_000),
+        "the AP must actually wait for the render, not answer from a cache"
+    );
+    let v: serde_json::Value = serde_json::from_str(&out.text).unwrap();
+    assert_eq!(
+        v["artifacts"][0]["sha256"].as_str().unwrap(),
+        sha256_hex(PNG),
+        "the caller must receive the finished render"
+    );
+    let ch = channel(&f);
+    assert_eq!(ch.state.balance_provider, 10, "the render was paid for");
+    assert_eq!(ch.pending_len(), 0, "nothing left in flight");
+    let _ = std::fs::remove_dir_all(f.state_path.parent().unwrap());
+}
+
+#[test]
+fn the_media_deadline_still_bounds_a_render_that_never_answers() {
+    // The other half of row 287: a longer budget must remain a real bound, or a
+    // dead provider would hold the AP's channel gate forever. Note the
+    // transport floor: the HTTP client never waits less than 5 s
+    // (`job_deadline_ms.max(5_000)`), so a 400 ms budget is enforced at 5 s.
+    let _s = serialize();
+    let f = fixture_with_deadlines(Behaviour::ServeSlowMs(8_000), true, 30_000, 400);
+    let started = std::time::Instant::now();
+    match run(&f, 10) {
+        Err(e) => assert!(
+            e.fallback_ok(),
+            "a timed-out render never proved it ran: the caller may fall back"
+        ),
+        Ok(_) => panic!("a render past its media deadline must not report success"),
+    }
+    let waited = started.elapsed();
+    assert!(
+        waited < Duration::from_millis(7_000),
+        "the media deadline, not the 30 s text deadline, must bound this render (waited {waited:?})"
+    );
+    let _ = std::fs::remove_dir_all(f.state_path.parent().unwrap());
+}
+
+#[test]
+fn the_default_media_deadline_covers_a_cold_render() {
+    // Measured cold render on 2026-11-26: 276 s (18:28:14 → 18:32:50 PT). The
+    // defaults are constants, so the guarantee is a compile-time assertion
+    // (`const` block) rather than a runtime one; the runtime half below proves
+    // the value actually wired into `HubCtx` is the same one.
+    const _: () = {
+        assert!(gpn_agent::hub_ap::DEFAULT_MEDIA_DEADLINE_MS >= 552_000);
+        assert!(
+            gpn_agent::hub_ap::DEFAULT_MEDIA_DEADLINE_MS
+                > gpn_agent::hub_ap::DEFAULT_JOB_DEADLINE_MS
+        );
+    };
+    let f = fixture(Behaviour::Serve, true);
+    let media = f.hub.media_deadline_ms;
+    assert!(media > f.hub.job_deadline_ms, "media gets its own budget");
+    assert!(
+        media >= 2 * MEDIA_COLD_RENDER_MS,
+        "headroom over the coldest render"
+    );
+    let _ = std::fs::remove_dir_all(f.state_path.parent().unwrap());
+}
+
+/// The coldest render measured on the fleet (row 287).
+const MEDIA_COLD_RENDER_MS: u64 = 276_000;
 
 #[test]
 fn idle_refuses_an_image_job_exactly_like_text() {

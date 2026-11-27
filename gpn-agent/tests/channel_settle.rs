@@ -178,6 +178,7 @@ fn fixture(behaviour: Behaviour, enabled: bool) -> Fixture {
         close_at: DEPOSIT / 2,
         close_nonce: 500,
         job_deadline_ms: 10_000,
+        media_deadline_ms: 10_000,
         unsupported: Mutex::new(HashMap::new()),
         submit_locks: Mutex::new(HashMap::new()),
     });

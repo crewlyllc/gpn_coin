@@ -1,3 +1,36 @@
+## 20:0x PT 0.3.83 box 1 (row 287) — media jobs get their own deadline; code+test green, live half rides §7/§9
+
+A0: HEAD `9681a390` (release 0.3.83 cut) had one CI run `45931500621` — `pending` at 19:17 PT
+(queued behind the single-slot runner). Not waited on; this box is code, not a build.
+
+**Row 287 — the cause, fixed.** `HubCtx` had ONE per-job deadline (`job_deadline_ms`, 180 s) used
+both for the signed assignment's deadline and for the whole `reqwest` timeout of the `/channel/job`
+POST. A cold sd-turbo render after a restart measures 276 s, so the AP hung up at 180 s, logged
+`unreachable: error sending request … — falling back` and the caller got a 503 for a PNG the
+provider finished and published.
+
+Fix: `HubCtx::media_deadline_ms` (`GPN_HUB_MEDIA_DEADLINE_MS`, default `DEFAULT_MEDIA_DEADLINE_MS
+= 900_000`) applied to every media job (`is_gen`, i.e. image render or audio clip) for both the
+assignment deadline and the HTTP timeout; text/tool jobs keep 180 s. One value per attempt loop, so
+a stale-state retry cannot shorten the budget.
+
+**Tests (fails before, passes after).** `a_slow_media_render_is_not_bounded_by_the_text_deadline`
+— stub renders 6 s, text deadline 4 s, media 20 s. With the selection reverted to
+`hub.job_deadline_ms` it fails with the live string: `NotAttempted("provider 0x8eaf0415…
+/channel/job unreachable: error sending request for url (http://127.0.0.1:35389/channel/job)")`
+(0 passed / 1 failed / 5.03 s). Restored: `--test image_channel` **11 passed / 0 failed**.
+Also `the_media_deadline_still_bounds_a_render_that_never_answers` (a 400 ms media budget still
+bounds the POST at the 5 s transport floor — a longer budget must stay a bound) and
+`the_default_media_deadline_covers_a_cold_render` (const assert ≥ 2× 276 s, and the value actually
+wired into `HubCtx` is > the text deadline). `--test channel_settle` 11/11, `--lib hub` 40/40,
+`cargo fmt --check` rc 0, `cargo clippy --release --all-targets` with ci.yml's CLIPPY_ALLOWS +
+`-D warnings` clean.
+
+Documented: both env tables (`docs/offchain-escrow-channels.md`, `docs/design/design-offchain-escrow-channels.md`).
+
+**Not ticked:** row 287's live half needs the 0.3.83 binary — the same request must answer 200 /
+poll `completed` on a node right after the update restart (§7 then §9). Next box for the following
+run. No blocker, no decision needed.
 ## 18:58 PT 0.3.83 CUT — critical batch (rows 287 + 288), checklist generated
 
 0.3.82 is closed (published, archived, 285/286 COMPLETE); 273's seven-day soak is the only

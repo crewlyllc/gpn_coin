@@ -285,7 +285,8 @@ settlement batch — daily by default, early at 25 GPN of unredeemed credit.
 | `GPN_HUB_CLOSE_AT` | `25 GPN` (deposit/2) | settle early when the provider balance reaches this |
 | `GPN_HUB_CLOSE_NONCE` | `50000` | ...or after this many off-chain updates |
 | `GPN_HUB_STATE` | `~/.gpn/hub_channels.json` | AP channel registry (survives restarts) |
-| `GPN_HUB_JOB_DEADLINE_MS` | `180000` | per-job deadline (inference + return) |
+| `GPN_HUB_JOB_DEADLINE_MS` | `180000` | per-job deadline for TEXT/tool jobs (inference + return) |
+| `GPN_HUB_MEDIA_DEADLINE_MS` | `900000` | per-job deadline for MEDIA jobs (image render, audio clip). Separate because a cold sd-turbo render was measured at 276 s (2026-11-26), far past the text budget; the shared 180 s deadline reported "unavailable" on renders that then completed (row 287) |
 | `GPN_PROVIDER_CHANNEL_STATE` | `~/.gpn/provider_channels.json` | provider channel state (persisted before inference runs) |
 | `GPN_CHANNEL_SKIP_CHAIN_CHECK` | `0` | dev only: trust the assignment's deposit without verifying the channel on chain |
 

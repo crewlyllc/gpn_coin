@@ -239,7 +239,8 @@ result simply ages out; the deposit stays on chain and is recoverable.
 | `GPN_HUB_CLOSE_AT` | `25 GPN` (deposit/2) | Early settle once the provider's credit reaches this. |
 | `GPN_HUB_CLOSE_NONCE` | `50000` | …or after this many off-chain updates. |
 | `GPN_HUB_CHANNEL_TTL` | `9000` blocks (~30 h @ 12 s) | Channel lifetime — must exceed `GPN_HUB_SETTLE_SECS`. |
-| `GPN_HUB_JOB_DEADLINE_MS` | 180000 | Per-job deadline (also the HTTP timeout for `/channel/job`). |
+| `GPN_HUB_JOB_DEADLINE_MS` | 180000 | Per-job deadline for text/tool jobs (also the HTTP timeout for `/channel/job`). |
+| `GPN_HUB_MEDIA_DEADLINE_MS` | 900000 | Per-job deadline for media jobs (image render, audio clip). A cold render took 276 s (row 287), so media is not bounded by the text budget. |
 | `GPN_HUB_STATE` | `~/.gpn/hub_channels.json` | AP-side channel registry. |
 | `GPN_PROVIDER_CHANNEL_STATE` | `~/.gpn/provider_channels.json` | Provider-side channel state. |
 | `GPN_PENDING_WARN` | `12` | Warn when this many extrinsics are stuck in the pool (settlement backpressure). |

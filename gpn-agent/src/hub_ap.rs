@@ -22,6 +22,19 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+/// Default per-job deadline for text/tool work. A chat completion on the
+/// measured fleet is well under 2 s; 180 s is already enormous headroom.
+pub const DEFAULT_JOB_DEADLINE_MS: u64 = 180_000;
+
+/// Default per-job deadline for media work (image render, audio clip).
+///
+/// A cold sd-turbo render after a restart took **276 s** end to end
+/// (2026-11-26 18:28:14 → 18:32:50 PT, model re-download included), so the
+/// shared 180 s text deadline declared failure on a render that finished 96 s
+/// later and was published. 900 s keeps a comfortable margin over the coldest
+/// measured path; `GPN_HUB_MEDIA_DEADLINE_MS` overrides it.
+pub const DEFAULT_MEDIA_DEADLINE_MS: u64 = 900_000;
+
 /// Everything the handler needs to route a job off-chain.
 pub struct HubCtx {
     pub enabled: bool,
@@ -49,8 +62,16 @@ pub struct HubCtx {
     pub close_at: u128,
     /// ...or when this many off-chain updates have accumulated (safety valve).
     pub close_nonce: u64,
-    /// Per-job wall-clock deadline for the provider (inference + return).
+    /// Per-job wall-clock deadline for the provider (text/tool inference).
     pub job_deadline_ms: u64,
+    /// Per-job wall-clock deadline for **media** jobs (image render, TTS clip).
+    ///
+    /// Separate from [`Self::job_deadline_ms`] because the two costs differ by
+    /// two orders of magnitude: a chat completion is <2 s, while a cold
+    /// sd-turbo render after a restart was measured at **276 s** (2026-11-26
+    /// 18:28→18:32 PT). The single 180 s deadline gave up on work the provider
+    /// then completed and published, so the caller saw "unavailable" (row 287).
+    pub media_deadline_ms: u64,
     /// Providers whose `/channel/job` endpoint refused/failed, with a retry-after.
     pub unsupported: Mutex<HashMap<String, Instant>>,
     /// One submission gate per channel (keyed by provider address).
@@ -114,7 +135,11 @@ impl HubCtx {
         let job_deadline_ms: u64 = std::env::var("GPN_HUB_JOB_DEADLINE_MS")
             .ok()
             .and_then(|s| s.parse().ok())
-            .unwrap_or(180_000);
+            .unwrap_or(DEFAULT_JOB_DEADLINE_MS);
+        let media_deadline_ms: u64 = std::env::var("GPN_HUB_MEDIA_DEADLINE_MS")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(DEFAULT_MEDIA_DEADLINE_MS);
         let path = match std::env::var("GPN_HUB_STATE") {
             Ok(p) => std::path::PathBuf::from(p),
             Err(_) => {
@@ -166,6 +191,7 @@ impl HubCtx {
             close_at,
             close_nonce,
             job_deadline_ms,
+            media_deadline_ms,
             unsupported: Mutex::new(HashMap::new()),
             submit_locks: Mutex::new(HashMap::new()),
         })
@@ -599,6 +625,15 @@ fn run_channel_job(
     // the channel is unusable, so it must never be reported as a channel
     // failure on the first occurrence.
     let is_gen = gen.is_some() || audio.is_some();
+    // Media work is not priced in seconds of text: a cold render is two orders
+    // of magnitude slower than a chat completion, so it gets its own wall-clock
+    // budget (row 287). One value for the whole attempt loop, so a stale-state
+    // retry cannot shorten the job's deadline between attempts.
+    let job_deadline_ms = if is_gen {
+        hub.media_deadline_ms
+    } else {
+        hub.job_deadline_ms
+    };
     let mut attempt: u32 = 0;
     let (job_id, resp) = loop {
         attempt += 1;
@@ -613,7 +648,7 @@ fn run_channel_job(
                 return no("channel id changed under us");
             }
             let job_id = next_job_id();
-            let deadline = now_ms().saturating_add(hub.job_deadline_ms);
+            let deadline = now_ms().saturating_add(job_deadline_ms);
             if let Some(au) = audio.clone() {
                 match ch.begin_job_audio_for(
                     &hub.signer,
@@ -710,7 +745,7 @@ fn run_channel_job(
             }
         };
         let http = match reqwest::blocking::Client::builder()
-            .timeout(Duration::from_millis(hub.job_deadline_ms.max(5_000)))
+            .timeout(Duration::from_millis(job_deadline_ms.max(5_000)))
             .build()
         {
             Ok(c) => c,
