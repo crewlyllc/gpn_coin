@@ -528,6 +528,34 @@ mkdir -p ~/gpn &amp;&amp; tar -xzf gpn-linux.tar.gz -C ~/gpn &amp;&amp; cd ~/gpn
 
 
 
+
+<section class="section" id="requirements">
+  <div class="wrap">
+    <h2>Minimum hardware</h2>
+    <p class="lede">These are the numbers the node enforces or needs to run — not a wish list. A
+      machine below them will say why it cannot serve rather than fail quietly.</p>
+    <table class="dir-table">
+      <thead><tr><th>Component</th><th>Minimum</th><th>Recommended</th><th>Why</th></tr></thead>
+      <tbody>
+        <tr><td><b>GPU</b></td><td>Discrete card, <b>250 GFLOPS</b> FP32</td><td>Any 8 GB card from the last five years</td>
+            <td>Hard eligibility floor in the runtime (<code>MinEligibilityGflops</code>); integrated graphics cannot clear it</td></tr>
+        <tr><td><b>VRAM</b></td><td><b>4 GB</b></td><td><b>8 GB</b></td>
+            <td>Mining DAG is ~1 GB (epoch 0); a 0.5B model needs ~1 GB more. 8 GB lets a 1B–7B model run while the node keeps its buffers</td></tr>
+        <tr><td><b>RAM</b></td><td>8 GB</td><td>16 GB</td><td>Chain node + provider + ollama; the model is loaded by ollama, not the node</td></tr>
+        <tr><td><b>Disk</b></td><td>20 GB free</td><td>50 GB free</td><td>Current chain DB is ~400 MB with pruning on, but updates keep the previous version and ollama models are 1–8 GB each</td></tr>
+        <tr><td><b>OS</b></td><td>Windows 10 1809+ / Ubuntu 22.04+</td><td>Current release of either</td><td>The installer needs PowerShell 5.1 on Windows and systemd on Linux</td></tr>
+        <tr><td><b>Software</b></td><td><b>Ollama</b> (the installer fetches it)</td><td>—</td><td>A node that cannot serve AI is not a node: <code>gpn_node</code> exits 69 without ollama</td></tr>
+        <tr><td><b>Network</b></td><td>Outbound 443</td><td>Port 30333 reachable (forward, UPnP, or a public address)</td><td>Every node can join behind NAT; only a reachable node is dialable and can become backbone</td></tr>
+      </tbody>
+    </table>
+    <p class="small muted" style="margin-top:14px">A 4 GB card mines and can serve the smallest models.
+      A 10-year-old card is welcome; a stale OpenCL driver is what usually breaks one, not the card.
+      Expect an old card to earn slowly — GPN pays per block.</p>
+    <p><a class="btn" href="download">Install a node</a>
+       <a class="btn ghost" href="docs/run-a-node">Run-a-node guide</a></p>
+  </div>
+</section>
+
 <section class="section" id="old-gpu">
   <div class="wrap">
     <h2>Even your old GPU can run AI on GPN</h2>
