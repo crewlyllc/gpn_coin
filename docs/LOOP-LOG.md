@@ -1,3 +1,28 @@
+## 05:3x UTC / 21:3x PT — §3 (bump/lockstep/seeds) and §4 (push discipline) ticked with evidence; release cannot build yet
+
+- **A0 CI:** HEAD `7a7b80c6` is docs-only ⇒ `total_count: 0` with the full 40-char sha (expected under
+  `paths-ignore`). The last code SHA `631a8beb` carries run **46110624518** `in_progress` (created 05:07Z) —
+  noted once, not waited on. `b1f68af5` ⇒ 46109558101 `completed / cancelled` (superseded).
+- **§3 DONE (4/4)**, all four with pasted output in `docs/releases/0.3.85.md`:
+  `bump-version.py --check` ⇒ `lockstep: 15 manifest(s) and 14 lockfile entr(ies) agree` / `gpn version: 0.3.85`;
+  `CHANGELOG.md` `## [0.3.85] - 2026-11-27` present with no `_TODO_`; seed/bootnode parity
+  `cargo test --release --test shipped_bootnodes --test launcher_bootnodes` ⇒ **8 passed, 0 failed**, and live
+  `https://gpncoin.ai/seeds.json` vs `network.json` ⇒ 2 multiaddrs each, both set differences empty.
+- **§4 DONE (4/4):** docs-only SHA has 0 runs; one docs commit per run; CI asked once and the run id recorded.
+- **§3b still 3/6** — the release is NOT buildable yet, and none of the three is a code change this run could
+  finish: **273** soak closes 2026-12-02 at the earliest (day 4 of 7 recorded 2026-11-28 02:53Z, named drift
+  15.44 s vs 13.4 s baseline); **294** criteria 1–4 need a 0.3.85 agent on box 1, i.e. a build that this box
+  cannot be ticked for yet — the sequencing fix is to dispatch §5's build for test purposes and run the
+  criteria on box 1 against that artifact; **295** Solana staking has no code at all (row bundles it with
+  empty notes — `grep -rn solana gpn-agent/src` ⇒ nothing).
+- **[TRIAGE]** `docs/NEEDS-TRIAGE.md` ROW-295-mainnet: 295's done-when requires a node to delegate **and
+  mainnet** — devnet can use a free airdrop, mainnet needs real SOL and a funded key on a machine we control.
+  That is a spend/custody decision, not work; devnet-only proof is the recommended scope for 0.3.85.
+- **Ticked:** §3 four boxes, §4 four boxes. No build dispatched (0.3.85 is not cuttable; dispatching now would
+  burn a 40–75 min single-slot build on an incomplete batch). No [TRIAGE] roster changes beyond ROW-295.
+- **Next run:** §3b 295 test-first slice, or dispatch the §5 build off a `build/<sha12>` tag if the owner answers
+  ROW-295-mainnet as devnet-only — then hand box 1 the artifact and close 294 criteria 1–4.
+
 ## 21:1x PT — §3b 294 criterion 5 measured on metal: Ergo's DAG no longer fits an 8 GB card; the catalogue number was fiction
 
 - **A0 CI:** origin/main HEAD `b1f68af5` ⇒ CI run **46109558101** `pending` at the time of asking (not
