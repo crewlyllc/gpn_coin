@@ -1,3 +1,25 @@
+## 04:0x UTC / 20:0x PT — §3b 299 TICKED: both mirror provenance bundles verify OK for a stranger
+
+- **A0 CI:** HEAD `6e56a5dc` (docs-only LOOP-LOG commit) ⇒ `?head_sha=<full 40>` **total_count 0** — expected
+  under `ci.yml` paths-ignore; nothing red, nothing waited on.
+- **§3b 299 TICKED** (row: `crewlyllc/gpn_coin@linux-latest` served **0.3.83's** linux bundle next to
+  0.3.84's tarball, so every stranger's `cosign verify-blob` failed with `matching bundle to payload`).
+  **Code half:** `scripts/release-cut.sh:959-994` §4b now loops
+  `for pair in linux-latest:gpn-linux.tar.gz.bundle windows-latest:gpn-windows.zip.bundle`, downloads each
+  from the source release, aborts if missing or if the source digest disagrees, then mirrors it — `bash -n`
+  rc=0, fix commit `4fdbd334` on `main`.
+  **Live half, measured this run anonymously** (plain `curl -sL`, no auth): linux bundle 9,229 B
+  `b8c95776…`, windows bundle 9,033 B `a778a806…`, both the current pair. `releases.json` names linux
+  `660f7585…6e9` (349,136,775 B) / windows `25790a28…543` (253,327,068 B); the payloads hash to exactly
+  those. `cosign verify-blob --bundle <mirror bundle> --certificate-identity-regexp
+  'https://github.com/(crewlyllc|jeremyzguo)/gpn_coin/.*' --certificate-oidc-issuer
+  https://token.actions.githubusercontent.com …` ⇒ **`Verified OK`** on **linux and windows**.
+- Checklist 0.3.85 now **4/62** (297, 298, 299 + the §0e reason box). Next run: the §3 bump/lockstep
+  boxes (already satisfied in the tree — 0.3.85 + `lockstep: 15 manifest(s) agree`), then §5 builds
+  dispatched from tag `build/<sha12>` and the run ends (dispatch-and-end). §3b still open: 273 (soak day
+  4/7, closes 2026-12-02), 294, 295 (unimplemented features).
+- No blockers, no [TRIAGE].
+
 ## 03:5x UTC / 19:5x PT — §3b 297 TICKED: the Windows stale-install guard now actually reads a version
 
 - **A0 CI:** HEAD `3c0f9cf9` is a docs-only LOOP-LOG commit ⇒ `?head_sha=<full 40>` **total_count 0**
