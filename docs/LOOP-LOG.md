@@ -22,6 +22,9 @@
   first — `docs/soak-2026-11-25.md` currently holds Day 1 (2026-11-25 23:57Z), Day 2
   (2026-11-26 23:40Z) and Day 3 (2026-11-27 15:17Z) of 7, so the next box tick is the 2026-11-28
   recording and the row cannot close before 2026-12-02).
+- **Push:** `9c7eafff` → `main` (one commit: bump + changelog + list + checklist + this log). The
+  Cargo.toml change is not docs, so CI created run `46097394596` (`pending` at 18:2x PT) — observed
+  once and **not waited on**, per A0: next run asks for its conclusion.
 - No blockers, no [TRIAGE].
 
 ## 18:20 PT AUDIT — clean (2 disk actions, no faults)
