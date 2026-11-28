@@ -1,3 +1,30 @@
+## 18:5x PT — 0.3.85 §0e reason recorded + row 273 day 4 of 7 (drift named: 15.44 s is tail, not the restart)
+
+- **A0 CI:** `origin/main` HEAD `f1fa2135…` (LOOP-LOG commit) ⇒ `?head_sha=<full>` **total_count 0**
+  (docs-only, `paths-ignore`) — nothing red. The 0.3.85 code push `9c7eafff` has CI run
+  **`46097394596`**, `in_progress` since 02:18Z (observed once, not waited on).
+- **§0e box 3 TICKED (the reason box)** — this release ships without the stranger lifecycle, and the
+  reason is measured, not asserted: (a) step 5 of `scripts/stranger-lifecycle.ps1` self-updates to the
+  *next published* version, so it can only run after §5–§7 publish 0.3.85 (the site serves 0.3.84
+  today); (b) no clean Windows guest — `box4.sh` ssh **rc=255** (SOCKS general failure, off tailnet),
+  `box3.sh` answers (`DESKTOP-DPJR60M`) but already runs
+  `C:\gpn\data\update\current\gpn_node.exe`, and step 1b runs `install.ps1` argument-less which
+  defaults to `$InstallDir = 'C:\gpn'` (`install.ps1:106`) — it would overwrite a live install; box 1 is
+  the release runner. §0e boxes 1–2 stay unticked on purpose.
+- **§3b 273 — day 4 of 7 recorded**: `scripts/soak-record.py` ⇒ height **376396**, effective interval
+  **15.44 s** over 2264 blocks/9.71 h vs the 13.4 s baseline. Named as drift, and attributed: the 0.3.84
+  apply cost **30 s** of the window (last import 15:49:07 PST → first after `Started` 15:49:37), i.e.
+  0.09 %, while p50/p95 both rose ~11 % (9.99→11.11 s, 40.57→46.38 s) — the tail widened, the fleet did
+  not stall. Peers 4, journal min 2/max 4, **0 lines at 0 peers**; imports 3749, longest gap 216 s;
+  1 termination adjacent to `Stopping`, 0 unexplained; NRestarts=0; jobs 256/227; gate-6 0/0/0.
+  3 `Reason:` lines classified by hand: two are our own "already asked this exact block range 2 times"
+  de-dup notices, one a peer on a different genesis our code labelled `DIFFERENT NETWORK … not a fork`
+  before banning (13:16:49/55 PST). Box 1 peers=2 height=376398.
+- Checklist now **1/62**. Next run: the first genuinely actionable box — §5/§6 need the 0.3.85 build, so
+  check `46097394596`'s conclusion once, then dispatch both platform builds from tag `build/<sha12>` and
+  end the run (dispatch-and-end). Row 273 closes no earlier than 2026-12-02.
+- No blockers, no [TRIAGE].
+
 ## 18:2x PT — opened **0.3.85**: five NEW rows bundled (batch policy satisfied), checklist generated
 
 - **A0 CI:** `origin/main` = `64733cac540c792986f171c5cf9ad6997846961c` (the 18:20 audit commit) ⇒
