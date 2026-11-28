@@ -15,6 +15,8 @@
   (exit 0 both). Remaining warnings are third-party deprecated SPDX ids and now-unused allowances.
 - Checklist 0.3.85 now **2/62** (§0e reason + 298). Next box: 297 (Windows stale-install guard —
   needs a Windows build to prove) or 299 (mirror provenance pairing in `release-cut.sh`).
+- **Push:** `adbdc9ea` → `main` (13 manifests + `deny.toml` + list/checklist/log, one commit). CI
+  created run **`46101844034`** (`pending` at 03:2xZ) — handle recorded, not waited on.
 - No blockers, no [TRIAGE].
 
 ## 18:5x PT — 0.3.85 §0e reason recorded + row 273 day 4 of 7 (drift named: 15.44 s is tail, not the restart)
