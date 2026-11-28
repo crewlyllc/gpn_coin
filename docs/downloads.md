@@ -1,6 +1,6 @@
 # GPN — Downloads
 
-*Verified against: chain spec 55 / release 0.3.83 — release facts (version, spec, live block height) checked 2026-11-26 22:53 PT at block 371,743. The download commands below were last run end-to-end against 0.3.83.*
+*Verified against: chain spec 55 / release 0.3.84 — release facts (version, spec, live block height) checked 2026-11-27 16:18 PT at block 375,797. The download commands below were last run end-to-end against 0.3.84.*
 
 Every GPN build publishes a **rolling GitHub Release**, so there is always a stable, downloadable URL.
 
