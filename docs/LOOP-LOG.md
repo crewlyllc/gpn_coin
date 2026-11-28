@@ -19,6 +19,8 @@
   `ProductVersion=[] FileVersion=[]` (premise confirmed on the box) and now reads **`0.3.84`**; a stale
   0.3.75 is **refused** ("…would leave an OLD version running…"), the current 0.3.84 is allowed; full test
   file there **24 checks, 0 failed** (shell-script fixtures skip on Windows by design). Temp dir removed.
+- **Handle:** this run's push is `1112f3dc` (`install.ps1` + test + checklist + list + log) ⇒ CI run
+  **`46103621904`**, `pending` at 20:0x PT. Next run: query the full sha, act only on `conclusion`.
 - **Next:** §3 bump/lockstep boxes are already satisfied in the tree (0.3.85, lockstep 15 manifests) and
   need ticking with evidence; §3b still open: 273 (soak day 4/7, closes 2026-12-02), 294, 295 (unimplemented
   features — the real remaining work), 299 (fixed in `4fdbd334`, needs its box ticked with evidence).
