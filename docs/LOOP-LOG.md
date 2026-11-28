@@ -1,3 +1,23 @@
+## 16:40 PT 0.3.84 §9 ticked (4/4) — both machines updated themselves and report 0.3.84 from the running process
+
+- **A0:** `origin/main` = `d2385093` (docs-only loop-log commit) ⇒ `GET /actions/runs?head_sha=d238509337cb886fb7821b93b9deec1a78c82aac`
+  ⇒ `total_count: 0` — expected under `ci.yml` `paths-ignore`. Nothing red, nothing waited on.
+- **§9 box 1 (self-update):** box 1 at 16:00:05 PT `check: latest 0.3.84 published 2026-11-27T23:42:43Z`
+  → `update available: 0.3.84` → `apply: current -> versions/0.3.84 previous: 0.3.83`; this host
+  (canary) at 15:47–15:49 `confirm: process=up rpc=yes 26s version=0.3.84` → `confirmed 0.3.84 is running`.
+- **§9 box 2 (running process):** path checked first — `(Get-Process gpn-node).Path` ⇒
+  `C:\gpn\data\update\current\gpn-node.exe` (not `C:\gpn\bin`), `--version` ⇒ `gpn-node.exe 0.3.84`;
+  this host `/proc/1574018/exe -> ~/.local/bin/gpn-node`, RPC `system_version` ⇒ `0.3.84`.
+- **§9 box 3 (log chain):** one cycle in `C:\gpn\update.log`: 16:00:05 check → 16:01:06 forced stop
+  (`taskkill /T /F`, 7 pids) → 16:01:23 download 253.3 MB + `installed 0.3.84` + `current -> versions/0.3.84`
+  → 16:01:26 start (schtasks, pid 44916) → **16:03:30 `CONFIRMED: 0.3.84 is running … after 123 s`**.
+- **§9 box 4 (rollback):** retention observed on both boxes (`versions` holds `0.3.83` and `0.3.84`;
+  `~/.gpn/update/current.previous` present). Rollback branch re-proven locally:
+  `cargo test --release --lib update::tests::` ⇒ **119 passed; 0 failed; 2 ignored**, incl.
+  `atomic_switch_and_one_step_rollback`, `pruning_keeps_current_and_the_rollback_target`.
+- Checklist tally now **52/62**. Remaining: §10 (3), §10b (2), §0b filing (2), §0e stranger lifecycle (3).
+- No blockers, no [TRIAGE] items.
+
 ## 16:24 PT 0.3.84 §8 ticked — stranger verification PASS, stale downloads.md stamp found and fixed
 
 - `scripts/release-cut.sh --verify-published --version 0.3.84` ⇒ **EXIT=0**: `linux: 'gpn-linux.tar.gz'
