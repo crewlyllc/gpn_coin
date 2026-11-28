@@ -100,3 +100,51 @@ POST /v1/provenance/audio   { audio } → same
    publishes an unmarked artifact fails a test.
 5. The registry lookup is covered by a test that proves an unauthenticated caller cannot resolve a
    job id to an address.
+
+---
+
+## 8. PURPOSE (owner, 2026-11-27 20:31): accountability against misuse
+
+The mark is not a brand badge. Its purpose is **GPN's protection**: when someone uses the network for
+something unlawful or harmful, the artifact and the job record must be able to answer *"who asked for
+this, on which machine, at what time"* — for us, for a provider facing a complaint, and for lawful
+process.
+
+That changes two things above:
+
+1. **Identity resolution must exist and be usable under process** (§6 question 2 resolves to: a
+   documented abuse/legal path, plus admin access for triage). A mark nobody can resolve protects
+   nobody.
+2. **Retention must be long enough to be useful.** A registry that forgets after 30 days cannot answer
+   a complaint filed in month two. The audio 16-bit table (§4) needs at least the retention window we
+   commit to publicly.
+
+### 8.1 What accountability actually requires
+
+| Requirement | Why |
+|---|---|
+| job id in the artifact | links a leaked file to a request without asking us |
+| registry: requester, provider, model, prompt hash, timestamp | the evidence package |
+| **prompt hashes stored, prompts not** | a hash proves the prompt matched what was investigated without retaining text that may be unlawful to hold |
+| a signed evidence export per job | the answer to a complaint must be verifiable, not a screenshot |
+| an abuse intake path (report → verify → resolve → respond) | the mark is useless without a process around it |
+| a stated deadline for responding | otherwise "we can trace it" is a claim, not a control |
+
+### 8.2 What a watermark does *not* do here
+
+Be explicit, because this is where products lie to themselves:
+
+- **It does not prevent misuse.** It attributes it after the fact. Prevention needs policy at the
+  API (rate limits, prompt filtering, account gating), not pixels.
+- **It does not survive a determined abuser** — regeneration or re-encoding removes it. The
+  **registry is the real control**: even a stripped image came from a job whose record we hold.
+- **It does not make providers liable.** A provider serves a job it did not choose; the record points
+  at the requester, and that distinction must be in the policy so operators are not blamed for a
+  stranger's prompt.
+
+### 8.3 The control that actually deters
+
+Worth saying plainly: the deterrent is that **every request is attributable** — an account, a job id,
+a provider, a timestamp, retained for the stated window, and answerable under process. The watermark
+is how an artifact found in the wild is linked back to that record. Both are needed; neither is
+sufficient.
