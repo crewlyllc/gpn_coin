@@ -5449,6 +5449,8 @@ async fn main() {
             idle_path: None,
             auto_idle: Some(auto_shared.clone()),
             secondary_path: None,
+            staking_path: None,
+            staking_status_path: None,
         };
         let src_cfg = cfg.clone();
         let src_shared = shared.clone();

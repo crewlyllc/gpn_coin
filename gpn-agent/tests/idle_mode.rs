@@ -42,6 +42,8 @@ fn opts(path: PathBuf, force: bool) -> GuiOptions {
         idle_path: Some(path),
         auto_idle: None,
         secondary_path: None,
+        staking_path: None,
+        staking_status_path: None,
     }
 }
 
@@ -287,6 +289,8 @@ fn dashboard_refuses_non_loopback_binds() {
             idle_path: Some(p.clone()),
             auto_idle: None,
             secondary_path: None,
+            staking_path: None,
+            staking_status_path: None,
         };
         assert!(
             gui::spawn(o, src(Some(1))).is_err(),

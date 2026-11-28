@@ -265,13 +265,33 @@
     <p class="secstate" id="secStatus">&nbsp;</p>
   </section>
 
+  <section class="idlebox" id="stakeBox" aria-labelledby="stakeH">
+    <div class="idlehead">
+      <h2 id="stakeH">Solana staking — your SOL, your keys</h2>
+      <span class="pill" id="stakePill"><span class="dot" aria-hidden="true"></span><span id="stakePillText">off</span></span>
+    </div>
+    <p class="explain">
+      Delegate your own SOL from a keypair on this machine. Rewards go to your own stake account and
+      are <b>never</b> counted as GPN earnings or in the airdrop. Deactivating takes <b>1–3 days</b>
+      at an epoch boundary, so the panel shows the date instead of a spinner.
+    </p>
+    <div class="secgrid">
+      <label class="row"><input type="checkbox" id="stakeEnable"> Enable Solana delegation</label>
+      <label>Amount (SOL)<input type="text" id="stakeAmount" inputmode="decimal" placeholder="0.05" spellcheck="false"></label>
+      <label>Validator vote account<input type="text" id="stakeValidator" placeholder="base58 vote account" spellcheck="false"></label>
+      <label>RPC endpoint<input type="text" id="stakeRpc" spellcheck="false"></label>
+      <div><button id="stakeSave" type="button">Save</button></div>
+    </div>
+    <p class="secstate" id="stakeStatus">&nbsp;</p>
+  </section>
+
   <section aria-labelledby="otherH" id="otherEarn" hidden>
     <h2 id="otherH">Other earnings</h2>
     <p class="explain">Rewards from the second coin and from staking, kept separate from GPN's own
       earnings. This panel appears only while one of them is active.</p>
     <div class="grid">
       <div class="card"><div class="k">Second coin</div><div class="v" id="otherCoin">—</div><div class="s" id="otherCoinSub">&nbsp;</div></div>
-      <div class="card"><div class="k">Staking</div><div class="v" id="otherStake">—</div><div class="s">&nbsp;</div></div>
+      <div class="card"><div class="k">Staking</div><div class="v" id="otherStake">—</div><div class="s" id="otherStakeSub">&nbsp;</div></div>
     </div>
   </section>
 
@@ -484,6 +504,22 @@
     text($("account"), acct || "unset");
     text($("accountSub"), acct ? "all mining + job earnings go here" : "no payout account — see the node log");
 
+    // Other earnings (owner 2026-11-27): a separate panel that exists only while
+    // the operator is staking or mining a second coin, and never merges with
+    // GPN's own earnings line. Visibility comes from the server's own answer.
+    var oe = s.other_earnings || {};
+    var st = s.staking || {};
+    $("otherEarn").hidden = !oe.visible;
+    if (oe.visible) {
+      var stStatus = st.status;
+      text($("otherStake"), st.enabled
+        ? (st.amount_sol + " SOL · " + (stStatus ? stStatus.phase : "awaiting first reading"))
+        : "not active");
+      text($("otherStakeSub"), stStatus
+        ? (stStatus.lock_sentence + " · rewards " + stStatus.rewards_sol + " SOL")
+        : "kept separate from GPN earnings");
+    }
+
     // Child process table
     var tb = $("children");
     var kids = s.children || [];
@@ -653,14 +689,8 @@
           return line;
         }).join("<br>");
 
-    // "Other earnings" exists only while a second coin (or staking) is on.
-    var other = $("otherEarn");
-    other.hidden = !(j.enabled && live.length > 0);
-    if (!other.hidden) {
-      text($("otherCoin"), live.map(function (c) { return (c.coin || "?") + " · " + c.state; }).join(", "));
-      text($("otherCoinSub"), "paid to your address, separate from GPN earnings");
-      text($("otherStake"), "not active");
-    }
+    // "Other earnings" visibility is owned by the main status poll, which reads
+    // both staking and the second coin (so neither can hide the other).
   }
 
   function fillPools() {
@@ -684,6 +714,58 @@
       .then(function (j) { renderSecondary(j.secondary); })
       .catch(function () { /* the main poll already reports a dead dashboard */ });
   }
+
+  /* ---- Solana staking (row 295) ----------------------------------------
+     Config from /api/staking (same file the supervisor signs from); the lock
+     sentence and the rewards line come from the supervisor's own reading, so a
+     stale browser value can never claim a stake is withdrawable. */
+  var stakeData = null;
+
+  function renderStaking(st) {
+    if (!st) return;
+    stakeData = st;
+    $("stakeEnable").checked = !!st.enabled;
+    $("stakeAmount").value = st.amount_lamports ? st.amount_sol : "";
+    $("stakeValidator").value = st.validator || "";
+    $("stakeRpc").value = st.rpc_url || "";
+    $("stakePill").className = st.enabled ? "pill" : "pill idle";
+    text($("stakePillText"), st.enabled ? (st.network + " · " + st.amount_sol + " SOL") : "off");
+    var s = st.status;
+    var lines = [];
+    if (st.config_error) lines.push('<span class="bad">' + st.config_error + "</span>");
+    if (s) {
+      lines.push("<b>" + s.phase + "</b> · " + s.lock_sentence);
+      lines.push("validator " + s.validator + " · commission " + s.commission_pct + " % · uptime " + s.uptime_pct + " %");
+      lines.push("rewards " + s.rewards_sol + " SOL — separate from GPN earnings");
+      if (s.note) lines.push(s.note);
+    } else if (st.enabled) {
+      lines.push("saved — waiting for the supervisor's first reading");
+    } else {
+      lines.push("minimum " + st.min_amount_sol + " SOL + " + st.rent_sol + " SOL rent = " + st.balance_needed_sol + " SOL in the wallet to start");
+    }
+    $("stakeStatus").innerHTML = lines.join("<br>");
+  }
+
+  function loadStaking() {
+    fetch("/api/staking", { cache: "no-store" })
+      .then(function (r) { if (!r.ok) throw new Error("HTTP " + r.status); return r.json(); })
+      .then(function (j) { renderStaking(j.staking); })
+      .catch(function () { /* the main poll already reports a dead dashboard */ });
+  }
+
+  $("stakeSave").addEventListener("click", function () {
+    $("stakeSave").disabled = true;
+    post("/api/staking", {
+      enabled: $("stakeEnable").checked,
+      amount_sol: $("stakeAmount").value.trim(),
+      validator: $("stakeValidator").value.trim(),
+      rpc_url: $("stakeRpc").value.trim()
+    }).then(function (r) {
+      if (r.ok) { msg("Staking saved.", "ok"); renderStaking(r.body.staking); }
+      else { msg((r.body && r.body.error) || ("request failed (HTTP " + r.code + ")"), "err"); }
+      $("stakeSave").disabled = false;
+    }).catch(function (e) { msg("Request failed: " + e.message, "err"); $("stakeSave").disabled = false; });
+  });
 
   $("secSave").addEventListener("click", function () {
     var card = {
@@ -715,8 +797,10 @@
 
   poll();
   loadSecondary();
+  loadStaking();
   setInterval(poll, 3000);
   setInterval(loadSecondary, 5000);
+  setInterval(loadStaking, 5000);
 })();
 </script>
 </body>

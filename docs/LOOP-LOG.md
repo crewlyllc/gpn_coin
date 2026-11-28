@@ -1,3 +1,32 @@
+## 05:4x UTC / 21:4x PT — 295 P1: Solana staking policy + dashboard land, tested; on-chain delegation is the next slice
+
+- **A0 CI:** origin/main HEAD `c04b0c53` is docs-only ⇒ `total_count: 0` with the full 40-char sha
+  (expected under `paths-ignore`). The last code SHA `631a8beb` still carries run **46110624518**
+  `in_progress` (created 05:07Z) — noted once, not waited on. Both runners `busy=True`.
+- **§3b 295 P1 shipped (box NOT ticked — no on-chain delegation yet).** New
+  `gpn-agent/src/solana_stake.rs`: opt-in `StakeConfig`, 0.01 SOL minimum + 0.00228 SOL rent stated
+  separately (`balance_needed_sol`), base58 32-byte vote-account validation, HTTPS-only remote RPC,
+  atomic 0600 config, corrupt config = error (never a silent "off"), local keypair reader (64-byte
+  Solana JSON, public half re-encoded by our own base58), `SolanaRpc` trait + HTTP impl
+  (getVoteAccounts/getEpochInfo/getBalance/getStakeActivation), commission + uptime from
+  `epochCredits`, and a four-phase `LockState` whose sentence names **1–3 days at an epoch boundary**
+  — a test bans "pending"/"loading"/"please wait" from every phase. Rewards are a separate
+  `rewards_lamports` line, never GPN's.
+- **Dashboard wired:** `GET/POST /api/staking`, a staking panel (amount/validator/RPC/save), and the
+  conditional **Other earnings** section now driven by the server's `other_earnings.visible`
+  (staking OR second coin) — it no longer hides when staking alone is active.
+- **Evidence:** `cargo test --lib solana_stake` ⇒ 13 passed; `--lib gui` ⇒ 21 passed (real TCP:
+  `GET /api/staking` ⇒ `min_amount_sol:"0.01"`); whole `--lib` ⇒ **854 passed, 0 failed, 14
+  ignored**; CI's exact `--all-targets -D warnings` clippy ⇒ clean; `cargo fmt --all -- --check` ⇒
+  clean. Clippy `--all-targets` caught the two initialisers `--lib` cannot see
+  (`gpn_node.rs:5446`, `tests/idle_mode.rs`) — fixed, which is the 2026-11-26 lesson applied.
+- **Ticked:** §1 (3/3) and §2 (6/6) with evidence inline in `docs/releases/0.3.85.md`.
+- **Still open in 0.3.85:** 273 (soak day 4/7, closes 2026-12-02), 294 (criteria 1–4 need a 0.3.85
+  agent on box 1 ⇒ needs §5 build), 295 (devnet create+delegate transaction, then mainnet — mainnet
+  funding is ROW-295-mainnet in NEEDS-TRIAGE, unanswered).
+- **Next run:** assemble + sign the devnet create+delegate transaction behind `--dry-run`, then run it
+  end to end on devnet; or dispatch §5's build off a `build/<sha12>` tag if 294's box is the one to work.
+
 ## 05:3x UTC / 21:3x PT — §3 (bump/lockstep/seeds) and §4 (push discipline) ticked with evidence; release cannot build yet
 
 - **A0 CI:** HEAD `7a7b80c6` is docs-only ⇒ `total_count: 0` with the full 40-char sha (expected under

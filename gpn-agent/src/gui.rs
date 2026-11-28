@@ -104,6 +104,11 @@ pub struct GuiOptions {
     pub auto_idle: Option<Arc<AutoIdleShared>>,
     /// Second-coin state file (row 294). `None` → [`secondary::state_path`].
     pub secondary_path: Option<PathBuf>,
+    /// Solana staking config file (row 295). `None` → [`solana_stake::config_path`].
+    pub staking_path: Option<PathBuf>,
+    /// Solana staking status file (written by the supervisor). `None` →
+    /// [`solana_stake::status_path`].
+    pub staking_status_path: Option<PathBuf>,
 }
 
 impl Default for GuiOptions {
@@ -114,6 +119,8 @@ impl Default for GuiOptions {
             idle_path: None,
             auto_idle: None,
             secondary_path: None,
+            staking_path: None,
+            staking_status_path: None,
         }
     }
 }
@@ -257,6 +264,83 @@ fn secondary_json(vram_gb: f64, now: u64, state_path: Option<&std::path::Path>) 
     })
 }
 
+/// The Solana staking block for the dashboard (row 295): the saved config, and
+/// the supervisor's last observation when one exists. Off by default; nothing
+/// is delegated until the operator sets an amount and a validator.
+fn staking_json(
+    cfg_path: Option<&std::path::Path>,
+    status_path: Option<&std::path::Path>,
+) -> Value {
+    use crate::solana_stake as ss;
+    let (cfg, config_error) = match cfg_path
+        .map(ss::read_config_at)
+        .unwrap_or_else(ss::read_config)
+    {
+        Ok(c) => (c, Value::Null),
+        Err(e) => (ss::StakeConfig::default(), json!(e)),
+    };
+    let status = status_path
+        .map(ss::read_status_at)
+        .unwrap_or_else(ss::read_status);
+    let status_json = match &status {
+        Some(s) => json!({
+            "updated": s.updated,
+            "network": s.network,
+            "amount_sol": ss::format_sol(s.amount_lamports),
+            "validator": s.validator,
+            "commission_pct": s.commission_pct,
+            "uptime_pct": s.uptime_pct,
+            "phase": s.lock.phase,
+            "lock_sentence": s.lock.describe(),
+            "locked": s.lock.locked(),
+            "rewards_sol": ss::format_sol(s.rewards_lamports),
+            "note": s.note,
+        }),
+        None => Value::Null,
+    };
+    json!({
+        "enabled": cfg.enabled,
+        "network": cfg.network(),
+        "rpc_url": cfg.rpc_url,
+        "validator": cfg.validator,
+        "amount_sol": ss::format_sol(cfg.amount_lamports),
+        "amount_lamports": cfg.amount_lamports,
+        "min_amount_sol": ss::format_sol(ss::MIN_DELEGATION_LAMPORTS),
+        "rent_sol": ss::format_sol(ss::STAKE_ACCOUNT_RENT_LAMPORTS),
+        "balance_needed_sol": ss::format_sol(ss::balance_needed_lamports(cfg.amount_lamports)),
+        "lock_days": [ss::LOCK_MIN_DAYS, ss::LOCK_MAX_DAYS],
+        "keypair_path": cfg.keypair_path().display().to_string(),
+        "config_error": config_error,
+        "status": status_json,
+    })
+}
+
+/// The conditional **Other earnings** panel (owner decision 2026-11-27): it
+/// exists only while the operator is staking or mining a second coin, and it
+/// never merges with GPN's own earnings line or the airdrop export.
+fn other_earnings_json(secondary: &Value, staking: &Value) -> Value {
+    let staking_active = staking.get("enabled").and_then(Value::as_bool) == Some(true);
+    let secondary_active = secondary
+        .get("status")
+        .and_then(|s| s.get("cards"))
+        .and_then(Value::as_array)
+        .map(|cards| {
+            cards.iter().any(|c| {
+                c.get("state")
+                    .and_then(Value::as_str)
+                    .map(|s| s == "mining" || s.starts_with("paused"))
+                    .unwrap_or(false)
+            })
+        })
+        .unwrap_or(false);
+    json!({
+        "visible": staking_active || secondary_active,
+        "note": "paid to your own addresses — never part of GPN earnings or the airdrop export",
+        "staking_active": staking_active,
+        "secondary_active": secondary_active,
+    })
+}
+
 /// Pure request router: `(status_code, content_type, body)`.
 ///
 /// `now` is injected so the auto-resume boundary is testable.
@@ -287,10 +371,15 @@ pub fn handle(
                     .get("gpu_vram_gb")
                     .and_then(Value::as_f64)
                     .unwrap_or(0.0);
-                obj.insert(
-                    "secondary".into(),
-                    secondary_json(vram_gb, now, opts.secondary_path.as_deref()),
+                let secondary = secondary_json(vram_gb, now, opts.secondary_path.as_deref());
+                let staking = staking_json(
+                    opts.staking_path.as_deref(),
+                    opts.staking_status_path.as_deref(),
                 );
+                let other = other_earnings_json(&secondary, &staking);
+                obj.insert("secondary".into(), secondary);
+                obj.insert("other_earnings".into(), other);
+                obj.insert("staking".into(), staking);
                 obj.insert(
                     "dashboard".into(),
                     json!({"listen": opts.listen, "loopback": true}),
@@ -480,6 +569,83 @@ pub fn handle(
             )
         }
 
+        // ── Solana staking (row 295) ──────────────────────────────────────
+        // GET returns the saved config + the supervisor's last observation.
+        // POST replaces the operator's choice, validated here so the API can
+        // never accept a delegation the supervisor would refuse to sign.
+        ("GET", "/api/staking") => Reply::json(
+            200,
+            json!({"ok": true, "staking": staking_json(
+                opts.staking_path.as_deref(),
+                opts.staking_status_path.as_deref(),
+            )}),
+        ),
+        ("POST", "/api/staking") => {
+            use crate::solana_stake as ss;
+            let cfg_path = opts.staking_path.clone().unwrap_or_else(ss::config_path);
+            let parsed: Value =
+                match serde_json::from_str(if body.trim().is_empty() { "{}" } else { body }) {
+                    Ok(v) => v,
+                    Err(e) => return Reply::error(400, format!("invalid JSON body: {e}")),
+                };
+            let enabled = parsed
+                .get("enabled")
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
+            let amount_lamports = match parsed.get("amount_sol") {
+                Some(Value::String(s)) => match ss::parse_sol(s) {
+                    Ok(v) => v,
+                    Err(e) => return Reply::json(400, json!({"ok": false, "error": e})),
+                },
+                Some(Value::Number(n)) => n.as_u64().unwrap_or(0),
+                None => 0,
+                _ => return Reply::error(400, "\"amount_sol\" must be a string like \"0.01\""),
+            };
+            let cfg = ss::StakeConfig {
+                enabled,
+                amount_lamports,
+                validator: parsed
+                    .get("validator")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .trim()
+                    .to_string(),
+                rpc_url: parsed
+                    .get("rpc_url")
+                    .and_then(Value::as_str)
+                    .map(str::to_string)
+                    .unwrap_or_else(|| ss::DEFAULT_RPC_URL.to_string()),
+                keypair_path: parsed
+                    .get("keypair_path")
+                    .and_then(Value::as_str)
+                    .map(str::to_string),
+            };
+            if let Err(e) = cfg.validate() {
+                return Reply::json(400, json!({"ok": false, "error": e}));
+            }
+            if let Err(e) = ss::write_config_at(&cfg_path, &cfg) {
+                return Reply::error(500, e);
+            }
+            println!(
+                "[gui] staking: {} — {} SOL on {} ({})",
+                if enabled { "enabled" } else { "disabled" },
+                ss::format_sol(cfg.amount_lamports),
+                if cfg.validator.is_empty() {
+                    "no validator"
+                } else {
+                    &cfg.validator
+                },
+                cfg.network()
+            );
+            Reply::json(
+                200,
+                json!({"ok": true, "staking": staking_json(
+                    Some(&cfg_path),
+                    opts.staking_status_path.as_deref(),
+                )}),
+            )
+        }
+
         ("GET", _) | ("POST", _) => Reply::error(404, format!("no route for {method} {path}")),
         _ => Reply::error(
             405,
@@ -593,6 +759,8 @@ mod tests {
             idle_path: Some(dir.join("idle.json")),
             auto_idle: None,
             secondary_path: Some(dir.join("secondary.json")),
+            staking_path: Some(dir.join("staking.json")),
+            staking_status_path: Some(dir.join("staking-status.json")),
         }
     }
 
@@ -1044,6 +1212,72 @@ mod tests {
     }
 
     #[test]
+    fn staking_is_off_by_default_and_refuses_what_it_cannot_sign() {
+        let dir = std::env::temp_dir().join(format!("gpn-gui-stake-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let o = GuiOptions {
+            staking_path: Some(dir.join("staking.json")),
+            staking_status_path: Some(dir.join("staking-status.json")),
+            ..Default::default()
+        };
+        let src = || json!({"peers": 3, "gpu_vram_gb": 12.0});
+
+        // Off by default, nothing staked, and the minimum + rent stated.
+        let r = handle("GET", "/api/staking", "", &src, &o, 100);
+        assert_eq!(r.code, 200);
+        let body: Value = serde_json::from_str(&r.body).unwrap();
+        assert_eq!(body["staking"]["enabled"], false);
+        assert_eq!(body["staking"]["network"], "devnet");
+        assert_eq!(body["staking"]["min_amount_sol"], "0.01");
+        assert_eq!(body["staking"]["rent_sol"], "0.00228288");
+
+        // Below the minimum: refused with the number.
+        let bad = json!({"enabled": true, "amount_sol": "0.001",
+            "validator": "9xQeWvG816bUx9EPjHmaT23yvVM2ZWbrrpZb9PusVFin"})
+        .to_string();
+        let r = handle("POST", "/api/staking", &bad, &src, &o, 100);
+        assert_eq!(r.code, 400, "{}", r.body);
+        assert!(r.body.contains("0.01"), "{}", r.body);
+
+        // A non-Solana address is refused.
+        let bad = json!({"enabled": true, "amount_sol": "0.05", "validator": "0xdead"}).to_string();
+        let r = handle("POST", "/api/staking", &bad, &src, &o, 100);
+        assert_eq!(r.code, 400, "{}", r.body);
+        assert!(r.body.contains("vote account"), "{}", r.body);
+
+        // A valid choice is saved, and the dashboard reports the balance needed
+        // (delegation + stake-account rent).
+        let good = json!({"enabled": true, "amount_sol": "0.05",
+            "validator": "9xQeWvG816bUx9EPjHmaT23yvVM2ZWbrrpZb9PusVFin"})
+        .to_string();
+        let r = handle("POST", "/api/staking", &good, &src, &o, 100);
+        assert_eq!(r.code, 200, "{}", r.body);
+        let body: Value = serde_json::from_str(&r.body).unwrap();
+        assert_eq!(body["staking"]["enabled"], true);
+        assert_eq!(body["staking"]["balance_needed_sol"], "0.05228288");
+        let saved = std::fs::read_to_string(dir.join("staking.json")).unwrap();
+        assert!(
+            saved.contains("9xQeWvG816bUx9EPjHmaT23yvVM2ZWbrrpZb9PusVFin"),
+            "{saved}"
+        );
+
+        // The Other earnings panel appears only while staking / second coin is
+        // on, and says which addresses the money goes to.
+        let st = || json!({"peers": 3});
+        let r = handle("GET", "/api/status", "", &st, &o, 100);
+        let body: Value = serde_json::from_str(&r.body).unwrap();
+        assert_eq!(body["other_earnings"]["visible"], true);
+        assert_eq!(body["other_earnings"]["staking_active"], true);
+        assert!(body["other_earnings"]["note"]
+            .as_str()
+            .unwrap()
+            .contains("never part of GPN earnings"));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn non_loopback_binds_are_refused() {
         assert!(check_loopback("127.0.0.1:8099").is_ok());
         assert!(check_loopback("127.0.0.1:0").is_ok());
@@ -1097,6 +1331,16 @@ mod tests {
         );
         assert_eq!(code, 200);
         assert!(body.contains("\"peers\":5"), "{body}");
+        // The staking route is served over real HTTP, and the Other earnings
+        // panel is present in the status payload (hidden while nothing is on).
+        assert!(body.contains("\"other_earnings\""), "{body}");
+        let (code, body) = get(
+            addr,
+            "GET /api/staking HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
+        );
+        assert_eq!(code, 200);
+        assert!(body.contains("\"min_amount_sol\":\"0.01\""), "{body}");
+        assert!(body.contains("\"enabled\":false"), "{body}");
 
         let payload = r#"{"minutes":30}"#;
         let (code, body) = get(

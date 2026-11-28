@@ -56,6 +56,7 @@ pub mod seedlist;
 /// recovery sequence, shared by the CLI and the supervisors that schedule it.
 pub mod selfheal;
 pub mod settle_policy;
+pub mod solana_stake;
 pub mod strict;
 pub mod tasks;
 #[cfg(test)]
