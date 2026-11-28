@@ -1,3 +1,17 @@
+## 16:24 PT 0.3.84 §8 ticked — stranger verification PASS, stale downloads.md stamp found and fixed
+
+- `scripts/release-cut.sh --verify-published --version 0.3.84` ⇒ **EXIT=0**: `linux: 'gpn-linux.tar.gz'
+  … 349136775 bytes, sha256 660f7585…d36e9 matches the manifest`, `windows: 'gpn-windows.zip' …
+  253327068 bytes, sha256 25790a28…8543 matches the manifest`, `PASS: both manifest assets are
+  publicly downloadable by exact filename and match their sha256/size`. Anonymous, no token/cookie.
+- **Real gap found while ticking the docs-stamp box:** `docs/downloads.md` (and live
+  https://gpncoin.ai/docs/downloads) still said **0.3.83** while `/download` and `releases.json`
+  served 0.3.84. Stamp updated to 0.3.84 / spec 55 / block 375,797 / 2026-11-27 16:18 PT.
+  Commit `d9c81a36` (docs-only, no CI run by paths-ignore).
+- A0: no CI run exists for `ecc9e9b3` (docs-only) — nothing to act on.
+- Next box in 0.3.84: §9 deploy-and-confirm (3 of 4 already proven by the box-1 update at 16:00;
+  rollback-retention line to evidence), then §10, filing (§0b) and timing (§10b).
+
 ## 16:10 PT 0.3.84 §7c last box ticked — box 1 (non-canary) updated itself to 0.3.84 unattended
 
 - Box 1's 16:00 PT update cycle installed 0.3.84 by itself: `check: latest 0.3.84 published
