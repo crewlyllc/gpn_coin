@@ -26,6 +26,8 @@
   funding is ROW-295-mainnet in NEEDS-TRIAGE, unanswered).
 - **Next run:** assemble + sign the devnet create+delegate transaction behind `--dry-run`, then run it
   end to end on devnet; or dispatch §5's build off a `build/<sha12>` tag if 294's box is the one to work.
+- **Pushed once:** `e02e6fc8` (9 files) — CI run **46113366946** `pending` for that sha at 05:47Z; not
+  waited on. `git ls-remote origin main` equals the local HEAD (push verified, not assumed).
 
 ## 05:3x UTC / 21:3x PT — §3 (bump/lockstep/seeds) and §4 (push discipline) ticked with evidence; release cannot build yet
 
