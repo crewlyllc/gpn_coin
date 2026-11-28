@@ -89,10 +89,25 @@ impl Coin {
         }
     }
 
-    /// Second DAG size in GB (design §7.1 table).
+    /// Second DAG size in GB.
+    ///
+    /// **Measured, not copied from the design table.** §7.1 estimated Ergo's
+    /// Autolykos v2 DAG at 2.2 GB; on 2026-11-28, at height 1,926,374, lolMiner
+    /// could not allocate it with 5.91 GiB free — 1.98a printed
+    /// `GPU 0: error in allocating memory 0 .` with nothing allocated
+    /// (`nvidia-smi` memory.used never rose above 1,718 MiB), and 1.88 printed
+    /// `Unrecoverable memory error by GPU 0.` An independent `torch.empty` on
+    /// the same card allocated 5.5 GiB and failed at 6.3 GiB, so the free VRAM
+    /// was real and the DAG needs more than 5.9 GiB.
+    ///
+    /// The table grows with the epoch, so 6.5 GB is the honest number today and
+    /// an 8 GB card can no longer host it.
+    ///
+    /// Re-measure on a ≥16 GB card before lowering this: the number only goes
+    /// up, and understating it is how the dashboard offers a coin that OOMs.
     pub fn dag_gb(self) -> f64 {
         match self {
-            Coin::Ergo => 2.2,
+            Coin::Ergo => 6.5,
             Coin::Alephium => 0.4,
             Coin::Ravencoin => 4.0,
         }
@@ -127,10 +142,18 @@ impl Coin {
     ///
     /// The curated list must only offer coins that can run: an option that can
     /// never produce a share is worse than no option, because the operator
-    /// configures it, restarts, and gets silence. lolMiner 1.98a refuses
-    /// `--algo ALEPHIUM` outright (measured 2026-11-28: `Error: --algo option
-    /// "ALEPHIUM" is not supported`), and Alephium's own GPU miner is a
-    /// different binary this build does not ship or supervise.
+    /// configures it, restarts, and gets silence.
+    ///
+    /// Alephium is unavailable for a **pool** reason, not a miner one. lolMiner
+    /// 1.98a does support the coin — `--list-algos` prints
+    /// `ALEPH  Blake3-Alephium`. The earlier note that it refused Alephium came
+    /// from passing the wrong name (`--algo ALEPHIUM` ⇒ `not supported`). What
+    /// is missing is a reachable curated pool: on 2026-11-28 every candidate
+    /// was dead — `alephium.herominers.com:1190`, `de.` and `fr.` variants
+    /// (refused), `alephium.2miners.com:2020` (NXDOMAIN), `alph.ironpool.io:5555`,
+    /// `alephium.kryptex.network:7777`, `pool.alephium.org:10973` (refused).
+    /// Shipping a coin whose pool nobody can reach is worse than not offering
+    /// it, so it is off until a live pool is verified.
     pub fn available(self) -> bool {
         match self {
             Coin::Ergo | Coin::Ravencoin => true,
@@ -241,8 +264,9 @@ pub fn validate_card(c: &CardConfig) -> Result<(), String> {
     })?;
     if !coin.available() {
         return Err(format!(
-            "`{}` cannot be mined by this build: no second-coin miner it ships has that \
-             algorithm (lolMiner has none for Alephium). Choose ergo or ravencoin.",
+            "`{}` is not offered in this build: no curated pool for it answered when the \
+             list was verified (2026-11-28). The miner supports the coin — the pools do not \
+             answer. Choose ergo or ravencoin.",
             coin.as_str()
         ));
     }
@@ -956,13 +980,15 @@ mod tests {
     }
 
     #[test]
-    fn alephium_is_refused_because_no_shipped_miner_can_mine_it() {
+    fn alephium_is_refused_because_no_curated_pool_answers() {
         let mut c = ergo_card();
         c.coin = "alephium".into();
         c.address = "1DrEeC9Y7dGVaFhKnmPqRsTuVwXyZaBcDeFgH".into();
         c.pool = "de.alephium.herominers.com:1190".into();
         let err = validate_card(&c).unwrap_err();
-        assert!(err.contains("cannot be mined by this build"), "{err}");
+        assert!(err.contains("no curated pool"), "{err}");
+        // The miner does support it (`ALEPH`); the message must not blame lolMiner.
+        assert!(!err.contains("no second-coin miner"), "{err}");
         assert!(!available_coins(24.0).contains(&Coin::Alephium));
     }
 
@@ -992,16 +1018,16 @@ mod tests {
     }
 
     #[test]
-    fn an_8gb_card_is_offered_ergo_but_not_alephium_or_ravencoin() {
+    fn an_8gb_card_is_offered_no_coin_because_ergo_dag_no_longer_fits() {
+        // Row 294 criterion 5, measured on the 4060 on 2026-11-28: with the GPN
+        // node resident (5.91 GiB free) Autolykos v2 fails to allocate
+        // (`error in allocating memory 0` / `Unrecoverable memory error`), while
+        // an independent torch allocation of 5.5 GiB succeeds on the same card.
+        // So Ergo's DAG is > 5.9 GB and an 8 GB card must not be offered it.
         let coins = available_coins(8.0);
-        assert!(coins.contains(&Coin::Ergo));
         assert!(
-            !coins.contains(&Coin::Alephium),
-            "nothing this build ships can mine Alephium (row 294, measured 2026-11-28)"
-        );
-        assert!(
-            !coins.contains(&Coin::Ravencoin),
-            "8 GB cannot hold GPN 2.0 + RVN 4.0 + a model 2.0"
+            coins.is_empty(),
+            "8 GB cannot hold Ergo's ~6.5 GB DAG plus GPN plus a model: {coins:?}"
         );
     }
 
@@ -1009,7 +1035,14 @@ mod tests {
     fn a_12gb_card_is_offered_ergo_and_ravencoin() {
         let coins = available_coins(12.0);
         assert_eq!(coins.len(), 2, "{coins:?}");
+        assert!(coins.contains(&Coin::Ergo));
         assert!(coins.contains(&Coin::Ravencoin));
+    }
+
+    #[test]
+    fn a_16gb_card_is_offered_ergo_and_ravencoin() {
+        let coins = available_coins(16.0);
+        assert_eq!(coins.len(), 2, "{coins:?}");
     }
 
     #[test]

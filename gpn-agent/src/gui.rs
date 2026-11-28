@@ -984,23 +984,37 @@ mod tests {
             secondary_path: Some(dir.join("secondary.json")),
             ..Default::default()
         };
-        let src = || json!({"peers": 3, "gpu_vram_gb": 8.0});
+        let src = || json!({"peers": 3, "gpu_vram_gb": 12.0});
 
-        // Off by default, and an 8 GB card is offered ergo only: Alephium has no
-        // miner in this build (row 294) and Ravencoin's 4 GB DAG does not fit.
+        // Off by default, and a 12 GB card is offered ergo + ravencoin:
+        // Alephium has no live curated pool (row 294), and Ravencoin's 4 GB DAG
+        // fits 12 GB but not 8 GB.
         let r = handle("GET", "/api/secondary", "", &src, &o, 100);
         assert_eq!(r.code, 200);
         let body = r.body;
         assert!(body.contains("\"ergo\""), "{body}");
         assert!(
             !body.contains("\"alephium\""),
-            "an option no shipped miner can run must not be offered: {body}"
+            "an option with no live pool must not be offered: {body}"
         );
         assert!(
-            !body.contains("\"ravencoin\""),
-            "an 8 GB card must not be offered a 4 GB second DAG: {body}"
+            body.contains("\"ravencoin\""),
+            "a 12 GB card can hold GPN 2.0 + RVN 4.0 + a model 2.0: {body}"
         );
         assert!(body.contains("\"enabled\":false"), "{body}");
+
+        // The measured card — 8 GB — is offered nothing at all: Ergo's DAG is
+        // > 5.9 GB (2026-11-28) and does not fit beside the node and a model.
+        let small = || json!({"peers": 3, "gpu_vram_gb": 8.0});
+        let r = handle("GET", "/api/secondary", "", &small, &o, 100);
+        assert_eq!(r.code, 200);
+        let body = r.body;
+        for coin in ["ergo", "alephium", "ravencoin"] {
+            assert!(
+                !body.contains(&format!("\"{coin}\"")),
+                "8 GB must not be offered {coin}: {body}"
+            );
+        }
 
         // An intensity outside the safe band is refused with a reason.
         let bad = json!({"enabled": true, "cards": [{

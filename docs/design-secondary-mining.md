@@ -119,14 +119,24 @@ room for a second DAG **and** for an AI job's model. That single number rules mo
 
 | Coin | Algorithm | Second DAG | Verdict for an 8 GB card |
 |---|---|---|---|
-| **Ergo (ERG)** | Autolykos v2 | ~2.2 GB | **best fit** — small DAG, GPU-mineable, no ASIC dominance yet, mature stratum pools |
-| **Alephium (ALPH)** | Blake3 | ~small | good fit, low VRAM, GPU-friendly |
+| **Ergo (ERG)** | Autolykos v2 | **~6.5 GB (measured 2026-11-28)** | **no longer fits 8 GB** — see the note below; offered only on cards ≥12 GB |
+| **Alephium (ALPH)** | Blake3 | ~small | fits, and lolMiner 1.98a supports it (`ALEPH`) — but no curated pool answers (2026-11-28), so it is not offered |
 | **Sia (SC)** | Blake2B | ~small | the classic dual-mining partner; ASIC-dominated now, so only for completeness |
-| **Ravencoin (RVN)** | KAWPOW | ~4 GB | workable on 8 GB but leaves little room for a model while a job runs |
+| **Ravencoin (RVN)** | KAWPOW | ~4 GB | fits 12 GB, **not** 8 GB (4 GB DAG + GPN + a model does not fit 7.6 GB usable) |
 | **Zcash (ZEC)** | Equihash 200,9 | ~1.5 GB | fits, but ASICs took the network years ago |
 | **Decred (DCR)** | Blake3 | ~small | fits; mostly ASIC |
 | **Ethereum Classic (ETC)** | Ethash | ~5–6 GB at current epoch | **no** on 8 GB — two Ethash DAGs do not fit |
 | **Kaspa (KAS)** | kHeavyHash | small | fits but ASIC-dominated; GPU yield near zero |
+
+**Correction, measured 2026-11-28 (row 294, §8 criterion 5).** §7.1 originally said Ergo's DAG was
+~2.2 GB and therefore the best fit for an 8 GB card. That number was stale. On the 4060 at height
+1,926,374, lolMiner could not allocate the DAG with **5.91 GiB free** — 1.98a printed
+`GPU 0: error in allocating memory 0 .` (memory.used never rose above 1,718 MiB, so nothing was
+allocated) and 1.88 printed `Unrecoverable memory error by GPU 0.` An independent `torch.empty` on
+the same card allocated 5.5 GiB and failed at 6.3 GiB, so the free VRAM was real: the DAG needs more
+than 5.9 GiB and the table only grows with the epoch. `Coin::dag_gb()` now returns **6.5** for Ergo,
+which means an 8 GB card is offered **no** second coin at all — the honest outcome, and the one the
+fit rule exists to produce. Re-measure on a ≥16 GB card before lowering it.
 
 **The short list to ship:** **Ergo**, **Alephium**, and **Ravencoin** (with a VRAM warning above
 8 GB), on the rule that an unsupported coin simply does not appear for a card that cannot fit it.
