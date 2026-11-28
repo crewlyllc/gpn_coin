@@ -1,3 +1,21 @@
+## 17:05 PT 0.3.84 §10 box 1 ticked — row 291's last pending half proven on the shipped 0.3.84 Windows binary
+
+- **A0:** `origin/main` = `b9b89a97` (docs-only §9 commit) ⇒ `GET /actions/runs?head_sha=b9b89a9779bd7a94d275b7cc7c0f58aad92857d4` ⇒
+  `total_count: 0` — expected under `ci.yml` `paths-ignore`. Nothing red, nothing waited on.
+- **§10 box 1 (change observed on a real machine):** box 1, `C:\gpn\data\update\current\gpn_node.exe` ⇒
+  `gpn_node 0.3.84 (spec 55, bd36c4f)`; `scripts/tests/job-object-probe.ps1 -NodeExe <that binary>`
+  (uploaded over SSH, sha256 `ba9c8f06…abbd` == repo copy) ⇒ **5/5 PASS, `RESULT: 0 failed`, rc 0**:
+  `kill-on-close job attached`, `child pid=66924`, `the child died when the supervisor exited without cleanup`.
+  This closes the "remaining half" that §3b row 291 had explicitly recorded as pending at §5/§6.
+- **290 live:** `https://gpncoin.ai/canary.json` ⇒ `{"version":"0.3.84","ok":true,"job_served":true,"job_id":6604,"failed_at":0}`,
+  anonymous read — the driver publishes its own proof, no manual step.
+- Fleet: this host `system_version` ⇒ `0.3.84`, `system_health` ⇒ `{"peers":4,"isSyncing":false}`.
+- Upload mechanic for the next run: `winps.sh` runs one `-EncodedCommand`, so an 8 KB script must be
+  chunked (`Add-Content -NoNewline` in ~1.2 KB base64 pieces, then `[Convert]::FromBase64String`), and
+  `box1.sh` consumes stdin — iterate with `</dev/null` or the loop silently runs only its first item.
+- Checklist tally now **53/62**. Remaining: §10 (2), §10b (2), §0b filing (2), §0e stranger lifecycle (3).
+- No blockers, no [TRIAGE] items.
+
 ## 16:40 PT 0.3.84 §9 ticked (4/4) — both machines updated themselves and report 0.3.84 from the running process
 
 - **A0:** `origin/main` = `d2385093` (docs-only loop-log commit) ⇒ `GET /actions/runs?head_sha=d238509337cb886fb7821b93b9deec1a78c82aac`
