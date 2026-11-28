@@ -1,3 +1,18 @@
+## 17:20 PT 0.3.84 §10 box 2 ticked — peers held 88 min, one genesis-mismatch ban only, forks stayed linked
+
+- **A0:** `origin/main` = `fba165cb` ⇒ `GET /actions/runs?head_sha=fba165cb6000f416d1ee5de63ec93641c7e3411e` ⇒
+  `total_count: 0` — docs-only commit, expected under `ci.yml` `paths-ignore`. Nothing red, nothing waited on.
+- **§10 box 2 (peers hold >5 min; no new bans; no unexpected isolated/forked):** same process
+  `run-fleet.sh[1574018]` since 15:49:11 → 17:17 PT. Continuous `Idle (4 peers)` (1400 lines in 2 h),
+  `system_health` ⇒ `{"peers":4,"isSyncing":false,"shouldHavePeers":true}`, best #375703 → #376038.
+  Whole-day bans: exactly 1, at 13:16:55 in the **previous** instance — `Reason: Genesis mismatch.
+  Banned, disconnecting.` (a different-genesis stranger). Design-path `fork-tolerance` lines kept the
+  links (`reputation 0 -> 0`), not isolation. One peer `12D3KooWJJzWq…` lags at #375801 vs our #376038;
+  recorded, not a fault.
+- Checklist tally now **54/62**. Remaining: §10 (1 — mark rows DONE), §10b (2), §0b filing (2),
+  §0e stranger lifecycle (3).
+- No blockers, no [TRIAGE] items.
+
 ## 17:05 PT 0.3.84 §10 box 1 ticked — row 291's last pending half proven on the shipped 0.3.84 Windows binary
 
 - **A0:** `origin/main` = `b9b89a97` (docs-only §9 commit) ⇒ `GET /actions/runs?head_sha=b9b89a9779bd7a94d275b7cc7c0f58aad92857d4` ⇒
