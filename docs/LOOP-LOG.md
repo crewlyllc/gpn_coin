@@ -1,3 +1,16 @@
+## 16:10 PT 0.3.84 §7c last box ticked — box 1 (non-canary) updated itself to 0.3.84 unattended
+
+- Box 1's 16:00 PT update cycle installed 0.3.84 by itself: `check: latest 0.3.84 published
+  2026-11-27T23:42:43Z` → `-> update available: 0.3.84` → `apply: current -> versions/0.3.84
+  previous: 0.3.83` → `confirm: process=up rpc=yes 123s version=0.3.84` →
+  **`CONFIRMED: 0.3.84 is running (rpc http://127.0.0.1:9944) after 123 s`**; process path
+  `C:\gpn\data\update\current\gpn-node.exe --version` ⇒ `gpn-node.exe 0.3.84`. No `HELD here`.
+- Observed, not inferred: the old node ignored the polite stop for 60 s and the updater ended the
+  worker tree with `taskkill /T /F` — the forced-stop path works and says so in the log.
+- A0: no CI run exists for `12adb28e` (docs-only) — nothing to act on.
+- Next box in 0.3.84: §8 verify-as-a-stranger (`scripts/release-cut.sh --verify-published
+  --version 0.3.84`), then §9/§10, then filing (§0b) and timing (§10b).
+
 ## 16:05 PT 0.3.84 §7c published — the fleet is unheld; this host is the canary on 0.3.84
 
 - **Canary update (this host, `GPN_CANARY=1`):** `systemctl --user start gpn-update.service` ⇒
