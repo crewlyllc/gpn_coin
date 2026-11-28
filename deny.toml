@@ -136,6 +136,17 @@ allow = [
     "BSD-3-Clause",
     "BSL-1.0",
     "CC0-1.0",
+    # webpki-roots (Mozilla's trust-anchor data, pulled in by rustls/hyper) ships
+    # its root store under the Community Data License Agreement - Permissive 2.0.
+    # Permissive, data-only, no copyleft on our code.
+    "CDLA-Permissive-2.0",
+    # Every Polkadot SDK client crate (sc-*, sp-*) declares
+    # `GPL-3.0-or-later WITH Classpath-exception-2.0`. The Classpath exception
+    # explicitly permits linking this library into a larger work and
+    # distributing that work under our own (Apache-2.0) terms; it is the same
+    # grant that lets every Substrate-based chain ship a non-GPL binary. Only
+    # the expression with the exception is allowed — bare GPL is not.
+    "GPL-3.0-or-later WITH Classpath-exception-2.0",
     "ISC",
     "MIT",
     "MIT-0",

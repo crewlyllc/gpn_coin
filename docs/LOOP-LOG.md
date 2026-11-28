@@ -1,3 +1,22 @@
+## 19:4x PT — §3b 298 TICKED: dependency audit green in both workspaces (exit 4 → exit 0)
+
+- **A0 CI:** HEAD `928e0bcb` (docs-only LOOP-LOG commit) ⇒ `?head_sha=<full>` **total_count 0** — expected,
+  nothing red. The 0.3.85 code push `9c7eafff` is still `in_progress` in run `46097394596` (started
+  02:18Z, observed once, not waited on).
+- **§3b 298 TICKED** with a failing baseline first: `cargo deny --config ../deny.toml check licenses`
+  in `gpn-node/` ⇒ `38 error[rejected]`, `12 error[unlicensed]`, exit **4**, `licenses FAILED`.
+  Fixed three measured causes (the row knew two): the 12 workspace members had no `license` key →
+  `license.workspace = true`; `gpn-agent/Cargo.toml` had no key at all → `license = "Apache-2.0"`
+  (the box requires both workspaces green); `deny.toml` now allows the SDK's
+  `GPL-3.0-or-later WITH Classpath-exception-2.0` and `CDLA-Permissive-2.0` (`webpki-roots`, reached
+  via rustls — new finding, not in the row).
+  After: `gpn-node exit=0` and `gpn-agent exit=0`, both
+  `advisories ok, bans ok, licenses ok, sources ok`; manifests validated with `cargo metadata --no-deps`
+  (exit 0 both). Remaining warnings are third-party deprecated SPDX ids and now-unused allowances.
+- Checklist 0.3.85 now **2/62** (§0e reason + 298). Next box: 297 (Windows stale-install guard —
+  needs a Windows build to prove) or 299 (mirror provenance pairing in `release-cut.sh`).
+- No blockers, no [TRIAGE].
+
 ## 18:5x PT — 0.3.85 §0e reason recorded + row 273 day 4 of 7 (drift named: 15.44 s is tail, not the restart)
 
 - **A0 CI:** `origin/main` HEAD `f1fa2135…` (LOOP-LOG commit) ⇒ `?head_sha=<full>` **total_count 0**
