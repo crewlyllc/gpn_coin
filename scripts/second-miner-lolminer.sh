@@ -83,9 +83,12 @@ INTENSITY=${INTENSITY:-30}
 case "$INTENSITY" in ''|*[!0-9]*) die "intensity \`$INTENSITY\` is not a number" 2;; esac
 [ "$INTENSITY" -ge 1 ] && [ "$INTENSITY" -le 100 ] || die "intensity $INTENSITY outside 1..100" 2
 
+# Only algorithms this miner really has (row 294, measured 2026-11-28: lolMiner
+# 1.98a answers `Error: --algo option "ALEPHIUM" is not supported`, so Alephium
+# gets its own refusal instead of a miner that exits the moment it starts).
 case "$COIN" in
   ergo)       ALGO=AUTOLYKOS2 ;;
-  alephium)   ALGO=ALEPHIUM ;;
+  alephium)   die "miner-not-supported: lolMiner has no Alephium algorithm (it refuses --algo ALEPHIUM); Alephium needs a different miner binary" 4 ;;
   ravencoin)  ALGO=KAWPOW ;;
   *)          die "unsupported coin \`$COIN\`" 2 ;;
 esac

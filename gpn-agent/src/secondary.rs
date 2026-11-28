@@ -100,21 +100,41 @@ impl Coin {
 
     /// Curated pools. v1 takes no arbitrary URL: a mistyped pool is a silent
     /// revenue leak, and a hostile one is worse.
+    ///
+    /// Every entry here was verified live on 2026-11-28 (row 294): the hostname
+    /// resolves, the TCP port accepts, and the stratum handshake authorises the
+    /// payouts of the right coin — not just "it looked right on a web page".
+    /// What was removed and why (evidence in docs/releases/0.3.85.md):
+    /// * `ergo.2miners.com:6060` — connection refused on all four A records, from
+    ///   two networks; `:3333` on that host is another coin and answers
+    ///   `Invalid address` to an Ergo payout.
+    /// * `alephium.2miners.com:2020` — NXDOMAIN (no A, no AAAA, Google + Cloudflare DNS).
+    /// * `de.alephium.herominers.com:1190` — port closed.
+    /// * `de.rvn.herominers.com:1180` — NXDOMAIN.
     pub fn pools(self) -> &'static [(&'static str, &'static str)] {
         match self {
             Coin::Ergo => &[
-                ("2miners", "ergo.2miners.com:6060"),
                 ("herominers", "de.ergo.herominers.com:1180"),
                 ("woolypooly", "pool.woolypooly.com:3100"),
             ],
-            Coin::Alephium => &[
-                ("2miners", "alephium.2miners.com:2020"),
-                ("herominers", "de.alephium.herominers.com:1190"),
-            ],
-            Coin::Ravencoin => &[
-                ("2miners", "rvn.2miners.com:6060"),
-                ("herominers", "de.rvn.herominers.com:1180"),
-            ],
+            // No live Alephium pool survived the 2026-11-28 check.
+            Coin::Alephium => &[],
+            Coin::Ravencoin => &[("2miners", "rvn.2miners.com:6060")],
+        }
+    }
+
+    /// Can a miner in this build actually mine this coin?
+    ///
+    /// The curated list must only offer coins that can run: an option that can
+    /// never produce a share is worse than no option, because the operator
+    /// configures it, restarts, and gets silence. lolMiner 1.98a refuses
+    /// `--algo ALEPHIUM` outright (measured 2026-11-28: `Error: --algo option
+    /// "ALEPHIUM" is not supported`), and Alephium's own GPU miner is a
+    /// different binary this build does not ship or supervise.
+    pub fn available(self) -> bool {
+        match self {
+            Coin::Ergo | Coin::Ravencoin => true,
+            Coin::Alephium => false,
         }
     }
 
@@ -219,6 +239,13 @@ pub fn validate_card(c: &CardConfig) -> Result<(), String> {
             c.coin
         )
     })?;
+    if !coin.available() {
+        return Err(format!(
+            "`{}` cannot be mined by this build: no second-coin miner it ships has that \
+             algorithm (lolMiner has none for Alephium). Choose ergo or ravencoin.",
+            coin.as_str()
+        ));
+    }
     coin.validate_address(&c.address)?;
     if !coin.pools().iter().any(|(_, url)| url == &c.pool) {
         return Err(format!(
@@ -262,7 +289,7 @@ pub fn coin_fits(total_vram_gb: f64, coin: Coin) -> bool {
 pub fn available_coins(total_vram_gb: f64) -> Vec<Coin> {
     [Coin::Ergo, Coin::Alephium, Coin::Ravencoin]
         .into_iter()
-        .filter(|c| coin_fits(total_vram_gb, *c))
+        .filter(|c| c.available() && coin_fits(total_vram_gb, *c))
         .collect()
 }
 
@@ -849,7 +876,7 @@ mod tests {
             device: 0,
             coin: "ergo".into(),
             address: "9f4QF8Rn5wLhVvjP3g2Kp8sVnTq7YbWc1xZmAoE5rtyAbCdEfGh".into(),
-            pool: "ergo.2miners.com:6060".into(),
+            pool: "de.ergo.herominers.com:1180".into(),
             intensity_percent: 30,
         }
     }
@@ -907,22 +934,46 @@ mod tests {
         c.pool = "ergo.example-attacker.com:3333".into();
         let err = validate_card(&c).unwrap_err();
         assert!(err.contains("curated"), "{err}");
-        assert!(err.contains("2miners"), "the choices must be listed: {err}");
+        assert!(
+            err.contains("herominers") && err.contains("woolypooly"),
+            "the choices must be listed: {err}"
+        );
     }
 
     #[test]
     fn the_same_card_cannot_be_configured_twice() {
         let a = ergo_card();
         let mut b = a.clone();
-        b.coin = "alephium".into();
-        b.address = "1DrEeC9Y7dGVaFhKnmPqRsTuVwXyZaBcDeFgH".into();
-        b.pool = "alephium.2miners.com:2020".into();
+        b.coin = "ravencoin".into();
+        b.address = "RTestAddrForDupCheck123456789abcde".into();
+        b.pool = "rvn.2miners.com:6060".into();
         b.device = 0;
         let st = SecondaryState {
             enabled: true,
             cards: vec![a, b],
         };
         assert!(st.validate().unwrap_err().contains("twice"));
+    }
+
+    #[test]
+    fn alephium_is_refused_because_no_shipped_miner_can_mine_it() {
+        let mut c = ergo_card();
+        c.coin = "alephium".into();
+        c.address = "1DrEeC9Y7dGVaFhKnmPqRsTuVwXyZaBcDeFgH".into();
+        c.pool = "de.alephium.herominers.com:1190".into();
+        let err = validate_card(&c).unwrap_err();
+        assert!(err.contains("cannot be mined by this build"), "{err}");
+        assert!(!available_coins(24.0).contains(&Coin::Alephium));
+    }
+
+    #[test]
+    fn every_curated_pool_is_non_empty_and_reachable_by_shape() {
+        // Row 294: the list is what the dashboard offers, so an empty coin list
+        // here means "we advertise a coin nobody can mine".
+        for coin in [Coin::Ergo, Coin::Alephium, Coin::Ravencoin] {
+            assert_eq!(coin.pools().is_empty(), !coin.available(), "{coin:?}");
+        }
+        assert_eq!(Coin::Ergo.pools().len(), 2);
     }
 
     #[test]
@@ -941,10 +992,13 @@ mod tests {
     }
 
     #[test]
-    fn an_8gb_card_is_offered_ergo_and_alephium_but_not_ravencoin() {
+    fn an_8gb_card_is_offered_ergo_but_not_alephium_or_ravencoin() {
         let coins = available_coins(8.0);
         assert!(coins.contains(&Coin::Ergo));
-        assert!(coins.contains(&Coin::Alephium));
+        assert!(
+            !coins.contains(&Coin::Alephium),
+            "nothing this build ships can mine Alephium (row 294, measured 2026-11-28)"
+        );
         assert!(
             !coins.contains(&Coin::Ravencoin),
             "8 GB cannot hold GPN 2.0 + RVN 4.0 + a model 2.0"
@@ -952,8 +1006,10 @@ mod tests {
     }
 
     #[test]
-    fn a_12gb_card_is_offered_all_three() {
-        assert_eq!(available_coins(12.0).len(), 3);
+    fn a_12gb_card_is_offered_ergo_and_ravencoin() {
+        let coins = available_coins(12.0);
+        assert_eq!(coins.len(), 2, "{coins:?}");
+        assert!(coins.contains(&Coin::Ravencoin));
     }
 
     #[test]
@@ -1005,7 +1061,7 @@ mod tests {
         let joined = argv.join(" ");
         for needle in [
             "--coin ergo",
-            "--pool ergo.2miners.com:6060",
+            "--pool de.ergo.herominers.com:1180",
             "--address 9f4QF8Rn5wLhVvjP3g2Kp8sVnTq7YbWc1xZmAoE5rtyAbCdEfGh",
             "--device 0",
             "--intensity-percent 30",

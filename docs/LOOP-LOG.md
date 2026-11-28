@@ -1,3 +1,27 @@
+## 04:5x UTC / 20:5x PT — §3b 294: real card + real pool; the curated pool list was dead, fixed; box still open
+
+- **A0 CI:** origin/main HEAD `a117234c` (design doc) ⇒ `?head_sha=<full 40>` **total_count 0** — docs-only,
+  expected under `ci.yml` paths-ignore. Nothing red, nothing waited on.
+- **§3b 294, box NOT ticked**, but three defects found by putting it on real hardware, all fixed:
+  1. **Curated pool list was fiction.** Verified live today: `ergo.2miners.com:6060` refuses on all four A
+     records from this host AND from box 1 (SSH, `Net.Sockets.TcpClient`) — `:3333` there is another coin and
+     answers `Invalid address` to an Ergo payout; `alephium.2miners.com:2020` is NXDOMAIN (Google + Cloudflare);
+     `de.alephium.herominers.com:1190` closed; `de.rvn.herominers.com:1180` NXDOMAIN. Only herominers Ergo
+     (:1180) and woolypooly (:3100) work — both proved by a stratum authorize + a `mining.notify` job for our
+     own generated Ergo address (`9gmrKSEn…faiNLe`, key local, 0600).
+  2. **lolMiner has no Alephium algorithm** (`Error: --algo option "ALEPHIUM" is not supported`), so the
+     dashboard was offering a coin nothing could mine. `Coin::available()` now marks Alephium unavailable —
+     `available_coins()` never offers it, `validate_card` refuses it with the reason, and the wrapper dies
+     `miner-not-supported` (exit 4, quoted in the status file). Filed as row 306 rather than dropped.
+  3. Wrapper duty cycle proven against a real miner: 30 % / 20 s window drove lolMiner on/off, status file
+     carried lolMiner's own `Connected to: de.ergo.herominers.com:1180` lines, kill ⇒ `pool-disconnected`.
+- **Still open on hardware:** lolMiner builds the Ergo DAG (`completed (10070 ms)`) then `Unrecoverable memory
+  error by GPU 0` (1.88) / `error in allocating memory 0` (1.98a) — factory-OC 4060 also holding an ollama
+  context. §8 criteria 1–4 need a card that can hash and a node restart; next run: box 1's idle GPU, or a
+  lowered memory clock here (root — owner).
+- Tests: `cargo test --lib secondary` 22 passed · `cargo test --lib gui` 19 passed · `cargo fmt --all --check`
+  clean · CI's exact `CLIPPY_ALLOWS` + `-D warnings` clean.
+
 ## 05:2x UTC / 21:2x PT — §3b 294 P1 LANDED (box open): second coin is config + supervisor + dashboard, tested; no real card/pool yet
 
 - **A0 CI:** HEAD `f50b2702` is a docs-only checklist commit ⇒ `?head_sha=<full 40>` **total_count 0**

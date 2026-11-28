@@ -986,12 +986,16 @@ mod tests {
         };
         let src = || json!({"peers": 3, "gpu_vram_gb": 8.0});
 
-        // Off by default, and an 8 GB card is offered ergo + alephium only.
+        // Off by default, and an 8 GB card is offered ergo only: Alephium has no
+        // miner in this build (row 294) and Ravencoin's 4 GB DAG does not fit.
         let r = handle("GET", "/api/secondary", "", &src, &o, 100);
         assert_eq!(r.code, 200);
         let body = r.body;
         assert!(body.contains("\"ergo\""), "{body}");
-        assert!(body.contains("\"alephium\""), "{body}");
+        assert!(
+            !body.contains("\"alephium\""),
+            "an option no shipped miner can run must not be offered: {body}"
+        );
         assert!(
             !body.contains("\"ravencoin\""),
             "an 8 GB card must not be offered a 4 GB second DAG: {body}"
@@ -1002,7 +1006,7 @@ mod tests {
         let bad = json!({"enabled": true, "cards": [{
             "device": 0, "coin": "ergo",
             "address": "9f4QF8Rn5wLhVvjP3g2Kp8sVnTq7YbWc1xZmAoE5rtyAbCdEfGh",
-            "pool": "ergo.2miners.com:6060", "intensity_percent": 90
+            "pool": "de.ergo.herominers.com:1180", "intensity_percent": 90
         }]})
         .to_string();
         let r = handle("POST", "/api/secondary", &bad, &src, &o, 100);
@@ -1013,14 +1017,14 @@ mod tests {
         let good = json!({"enabled": true, "cards": [{
             "device": 0, "coin": "ergo",
             "address": "9f4QF8Rn5wLhVvjP3g2Kp8sVnTq7YbWc1xZmAoE5rtyAbCdEfGh",
-            "pool": "ergo.2miners.com:6060", "intensity_percent": 30
+            "pool": "de.ergo.herominers.com:1180", "intensity_percent": 30
         }]})
         .to_string();
         let r = handle("POST", "/api/secondary", &good, &src, &o, 100);
         assert_eq!(r.code, 200, "{}", r.body);
         assert!(r.body.contains("\"enabled\":true"), "{}", r.body);
         let saved = std::fs::read_to_string(dir.join("secondary.json")).unwrap();
-        assert!(saved.contains("ergo.2miners.com:6060"), "{saved}");
+        assert!(saved.contains("de.ergo.herominers.com:1180"), "{saved}");
 
         let _ = std::fs::remove_dir_all(&dir);
     }
