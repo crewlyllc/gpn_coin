@@ -148,3 +148,22 @@ Worth saying plainly: the deterrent is that **every request is attributable** �
 a provider, a timestamp, retained for the stated window, and answerable under process. The watermark
 is how an artifact found in the wild is linked back to that record. Both are needed; neither is
 sufficient.
+
+---
+
+## 9. OWNER DECISIONS (2026-11-27 20:33)
+
+- **Retention: 12 months.** The job registry keeps `job_id → {requester, provider, model, prompt
+  hash, created_at}` for one year — long enough to answer a complaint filed much later, and it sets
+  the floor for the audio tag table (§4) and for what the docs may promise.
+- **No abuse-response process until a policy exists.** Nobody answers a lawful request today, and
+  **therefore we must not claim anywhere that we can.** Until a policy is written:
+
+  - public docs say artifacts carry a mark with a job id, and that the mark can be verified;
+  - public docs do **not** say "requests can be traced to a user" or "we cooperate with law
+    enforcement" — both would be untrue today;
+  - the registry is readable only by the admin, for triage, and resolution of an id to an address is
+    never exposed by an API.
+
+A promise of traceability with no one to answer it is worse than silence: it invites reliance we
+cannot honour. The mark and the registry can be built now; the *claim* waits for the policy.
