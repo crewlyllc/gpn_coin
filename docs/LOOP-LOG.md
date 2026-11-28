@@ -1,3 +1,30 @@
+## 21:1x PT — §3b 294 criterion 5 measured on metal: Ergo's DAG no longer fits an 8 GB card; the catalogue number was fiction
+
+- **A0 CI:** origin/main HEAD `b1f68af5` ⇒ CI run **46109558101** `pending` at the time of asking (not
+  waited on). Newer runs for `51ede9bd`/`0a468ab0`/`be1cc056` read `completed / cancelled` — each push
+  supersedes the last, so the runner has been churning; my own fix commit `631a8beb` carries run
+  **46110624518** (`pending`, a code change, so CI is expected).
+- **§3b 294 — box stays open, but criterion 5 is now real.** On the 4060 at Ergo height 1,926,374 with
+  the node resident (5.91 GiB free): lolMiner **1.98a** ⇒ `GPU 0: error in allocating memory 0 .`, **1.88**
+  ⇒ `Unrecoverable memory error by GPU 0.`, and `nvidia-smi memory.used` never rose above 1,718 MiB — the
+  DAG is a single allocation that is refused, not a slow ramp. An independent `torch.empty` on the same
+  card allocated **5.5 GiB** and failed at **6.3 GiB**, so the free VRAM is real and Ergo's DAG is
+  > 5.9 GiB. The design table's 2.2 GB was stale.
+- **Fix (`631a8beb`, pushed once):** `Coin::dag_gb(Ergo) 2.2 → 6.5` with the measurement in the doc
+  comment; 8 GB now offers **no** second coin, 12/16 GB offer ergo + ravencoin. Corrected a second false
+  claim: lolMiner 1.98a **does** support Alephium (`--list-algos` ⇒ `ALEPH  Blake3-Alephium`); the old
+  "no algorithm" came from `--algo ALEPHIUM`. Alephium stays unoffered because every curated pool refused
+  or NXDOMAIN on 2026-11-28 (six candidates probed), and the refusal message now says that, not "miner".
+- **Evidence:** `cargo test --lib secondary` **23 passed / 0 failed**; `cargo test --lib gui` **19 passed**
+  (new: 8 GB offers nothing; 12 GB and 16 GB offer ergo+ravencoin; dashboard test covers both cards);
+  CI's exact clippy flag set clean; `cargo fmt --all -- --check` clean.
+- **Venue for criteria 1–4:** box 1's GPU is an **RTX 5070 Ti, 16,303 MiB** (`nvidia-smi` over SSH,
+  read-only). 0.95 × 16.3 = 15.5 GB ≥ 2.0 + 6.5 + 2.0, so it fits — they wait on a 0.3.85 agent on box 1,
+  not on a decision. `docs/NEEDS-TRIAGE.md` ROW-294-hardware marked answered by measurement.
+- **Ticked:** no boxes (294 stays open on criteria 1–4); evidence appended to its notes. No [TRIAGE].
+- **Next run:** A0 asks once for `46110624518`; then §3 bump/lockstep boxes (tree already at 0.3.85,
+  `lockstep 15`) and the §5 builds dispatched from a `build/<sha12>` tag, run ended on dispatch.
+
 ## 04:5x UTC / 20:5x PT [TRIAGE] — §3b 294: real card + real pool; the curated pool list was dead, fixed; box still open
 
 - **Handle (do not poll):** pushed `0a468ab0`, CI run **46109494428** (this is a code change, so CI runs).
