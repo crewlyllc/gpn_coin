@@ -1,3 +1,31 @@
+## 05:2x UTC / 21:2x PT — §3b 294 P1 LANDED (box open): second coin is config + supervisor + dashboard, tested; no real card/pool yet
+
+- **A0 CI:** HEAD `f50b2702` is a docs-only checklist commit ⇒ `?head_sha=<full 40>` **total_count 0**
+  (expected under `ci.yml` paths-ignore). Nothing red, nothing waited on.
+- **§3b 294 first slice, test-first, box deliberately NOT ticked** — its five §8 acceptance criteria need a
+  real 8 GB card and a real pool, and lolMiner is not installed here. What landed:
+  `gpn-agent/src/secondary.rs` (coin catalogue with DAG sizes, per-card config, curated pools only, address
+  shape check at entry, intensity 5–50 default 30, atomic `~/.gpn/secondary.json`, VRAM fit rule
+  `0.95 × nominal ≥ 2.0 + DAG + 2.0 GB` so an 8 GB card is offered ergo/alephium and **not** ravencoin,
+  `pause_reason()` on the same `~/.gpn/gpu-yield` + idle.json the GPN miner parks for, and a `Supervisor`
+  that starts one child per card **in its own process group** — pause is SIGSTOP on the group, because a
+  bare-pid stop would leave the wrapper's lolMiner hashing while the dashboard said "paused").
+  Wired into `gpn_node` as the `gpn-secondary` thread (5 s reconcile, startup line
+  `[secondary] device 0 ergo, intensity 30%, paused=false`), `scripts/second-miner-lolminer.sh` as the argv
+  contract with intensity as a **duty cycle** (measured `on=600ms off=1400ms` for 30 % of 2×1000 ms),
+  `GET/POST /api/secondary` + the dashboard panel, and the conditional **Other earnings** panel.
+- **Evidence:** `cargo test --lib secondary` **20/20**; `cargo test --lib gui` **19/19** incl. the new
+  enable-from-dashboard test (8 GB ⇒ ergo+alephium only, intensity 90 ⇒ 400); whole crate `cargo test --lib`
+  **837 passed / 0 failed**; CI's exact clippy allow-list + `-D warnings` clean; `cargo fmt --check` clean;
+  `bump-version.py --check` ⇒ lockstep 15. One transient: `disabling_stops_every_card` failed once under
+  parallel load and passed alone and in three consecutive full-module runs afterwards — noted, not explained.
+- **Honest limits written into the box:** no real-card/no-pool run, and the address check catches wrong-coin /
+  truncated / non-base58, not a single flipped character (the pool is the arbiter; the panel shows its line).
+- **Next run:** lolMiner on the 4060 box → §8 criteria 1 (enable, restart, startup log), 2 (job stops both
+  miners inside the lease bound, timestamps), 3 (kill the second miner: GPN keeps mining and the panel says
+  `pool-disconnected`), 4 (earnings separation), 5 (unfit card not offered).
+- No blockers, no [TRIAGE].
+
 ## 04:0x UTC / 20:0x PT — §3b 299 TICKED: both mirror provenance bundles verify OK for a stranger
 
 - **A0 CI:** HEAD `6e56a5dc` (docs-only LOOP-LOG commit) ⇒ `?head_sha=<full 40>` **total_count 0** — expected

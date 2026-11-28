@@ -76,6 +76,21 @@
   .refsub a{color:#22d3ee}
   .refsub.bad{color:var(--amber)}
 
+  /* Second coin (row 294) — the operator's own coin, never GPN's numbers. */
+  .secgrid{display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:12px;align-items:end}
+  .secgrid label{display:flex;flex-direction:column;gap:6px;font-size:13px;color:var(--muted)}
+  .secgrid input[type=text],.secgrid select{
+    background:var(--panel);border:1px solid var(--line);border-radius:var(--radius-sm);
+    color:var(--text);font-family:var(--font);font-size:14px;padding:9px 10px;
+  }
+  .secgrid input[type=text]{font-family:var(--mono);font-size:13px}
+  .secgrid .row{display:flex;gap:10px;align-items:center;color:var(--text);font-size:14px}
+  .secgrid button{background:var(--grad);border:0;color:#08101a;font-weight:800;
+    border-radius:var(--radius-sm);padding:11px 18px;font-size:14px;cursor:pointer;font-family:var(--font)}
+  .secgrid button:disabled{opacity:.5;cursor:not-allowed}
+  .secstate{font-family:var(--mono);font-size:13px;color:var(--muted)}
+  .secstate b{color:var(--text);font-weight:650}
+  .secstate .bad{color:var(--amber)}
   fieldset{border:0;padding:0;margin:0 0 16px}
   legend{font-size:13px;color:var(--muted);padding:0;margin-bottom:8px}
   .durs{display:flex;flex-wrap:wrap;gap:8px}
@@ -227,6 +242,37 @@
     </div>
     <p class="refsub" id="refLink" hidden></p>
     <p class="refsub" id="refNote">&nbsp;</p>
+  </section>
+
+  <section class="idlebox" id="secBox" hidden aria-labelledby="secH">
+    <div class="idlehead">
+      <h2 id="secH">Second coin — your own, beside GPN</h2>
+      <span class="pill" id="secPill"><span class="dot" aria-hidden="true"></span><span id="secPillText">off</span></span>
+    </div>
+    <p class="explain">
+      Mine a second coin on the same card while GPN works. It runs at reduced intensity and
+      <b>stops for every AI job</b>. The payout address is yours: these rewards never count as GPN
+      earnings and never enter the airdrop record. Only coins whose DAG fits this card are listed.
+    </p>
+    <div class="secgrid">
+      <label class="row"><input type="checkbox" id="secEnable"> Enable concurrent mining</label>
+      <label>Coin<select id="secCoin"></select></label>
+      <label>Pool<select id="secPool"></select></label>
+      <label>Intensity (share of the card)<select id="secInt"></select></label>
+      <label>Payout address<input type="text" id="secAddr" placeholder="paste the coin's own address" spellcheck="false"></label>
+      <div><button id="secSave" type="button">Save</button></div>
+    </div>
+    <p class="secstate" id="secStatus">&nbsp;</p>
+  </section>
+
+  <section aria-labelledby="otherH" id="otherEarn" hidden>
+    <h2 id="otherH">Other earnings</h2>
+    <p class="explain">Rewards from the second coin and from staking, kept separate from GPN's own
+      earnings. This panel appears only while one of them is active.</p>
+    <div class="grid">
+      <div class="card"><div class="k">Second coin</div><div class="v" id="otherCoin">—</div><div class="s" id="otherCoinSub">&nbsp;</div></div>
+      <div class="card"><div class="k">Staking</div><div class="v" id="otherStake">—</div><div class="s">&nbsp;</div></div>
+    </div>
   </section>
 
   <section aria-labelledby="procH">
@@ -539,6 +585,124 @@
       .catch(function (e) { msg("Request failed: " + e.message, "err"); });
   });
 
+  /* ---- second coin (row 294) ------------------------------------------
+     The choices come back from /api/secondary, which reads the same file the
+     supervisor acts on — so the dashboard can only ever show a configuration
+     that is really saved, and the running state comes from the supervisor's
+     own status file, never from what the browser last sent. */
+  var secData = null;
+
+  function secCard() {
+    if (!secData) return null;
+    var saved = (secData.cards && secData.cards[0]) ? secData.cards[0] : null;
+    return saved || { device: 0, coin: (secData.available_coins[0] || {}).coin, address: "", pool: "", intensity_percent: secData.default_intensity };
+  }
+
+  function renderSecondary(j) {
+    secData = j;
+    var box = $("secBox");
+    if (!j || !j.available_coins || j.available_coins.length === 0) {
+      // No card that can hold a second DAG: do not offer what cannot fit.
+      box.hidden = true;
+      $("otherEarn").hidden = true;
+      return;
+    }
+    box.hidden = false;
+    var card = secCard();
+    var coinSel = $("secCoin");
+    coinSel.innerHTML = "";
+    j.available_coins.forEach(function (c) {
+      var o = document.createElement("option");
+      o.value = c.coin;
+      o.textContent = c.coin.charAt(0).toUpperCase() + c.coin.slice(1) + "  (DAG " + c.dag_gb + " GB)";
+      coinSel.appendChild(o);
+    });
+    coinSel.value = card.coin || j.available_coins[0].coin;
+    fillPools();
+    coinSel.onchange = function () { fillPools(); };
+
+    var intSel = $("secInt");
+    intSel.innerHTML = "";
+    for (var p = j.min_intensity; p <= j.max_intensity; p += 5) {
+      var o = document.createElement("option");
+      o.value = p;
+      o.textContent = p + " %" + (p === j.default_intensity ? "  (default)" : "");
+      intSel.appendChild(o);
+    }
+    intSel.value = card.intensity_percent || j.default_intensity;
+    $("secEnable").checked = !!j.enabled;
+    if (document.activeElement !== $("secAddr")) $("secAddr").value = card.address || "";
+
+    var live = (j.status && j.status.cards) || [];
+    if (!j.enabled) {
+      $("secPill").className = "pill";
+      text($("secPillText"), "off");
+    } else if (live.length === 0) {
+      $("secPill").className = "pill";
+      text($("secPillText"), "enabled · waiting for the supervisor");
+    } else {
+      $("secPill").className = "pill" + (live[0].state === "paused-for-job" || live[0].state === "paused-idle" ? " idle" : "");
+      text($("secPillText"), live[0].state);
+    }
+    $("secStatus").innerHTML = live.length === 0
+      ? "&nbsp;"
+      : live.map(function (c) {
+          var line = "<b>device " + c.device + " · " + (c.coin || "?") + " · " + c.state + "</b> (" +
+                     c.intensity_percent + " % · " + fmtDur(c.for_secs) + ")" +
+                     (c.detail ? ' <span class="bad">' + c.detail + "</span>" : "");
+          return line;
+        }).join("<br>");
+
+    // "Other earnings" exists only while a second coin (or staking) is on.
+    var other = $("otherEarn");
+    other.hidden = !(j.enabled && live.length > 0);
+    if (!other.hidden) {
+      text($("otherCoin"), live.map(function (c) { return (c.coin || "?") + " · " + c.state; }).join(", "));
+      text($("otherCoinSub"), "paid to your address, separate from GPN earnings");
+      text($("otherStake"), "not active");
+    }
+  }
+
+  function fillPools() {
+    var coin = $("secCoin").value;
+    var entry = (secData.available_coins || []).filter(function (c) { return c.coin === coin; })[0];
+    var sel = $("secPool");
+    sel.innerHTML = "";
+    ((entry && entry.pools) || []).forEach(function (p) {
+      var o = document.createElement("option");
+      o.value = p.url;
+      o.textContent = p.name + " · " + p.url;
+      sel.appendChild(o);
+    });
+    var card = secCard();
+    if (card && card.pool && card.coin === coin) sel.value = card.pool;
+  }
+
+  function loadSecondary() {
+    fetch("/api/secondary", { cache: "no-store" })
+      .then(function (r) { if (!r.ok) throw new Error("HTTP " + r.status); return r.json(); })
+      .then(function (j) { renderSecondary(j.secondary); })
+      .catch(function () { /* the main poll already reports a dead dashboard */ });
+  }
+
+  $("secSave").addEventListener("click", function () {
+    var card = {
+      device: 0,
+      coin: $("secCoin").value,
+      address: $("secAddr").value.trim(),
+      pool: $("secPool").value,
+      intensity_percent: parseInt($("secInt").value, 10)
+    };
+    $("secSave").disabled = true;
+    post("/api/secondary", { enabled: $("secEnable").checked, cards: [card] })
+      .then(function (r) {
+        if (r.ok) { msg("Second coin saved — the supervisor applies it within 5 s.", "ok"); renderSecondary(r.body.secondary); }
+        else { msg((r.body && r.body.error) || ("request failed (HTTP " + r.code + ")"), "err"); }
+        $("secSave").disabled = false;
+      })
+      .catch(function (e) { msg("Request failed: " + e.message, "err"); $("secSave").disabled = false; });
+  });
+
   // Local countdown between polls (the server is still the source of truth).
   setInterval(function () {
     if (!remaining) return;
@@ -550,7 +714,9 @@
   }, 1000);
 
   poll();
+  loadSecondary();
   setInterval(poll, 3000);
+  setInterval(loadSecondary, 5000);
 })();
 </script>
 </body>

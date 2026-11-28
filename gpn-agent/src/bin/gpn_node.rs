@@ -3744,23 +3744,25 @@ fn status_line(cfg: &Config, shared: &Shared) -> String {
 ///
 /// `GPUMonitor` falls back to a placeholder when no tool answers, so an
 /// "Unknown GPU" is reported as *not detected* rather than as hardware.
-fn gpu_summary() -> (String, String) {
+fn gpu_summary() -> (String, String, f64) {
     let Ok(mon) = gpn_agent::gpu::GPUMonitor::new() else {
-        return ("not detected".into(), String::new());
+        return ("not detected".into(), String::new(), 0.0);
     };
     match mon.get_gpu_info() {
         Ok(info) if info.model_name != "Unknown GPU" => {
             let used = info.vram_used_mb;
             let total = info.vram_total_bytes / (1024 * 1024);
+            let total_gb = info.vram_total_bytes as f64 / (1024.0 * 1024.0 * 1024.0);
             (
                 info.model_name,
                 format!(
                     "VRAM {used}/{total} MiB · {}% util · {}C",
                     info.gpu_utilization_percent, info.temperature_celsius as u32
                 ),
+                total_gb,
             )
         }
-        _ => ("not detected".into(), String::new()),
+        _ => ("not detected".into(), String::new(), 0.0),
     }
 }
 
@@ -3894,7 +3896,7 @@ fn status_doc(cfg: &Config, shared: &Shared) -> serde_json::Value {
     let idle_active = idle.is_some();
     // Mining is on when the node is up, not idle, and not in version standby.
     let mining = node_up && !idle_active && !cfg.standby;
-    let (gpu, vram) = gpu_summary();
+    let (gpu, vram, vram_gb) = gpu_summary();
     // One GPU, one job: the provider holds this flag for a job's whole duration.
     let job_running = gpn_agent::gpu_yield::yield_flag_path().exists();
     // Row 275: the canary proves itself in two steps — running the new version,
@@ -3930,6 +3932,9 @@ fn status_doc(cfg: &Config, shared: &Shared) -> serde_json::Value {
         "standby": cfg.standby,
         "gpu": gpu,
         "vram": vram,
+        // Nominal card VRAM in GB — the second-coin fit rule is computed from
+        // this in the dashboard (row 294: an unfit card is never offered a coin).
+        "gpu_vram_gb": vram_gb,
         "current_job": job,
         "models": ollama_models(&cfg.ollama),
         "children": children,
@@ -5369,6 +5374,72 @@ async fn main() {
         auto_cfg.minutes
     );
 
+    // Secondary coin mining (row 294) — the operator's own second coin beside
+    // GPN. One child per enabled card, stopped whenever a GPN AI job or an
+    // operator idle window owns the GPU (the SAME `~/.gpn/gpu-yield` flag and
+    // idle.json the GPN miner itself parks for, so the two can never disagree
+    // about who owns the card). Configured from the dashboard; the choices live
+    // in ~/.gpn/secondary.json and the live state in secondary-status.json.
+    let secondary_handle = {
+        let sec_stop = shutdown.clone();
+        std::thread::Builder::new()
+            .name("gpn-secondary".into())
+            .spawn(move || {
+                use gpn_agent::secondary as sec;
+                let mut sup = sec::Supervisor::new(sec::default_miner());
+                let mut last_err = String::new();
+                let mut announced_off = false;
+                while !sec_stop.load(Ordering::SeqCst) {
+                    let now = sec::now();
+                    match sec::read_state() {
+                        Ok(st) => {
+                            last_err.clear();
+                            if st.enabled || !st.cards.is_empty() {
+                                let pause = sec::pause_reason(
+                                    sec::yield_flag_path().exists(),
+                                    gpn_agent::idle::is_idle(),
+                                );
+                                for line in sup.reconcile(&st, pause, now) {
+                                    asciiprintln!("[secondary] {line}");
+                                }
+                            } else if !announced_off {
+                                // Say it once at startup so the log answers
+                                // "is dual mining on?" without the dashboard.
+                                announced_off = true;
+                                asciiprintln!(
+                                    "[secondary] off — no second coin configured \
+                                     (dashboard ▸ Mining ▸ Second coin)"
+                                );
+                            }
+                            let _ = sec::write_status_at(&sec::status_path(), &sup.status(now));
+                        }
+                        Err(e) => {
+                            // A corrupt config is said out loud once, never
+                            // silently treated as "off" (that would mine the
+                            // wrong coin or none while the file says otherwise).
+                            if e != last_err {
+                                asciieprintln!(
+                                    "[secondary] {e} — no second coin will run until it parses"
+                                );
+                                last_err = e;
+                            }
+                        }
+                    }
+                    // 5 s: fast enough to pause before an AI job's first token,
+                    // cheap enough to read two small files.
+                    let mut left = Duration::from_secs(5);
+                    while left > Duration::ZERO && !sec_stop.load(Ordering::SeqCst) {
+                        let step = Duration::from_millis(200).min(left);
+                        std::thread::sleep(step);
+                        left = left.saturating_sub(step);
+                    }
+                }
+                for line in sup.shutdown() {
+                    asciiprintln!("[secondary] {line}");
+                }
+            })
+            .ok()
+    };
     // Local dashboard (opt-in). A dashboard failure must never take the node
     // down: bind errors are a warning, and the supervisor keeps supervising.
     let gui_handle = if cfg.gui {
@@ -5377,6 +5448,7 @@ async fn main() {
             force_idle: cfg.force_idle,
             idle_path: None,
             auto_idle: Some(auto_shared.clone()),
+            secondary_path: None,
         };
         let src_cfg = cfg.clone();
         let src_shared = shared.clone();
@@ -5449,6 +5521,9 @@ async fn main() {
     let _ = status_handle.join();
     let _ = watchdog_handle.join();
     let _ = selfheal_handle.join();
+    if let Some(h) = secondary_handle {
+        let _ = h.join();
+    }
     if let Some(h) = updater_handle {
         let _ = h.join();
     }

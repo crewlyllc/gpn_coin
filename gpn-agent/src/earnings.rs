@@ -23,6 +23,13 @@
 //!
 //! Both return an error, which the panel renders as a dash with the reason.
 //! It never subtracts spends and calls the remainder "earnings".
+//!
+//! **What is deliberately not here (row 294/295):** a second coin's rewards and
+//! Solana staking rewards. Those are paid to the operator's own addresses, not
+//! to this node's GPN account, so the chain free-balance delta above cannot see
+//! them — by construction, not by a filter. The dashboard shows them in a
+//! separate "Other earnings" panel fed by `secondary-status.json` and the stake
+//! account, and nothing in this module or the airdrop export reads either.
 
 use std::path::{Path, PathBuf};
 

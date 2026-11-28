@@ -102,6 +102,8 @@ pub struct GuiOptions {
     /// Auto-idle toggle + last reading, when the sampler thread is running.
     /// `None` in tests and in supervisors without the sampler.
     pub auto_idle: Option<Arc<AutoIdleShared>>,
+    /// Second-coin state file (row 294). `None` → [`secondary::state_path`].
+    pub secondary_path: Option<PathBuf>,
 }
 
 impl Default for GuiOptions {
@@ -111,6 +113,7 @@ impl Default for GuiOptions {
             force_idle: force_idle_env(),
             idle_path: None,
             auto_idle: None,
+            secondary_path: None,
         }
     }
 }
@@ -204,6 +207,56 @@ fn idle_json(path: &std::path::Path, now: u64) -> Value {
     }
 }
 
+/// The second-coin block for the dashboard (row 294): the operator's saved
+/// choices, the coins this card may be offered, and what each miner is doing
+/// right now. Read from files, never from GUI state — the supervisor is the
+/// only writer of the status file, so the dashboard cannot show a second
+/// miner that is not actually running.
+fn secondary_json(vram_gb: f64, now: u64, state_path: Option<&std::path::Path>) -> Value {
+    use crate::secondary as sec;
+    let state = state_path
+        .map(sec::read_state_at)
+        .unwrap_or_else(sec::read_state)
+        .unwrap_or_default();
+    let status = sec::read_status();
+    let cards: Vec<Value> = status
+        .cards
+        .iter()
+        .map(|c| {
+            json!({
+                "device": c.device,
+                "coin": c.coin,
+                "state": c.state,
+                "pid": c.pid,
+                "intensity_percent": c.intensity_percent,
+                "since": c.since,
+                "for_secs": now.saturating_sub(c.since),
+                "detail": c.detail,
+            })
+        })
+        .collect();
+    let coins: Vec<Value> = sec::available_coins(vram_gb)
+        .into_iter()
+        .map(|c| {
+            json!({
+                "coin": c.as_str(),
+                "dag_gb": c.dag_gb(),
+                "pools": c.pools().iter().map(|(n, u)| json!({"name": n, "url": u})).collect::<Vec<_>>(),
+            })
+        })
+        .collect();
+    json!({
+        "enabled": state.enabled,
+        "cards": state.cards,
+        "vram_gb": vram_gb,
+        "available_coins": coins,
+        "min_intensity": sec::MIN_INTENSITY,
+        "max_intensity": sec::MAX_INTENSITY,
+        "default_intensity": sec::DEFAULT_INTENSITY,
+        "status": {"updated": status.updated, "cards": cards},
+    })
+}
+
 /// Pure request router: `(status_code, content_type, body)`.
 ///
 /// `now` is injected so the auto-resume boundary is testable.
@@ -230,6 +283,14 @@ pub fn handle(
                 obj.insert("durations".into(), json!([30, 60, 120, 240, 360]));
                 obj.insert("force_idle".into(), json!(opts.force_idle));
                 obj.insert("version".into(), json!(env!("CARGO_PKG_VERSION")));
+                let vram_gb = obj
+                    .get("gpu_vram_gb")
+                    .and_then(Value::as_f64)
+                    .unwrap_or(0.0);
+                obj.insert(
+                    "secondary".into(),
+                    secondary_json(vram_gb, now, opts.secondary_path.as_deref()),
+                );
                 obj.insert(
                     "dashboard".into(),
                     json!({"listen": opts.listen, "loopback": true}),
@@ -359,6 +420,66 @@ pub fn handle(
             )
         }
 
+        // ── second coin (row 294) ──────────────────────────────────────────
+        // GET returns the saved state + the live status; POST replaces the
+        // operator's choices (validated here, so the API can never accept what
+        // the supervisor would refuse to run).
+        ("GET", "/api/secondary") => {
+            let vram_gb = source
+                .status()
+                .get("gpu_vram_gb")
+                .and_then(Value::as_f64)
+                .unwrap_or(0.0);
+            Reply::json(
+                200,
+                json!({"ok": true, "secondary": secondary_json(vram_gb, now, opts.secondary_path.as_deref())}),
+            )
+        }
+        ("POST", "/api/secondary") => {
+            use crate::secondary as sec;
+            let sec_path = opts.secondary_path.clone().unwrap_or_else(sec::state_path);
+            let parsed: Value =
+                match serde_json::from_str(if body.trim().is_empty() { "{}" } else { body }) {
+                    Ok(v) => v,
+                    Err(e) => return Reply::error(400, format!("invalid JSON body: {e}")),
+                };
+            let enabled = parsed
+                .get("enabled")
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
+            let cards: Vec<sec::CardConfig> = match parsed.get("cards") {
+                Some(Value::Array(a)) => {
+                    match serde_json::from_value::<Vec<sec::CardConfig>>(Value::Array(a.clone())) {
+                        Ok(v) => v,
+                        Err(e) => return Reply::error(400, format!("cards: {e}")),
+                    }
+                }
+                None => Vec::new(),
+                _ => return Reply::error(400, "\"cards\" must be a list"),
+            };
+            let state = sec::SecondaryState { enabled, cards };
+            if let Err(e) = state.validate() {
+                return Reply::json(400, json!({"ok": false, "error": e}));
+            }
+            if let Err(e) = sec::write_state_at(&sec_path, &state) {
+                return Reply::error(500, e);
+            }
+            println!(
+                "[gui] second coin: {} — {} card(s) (supervisor applies within 5 s)",
+                if enabled { "enabled" } else { "disabled" },
+                state.cards.len()
+            );
+            let vram_gb = source
+                .status()
+                .get("gpu_vram_gb")
+                .and_then(Value::as_f64)
+                .unwrap_or(0.0);
+            Reply::json(
+                200,
+                json!({"ok": true, "secondary": secondary_json(vram_gb, now, opts.secondary_path.as_deref())}),
+            )
+        }
+
         ("GET", _) | ("POST", _) => Reply::error(404, format!("no route for {method} {path}")),
         _ => Reply::error(
             405,
@@ -471,6 +592,7 @@ mod tests {
             force_idle: false,
             idle_path: Some(dir.join("idle.json")),
             auto_idle: None,
+            secondary_path: Some(dir.join("secondary.json")),
         }
     }
 
@@ -851,6 +973,56 @@ mod tests {
             handle("GET", "/api/status?x=1", "", &source(Some(1)), &o, 1).code,
             200
         );
+    }
+
+    #[test]
+    fn second_coin_can_be_enabled_from_the_dashboard_and_is_validated() {
+        let dir = std::env::temp_dir().join(format!("gpn-gui-sec-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let o = GuiOptions {
+            secondary_path: Some(dir.join("secondary.json")),
+            ..Default::default()
+        };
+        let src = || json!({"peers": 3, "gpu_vram_gb": 8.0});
+
+        // Off by default, and an 8 GB card is offered ergo + alephium only.
+        let r = handle("GET", "/api/secondary", "", &src, &o, 100);
+        assert_eq!(r.code, 200);
+        let body = r.body;
+        assert!(body.contains("\"ergo\""), "{body}");
+        assert!(body.contains("\"alephium\""), "{body}");
+        assert!(
+            !body.contains("\"ravencoin\""),
+            "an 8 GB card must not be offered a 4 GB second DAG: {body}"
+        );
+        assert!(body.contains("\"enabled\":false"), "{body}");
+
+        // An intensity outside the safe band is refused with a reason.
+        let bad = json!({"enabled": true, "cards": [{
+            "device": 0, "coin": "ergo",
+            "address": "9f4QF8Rn5wLhVvjP3g2Kp8sVnTq7YbWc1xZmAoE5rtyAbCdEfGh",
+            "pool": "ergo.2miners.com:6060", "intensity_percent": 90
+        }]})
+        .to_string();
+        let r = handle("POST", "/api/secondary", &bad, &src, &o, 100);
+        assert_eq!(r.code, 400, "{}", r.body);
+        assert!(r.body.contains("intensity"), "{}", r.body);
+
+        // A valid choice is saved (the supervisor picks it up from the file).
+        let good = json!({"enabled": true, "cards": [{
+            "device": 0, "coin": "ergo",
+            "address": "9f4QF8Rn5wLhVvjP3g2Kp8sVnTq7YbWc1xZmAoE5rtyAbCdEfGh",
+            "pool": "ergo.2miners.com:6060", "intensity_percent": 30
+        }]})
+        .to_string();
+        let r = handle("POST", "/api/secondary", &good, &src, &o, 100);
+        assert_eq!(r.code, 200, "{}", r.body);
+        assert!(r.body.contains("\"enabled\":true"), "{}", r.body);
+        let saved = std::fs::read_to_string(dir.join("secondary.json")).unwrap();
+        assert!(saved.contains("ergo.2miners.com:6060"), "{saved}");
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

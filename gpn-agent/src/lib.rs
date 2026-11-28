@@ -50,6 +50,7 @@ pub mod provider_policy;
 pub mod provider_watchdog;
 pub mod referral;
 pub mod routing;
+pub mod secondary;
 pub mod seedlist;
 /// Self-heal on chain divergence (#157): the check, the ledger and the
 /// recovery sequence, shared by the CLI and the supervisors that schedule it.
