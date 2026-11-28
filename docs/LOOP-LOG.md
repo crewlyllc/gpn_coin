@@ -1,3 +1,18 @@
+## 17:58 PT 0.3.84 filed — release checklist archived, INDEX row + GPN-LIST pointers written
+
+- **A0:** `origin/main` = `94826713` ⇒ `GET /actions/runs?head_sha=948267137ba5bd58c336c4078bd3ec80d1e2bd9c`
+  ⇒ `total_count: 0` — docs-only commit, expected under `ci.yml` `paths-ignore`. Nothing red.
+- **§0b filing (first unticked box, both filing boxes done in one step):**
+  `git mv docs/releases/0.3.84.md docs/releases/archive/0.3.84.md`; `docs/releases/INDEX.md` now has
+  `| 0.3.84 | 2026-11-27 | 289, 290, 291, 292, 293 | archive/0.3.84.md |` at the top of the table
+  (33 archived checklists, 33 INDEX rows — `comm -13` of the two sets is empty); `GPN-LIST.md` rows
+  289-293 carry `COMPLETE 0.3.84 — archive/0.3.84.md`.
+- Live surfaces re-read this run: `releases.json` 0.3.84 `published_at 2026-11-27T23:42:43Z`;
+  `canary.json` `{"version":"0.3.84","ok":true,"job_served":true,"job_id":6604,"failed_at":0}`.
+- Checklist: §0b both boxes ticked with notes; remaining **§0e stranger lifecycle (3)** and
+  **§10b timing (2)**. Row 273 stays IN-PROGRESS (day 7 = 2026-12-02).
+- No blockers, no [TRIAGE] items.
+
 ## 17:44 PT 0.3.84 §10 final box ticked — rows 289-293 marked DONE with live evidence; filing + timing left
 
 - **A0:** `origin/main` = `bf1526d6` ⇒ `GET /actions/runs?head_sha=bf1526d6072381a7e8256d86ca5d57c6722ac400`
