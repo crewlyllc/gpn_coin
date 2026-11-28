@@ -527,6 +527,32 @@ mkdir -p ~/gpn &amp;&amp; tar -xzf gpn-linux.tar.gz -C ~/gpn &amp;&amp; cd ~/gpn
 </main>
 
 
+
+<section class="section" id="old-gpu">
+  <div class="wrap">
+    <h2>Even your old GPU can run AI on GPN</h2>
+    <p class="lede">GPN runs on consumer graphics cards, not datacenter silicon. The floor is a
+      <b>discrete GPU at 250 GFLOPS</b> — which includes cards from around 2014 onward.</p>
+    <div class="grid cols-3">
+      <div class="card"><h3>4–6 GB</h3>
+        <p class="muted">Mines GPN and can serve the smallest models (0.5B–1B). A GTX 970 mines today;
+          a 4 GB card runs <code>qwen2.5:0.5b</code>.</p></div>
+      <div class="card"><h3>8 GB and up</h3>
+        <p class="muted">Mines and serves comfortably — the honest recommendation. RX 580 and newer
+          handle <code>llama3.2:1b</code> with room to spare.</p></div>
+      <div class="card"><h3>Integrated graphics</h3>
+        <p class="muted">Cannot. It sits below the eligibility floor, and the node says so instead of
+          pretending.</p></div>
+    </div>
+    <p class="small muted" style="margin-top:14px">Old cards are welcome. The thing that breaks them
+      is not age, it is a stale OpenCL driver: if the node says <code>GPU DAG build failed</code>,
+      update the driver before blaming the card. And an old card earns slowly — GPN pays per block,
+      and a 2014 card competes with 2024 cards.</p>
+    <p><a class="btn" href="download">Install a node</a>
+       <a class="btn ghost" href="docs/run-a-node">What the node needs</a></p>
+  </div>
+</section>
+
 <section class="section" id="learn-more">
   <div class="wrap">
     <h2>Start from where you are</h2>
