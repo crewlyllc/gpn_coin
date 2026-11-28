@@ -1,3 +1,18 @@
+## 17:44 PT 0.3.84 §10 final box ticked — rows 289-293 marked DONE with live evidence; filing + timing left
+
+- **A0:** `origin/main` = `bf1526d6` ⇒ `GET /actions/runs?head_sha=bf1526d6072381a7e8256d86ca5d57c6722ac400`
+  ⇒ `total_count: 0` — docs-only commit (`docs/LOOP-LOG.md` + `docs/releases/0.3.84.md`), expected under
+  `ci.yml` `paths-ignore`; nothing red, nothing waited on.
+- **§10 box 3 (mark task rows DONE):** rows **289, 290, 291, 292, 293** now read
+  `DONE 2026-11-27 (0.3.84, build sha bd36c4f9)` with the evidence line. Re-verified live in this run
+  rather than copying the checklist: `https://gpncoin.ai/releases.json` ⇒ `"version": "0.3.84"`,
+  `"published_at": "2026-11-27T23:42:43Z"`; `https://gpncoin.ai/canary.json` ⇒
+  `{"version":"0.3.84","ok":true,"job_served":true,"job_id":6604,"failed_at":0}`; this host RPC
+  `system_version` ⇒ `"0.3.84"`.
+- Row **273** (seven-day soak) stays IN-PROGRESS on purpose — its box ticks day 7, 2026-12-02.
+- Checklist tally **55/62**. Remaining: §10b timing (2), §0b filing (2), §0e stranger lifecycle (3).
+- No blockers, no [TRIAGE] items.
+
 ## 17:20 PT 0.3.84 §10 box 2 ticked — peers held 88 min, one genesis-mismatch ban only, forks stayed linked
 
 - **A0:** `origin/main` = `fba165cb` ⇒ `GET /actions/runs?head_sha=fba165cb6000f416d1ee5de63ec93641c7e3411e` ⇒
