@@ -195,6 +195,85 @@ mkdir -p ~/gpn &amp;&amp; tar -xzf gpn-linux.tar.gz -C ~/gpn &amp;&amp; cd ~/gpn
     </div>
   </section>
 
+
+<section class="section" id="start">
+  <div class="wrap">
+    <h2>Three ways to start, in order of effort</h2>
+    <div class="grid cols-3">
+      <div class="card">
+        <h3>1 · Use the AI — 0 minutes</h3>
+        <p class="muted">An OpenAI-compatible endpoint on the live testnet. Free, no API key, no
+          signup, no node. Try it in the browser or from curl.</p>
+        <p><a class="btn small" href="chat">Open the chat</a> <a href="ai">API</a></p>
+      </div>
+      <div class="card">
+        <h3>2 · Run a node — 10 minutes</h3>
+        <p class="muted">One paste installs ollama, a wallet, the miner and the AI provider. Your GPU
+          mines GPN and serves jobs between blocks — one card, one job at a time.</p>
+        <p><a class="btn small" href="download">Install</a> <a href="index#old-gpu">Will my GPU work?</a></p>
+      </div>
+      <div class="card">
+        <h3>3 · Build on it — an afternoon</h3>
+        <p class="muted">Jobs, artifacts and escrow are a small API. Point an existing OpenAI client at
+          it, or submit a job and poll for the result.</p>
+        <p><a class="btn small" href="docs">Docs</a> <a href="docs/technical-overview">Technical overview</a></p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section class="section" id="old-gpu">
+  <div class="wrap">
+    <h2>Even your old GPU can run AI on GPN</h2>
+    <p class="lede">GPN runs on consumer graphics cards, not datacenter silicon. The floor is a
+      <b>discrete GPU at 250 GFLOPS</b> — which includes cards from around 2014 onward.</p>
+    <div class="grid cols-3">
+      <div class="card"><h3>4–6 GB</h3>
+        <p class="muted">Mines GPN and can serve the smallest models (0.5B–1B). A GTX 970 mines today;
+          a 4 GB card runs <code>qwen2.5:0.5b</code>.</p></div>
+      <div class="card"><h3>8 GB and up</h3>
+        <p class="muted">Mines and serves comfortably — the honest recommendation. RX 580 and newer
+          handle <code>llama3.2:1b</code> with room to spare.</p></div>
+      <div class="card"><h3>Integrated graphics</h3>
+        <p class="muted">Cannot. It sits below the eligibility floor, and the node says so instead of
+          pretending.</p></div>
+    </div>
+    <p class="small muted" style="margin-top:14px">Old cards are welcome. The thing that breaks them
+      is not age, it is a stale OpenCL driver: if the node says <code>GPU DAG build failed</code>,
+      update the driver before blaming the card. And an old card earns slowly — GPN pays per block,
+      and a 2014 card competes with 2024 cards.</p>
+    <p><a class="btn" href="download">Install a node</a>
+       <a class="btn ghost" href="docs/run-a-node">What the node needs</a></p>
+  </div>
+</section>
+
+<section class="section" id="requirements">
+  <div class="wrap">
+    <h2>Minimum hardware</h2>
+    <p class="lede">These are the numbers the node enforces or needs to run — not a wish list. A
+      machine below them will say why it cannot serve rather than fail quietly.</p>
+    <table class="dir-table">
+      <thead><tr><th>Component</th><th>Minimum</th><th>Recommended</th><th>Why</th></tr></thead>
+      <tbody>
+        <tr><td><b>GPU</b></td><td>Discrete card, <b>250 GFLOPS</b> FP32</td><td>Any 8 GB card from the last five years</td>
+            <td>Hard eligibility floor in the runtime (<code>MinEligibilityGflops</code>); integrated graphics cannot clear it</td></tr>
+        <tr><td><b>VRAM</b></td><td><b>4 GB</b></td><td><b>8 GB</b></td>
+            <td>Mining DAG is ~1 GB (epoch 0); a 0.5B model needs ~1 GB more. 8 GB lets a 1B–7B model run while the node keeps its buffers</td></tr>
+        <tr><td><b>RAM</b></td><td>8 GB</td><td>16 GB</td><td>Chain node + provider + ollama; the model is loaded by ollama, not the node</td></tr>
+        <tr><td><b>Disk</b></td><td>20 GB free</td><td>50 GB free</td><td>Current chain DB is ~400 MB with pruning on, but updates keep the previous version and ollama models are 1–8 GB each</td></tr>
+        <tr><td><b>OS</b></td><td>Windows 10 1809+ / Ubuntu 22.04+</td><td>Current release of either</td><td>The installer needs PowerShell 5.1 on Windows and systemd on Linux</td></tr>
+        <tr><td><b>Software</b></td><td><b>Ollama</b> (the installer fetches it)</td><td>—</td><td>A node that cannot serve AI is not a node: <code>gpn_node</code> exits 69 without ollama</td></tr>
+        <tr><td><b>Network</b></td><td>Outbound 443</td><td>Port 30333 reachable (forward, UPnP, or a public address)</td><td>Every node can join behind NAT; only a reachable node is dialable and can become backbone</td></tr>
+      </tbody>
+    </table>
+    <p class="small muted" style="margin-top:14px">A 4 GB card mines and can serve the smallest models.
+      A 10-year-old card is welcome; a stale OpenCL driver is what usually breaks one, not the card.
+      Expect an old card to earn slowly — GPN pays per block.</p>
+    <p><a class="btn" href="download">Install a node</a>
+       <a class="btn ghost" href="docs/run-a-node">Run-a-node guide</a></p>
+  </div>
+</section>
+
   <!-- ============ PROBLEM ============ -->
   <section id="problem">
     <div class="wrap">
@@ -529,57 +608,9 @@ mkdir -p ~/gpn &amp;&amp; tar -xzf gpn-linux.tar.gz -C ~/gpn &amp;&amp; cd ~/gpn
 
 
 
-<section class="section" id="requirements">
-  <div class="wrap">
-    <h2>Minimum hardware</h2>
-    <p class="lede">These are the numbers the node enforces or needs to run — not a wish list. A
-      machine below them will say why it cannot serve rather than fail quietly.</p>
-    <table class="dir-table">
-      <thead><tr><th>Component</th><th>Minimum</th><th>Recommended</th><th>Why</th></tr></thead>
-      <tbody>
-        <tr><td><b>GPU</b></td><td>Discrete card, <b>250 GFLOPS</b> FP32</td><td>Any 8 GB card from the last five years</td>
-            <td>Hard eligibility floor in the runtime (<code>MinEligibilityGflops</code>); integrated graphics cannot clear it</td></tr>
-        <tr><td><b>VRAM</b></td><td><b>4 GB</b></td><td><b>8 GB</b></td>
-            <td>Mining DAG is ~1 GB (epoch 0); a 0.5B model needs ~1 GB more. 8 GB lets a 1B–7B model run while the node keeps its buffers</td></tr>
-        <tr><td><b>RAM</b></td><td>8 GB</td><td>16 GB</td><td>Chain node + provider + ollama; the model is loaded by ollama, not the node</td></tr>
-        <tr><td><b>Disk</b></td><td>20 GB free</td><td>50 GB free</td><td>Current chain DB is ~400 MB with pruning on, but updates keep the previous version and ollama models are 1–8 GB each</td></tr>
-        <tr><td><b>OS</b></td><td>Windows 10 1809+ / Ubuntu 22.04+</td><td>Current release of either</td><td>The installer needs PowerShell 5.1 on Windows and systemd on Linux</td></tr>
-        <tr><td><b>Software</b></td><td><b>Ollama</b> (the installer fetches it)</td><td>—</td><td>A node that cannot serve AI is not a node: <code>gpn_node</code> exits 69 without ollama</td></tr>
-        <tr><td><b>Network</b></td><td>Outbound 443</td><td>Port 30333 reachable (forward, UPnP, or a public address)</td><td>Every node can join behind NAT; only a reachable node is dialable and can become backbone</td></tr>
-      </tbody>
-    </table>
-    <p class="small muted" style="margin-top:14px">A 4 GB card mines and can serve the smallest models.
-      A 10-year-old card is welcome; a stale OpenCL driver is what usually breaks one, not the card.
-      Expect an old card to earn slowly — GPN pays per block.</p>
-    <p><a class="btn" href="download">Install a node</a>
-       <a class="btn ghost" href="docs/run-a-node">Run-a-node guide</a></p>
-  </div>
-</section>
 
-<section class="section" id="old-gpu">
-  <div class="wrap">
-    <h2>Even your old GPU can run AI on GPN</h2>
-    <p class="lede">GPN runs on consumer graphics cards, not datacenter silicon. The floor is a
-      <b>discrete GPU at 250 GFLOPS</b> — which includes cards from around 2014 onward.</p>
-    <div class="grid cols-3">
-      <div class="card"><h3>4–6 GB</h3>
-        <p class="muted">Mines GPN and can serve the smallest models (0.5B–1B). A GTX 970 mines today;
-          a 4 GB card runs <code>qwen2.5:0.5b</code>.</p></div>
-      <div class="card"><h3>8 GB and up</h3>
-        <p class="muted">Mines and serves comfortably — the honest recommendation. RX 580 and newer
-          handle <code>llama3.2:1b</code> with room to spare.</p></div>
-      <div class="card"><h3>Integrated graphics</h3>
-        <p class="muted">Cannot. It sits below the eligibility floor, and the node says so instead of
-          pretending.</p></div>
-    </div>
-    <p class="small muted" style="margin-top:14px">Old cards are welcome. The thing that breaks them
-      is not age, it is a stale OpenCL driver: if the node says <code>GPU DAG build failed</code>,
-      update the driver before blaming the card. And an old card earns slowly — GPN pays per block,
-      and a 2014 card competes with 2024 cards.</p>
-    <p><a class="btn" href="download">Install a node</a>
-       <a class="btn ghost" href="docs/run-a-node">What the node needs</a></p>
-  </div>
-</section>
+
+
 
 <section class="section" id="learn-more">
   <div class="wrap">
