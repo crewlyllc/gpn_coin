@@ -8,6 +8,46 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 versions are [Semantic Versioning](https://semver.org/spec/v2.0.0.html), with
 the GPN-specific meaning of each level documented in `docs/updates.md`.
 
+## [0.3.85] - 2026-11-27
+
+Bumped from 0.3.84 (`scripts/bump-version.py patch`). A **batch** cut under the batch policy
+(owner, 2026-11-25): five items were waiting and none is on the critical list (nobody is locked
+out of peering/registration and AI keeps working), so they ship together instead of costing five
+fleet-wide restarts. Three are defects found by measurement; two are the owner's 2026-11-27
+feature requests, which open here and are worked box by box in `docs/releases/0.3.85.md`.
+
+### Fixed
+- **The Windows "refuse an install older than published" guard actually runs** (row 297). The
+  guard shipped in row 247 compares the published version with the binaries in `C:\gpn\bin` by
+  reading their version resource — but the released `gpn-node.exe` carried none, so
+  `Get-InstalledNodeVersion` returned `$null` and the installer printed `version check skipped`
+  on every Windows machine it was meant to protect.
+- **The dependency audit is green on a dispatch run** (row 298). Twelve first-party crates
+  declared no licence, so `cargo-deny` answered `unlicensed`, and the Polkadot SDK's
+  `GPL-3.0-or-later WITH Classpath-exception-2.0` was not in the allow list. The job is
+  `continue-on-error`, which is exactly why a gate that never passed went un-noticed.
+- **Provenance on the mirror matches the artifact it sits beside** (row 299). `release-cut.sh`
+  mirrored only the Windows bundle, so `cosign verify-blob` on the linux mirror pair failed for
+  every stranger who checked it. Both pairs are now mirrored and digest-checked.
+
+### Added (in release)
+- **Dual mining v1 — Ergo and Alephium, chosen per card from the dashboard** (row 294). A second
+  miner at a conservative default intensity, paused for every AI job, with coin, payout address,
+  pool and intensity chosen per card; only coins whose DAG fits the card are offered, and
+  coin-B rewards never enter GPN's earnings or the airdrop export.
+- **Solana staking — delegate the node's own SOL, keys local, no third party** (row 295). Stake
+  account creation and delegation from the node's own keypair, validator commission and uptime
+  shown, and the real lock stated (rewards per epoch, deactivation 1-3 days) instead of a spinner.
+
+### Added
+- _TODO_
+
+### Changed
+- _TODO_
+
+### Fixed
+- _TODO_
+
 ## [0.3.84] - 2026-11-27
 
 Bumped from 0.3.83 (`scripts/bump-version.py patch`). A **batch** cut under the batch policy

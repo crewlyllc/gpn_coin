@@ -1,3 +1,29 @@
+## 18:2x PT — opened **0.3.85**: five NEW rows bundled (batch policy satisfied), checklist generated
+
+- **A0 CI:** `origin/main` = `64733cac540c792986f171c5cf9ad6997846961c` (the 18:20 audit commit) ⇒
+  `GET /actions/runs?head_sha=64733cac…` ⇒ `total_count: 0` — docs-only under `ci.yml` `paths-ignore`.
+  Nothing red, nothing in flight, nothing waited on.
+- **B (0.3.84 close-out) confirmed:** `docs/releases/archive/0.3.84.md` (57 ticked / 5 open, the open
+  five being the §0e stranger-lifecycle boxes and the §10b timing pair), `releases.json` serves
+  0.3.84 (`published_at 2026-11-27T23:42:43Z`), this host's RPC `system_version` ⇒ `0.3.84`.
+  Rows 289-293 normalised from the ad-hoc `DONE 2026-11-27 (0.3.84 …)` state to the list's own
+  `COMPLETE 0.3.84 (2026-11-27)` schema (evidence text untouched — never deleted).
+- **C: five NEW rows were waiting** — 294 (dual mining v1), 295 (Solana staking), 297 (the Windows
+  stale-install guard never runs), 298 (`cargo-deny` unlicensed / GPL allow list), 299 (mirror
+  served the previous release's linux provenance bundle). That is the batch policy's five, and none
+  is a critical-rule cut (no peering/registration lockout, AI still works), so they open together
+  rather than as five fleet restarts.
+- **Done this run:** `scripts/bump-version.py patch` ⇒ 0.3.85, `--check` ⇒ `lockstep: 15 manifest(s)
+  and 14 lockfile entr(ies) agree`; CHANGELOG `[0.3.85]` written for all five (three fixed, two
+  feature items opening in this release); rows 294/295/297/298/299 ⇒ IN-PROGRESS with a BUNDLED
+  note; `scripts/make-release-checklist.py 0.3.85` ⇒ `docs/releases/0.3.85.md` (6 in-progress
+  boxes incl. the long-running 273 soak, 5 blocked rows carried).
+- **Next run:** A0, then the FIRST unticked box of `docs/releases/0.3.85.md` (row 273's soak line
+  first — `docs/soak-2026-11-25.md` currently holds Day 1 (2026-11-25 23:57Z), Day 2
+  (2026-11-26 23:40Z) and Day 3 (2026-11-27 15:17Z) of 7, so the next box tick is the 2026-11-28
+  recording and the row cannot close before 2026-12-02).
+- No blockers, no [TRIAGE].
+
 ## 18:20 PT AUDIT — clean (2 disk actions, no faults)
 
 **Disk (measured first, as required):** `/` **84 G free / 19 %** at 18:04 → **112 G free / 26 %** at 18:14
