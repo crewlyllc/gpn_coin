@@ -1,3 +1,55 @@
+## 18:20 PT AUDIT — clean (2 disk actions, no faults)
+
+**Disk (measured first, as required):** `/` **84 G free / 19 %** at 18:04 → **112 G free / 26 %** at 18:14
+(`df -h /`). Below the 25 % line, so I cleaned immediately, cheapest first, nothing risky touched:
+
+1. `systemctl --user start gpn-ci-cache-prune.service` (guarded script, `pgrep -x cargo/rustc` both empty):
+   `[prune-ci-cache-daily] reclaimed 6655 MiB; cache now 92 GiB` (`.ci-cache` 99 G → 93 G; >7 d residue with
+   24 690 stale files remained after the 04:20 run's 3 070 MiB, so the second pass was worth it).
+2. `rm -rf ~/gpn-loop/gpn-agent/target/debug` (§3c step 1): **22 G → 0** (`target` 26 G → 4.1 G, release
+   artefacts untouched). Pre-checks: `pgrep -x cargo/rustc/cc1` empty, `lsof +D …/target/debug` empty.
+3. `/tmp` scratch dirs >3 d matching the safe names: **7.4 MB in 6 690 dirs** (all `gpn-gui-test-*` residue).
+   `find` after ⇒ 0 matching dirs.
+
+**Deliberately left, with sizes:** `~/.cache/huggingface/hub` **53 G** (LTX-Video 27 G, sdxl-turbo 13 G,
+sd-v1-5 6.0 G, sd-turbo 4.9 G, XTTS-v2 1.8 G — models, owner decision), `~/ollama/models` **8.1 G**,
+`~/.ci-cache` **93 G** remaining (owner decision), `~/.openclaw/workspace/shared` **15 G**,
+`~/actions-runner` 2.6 G. `/tmp` release-verification copies from today (`art084c2` 1.3 G, `gpn84` 984 M,
+`att84` 766 M, `r84` 242 M, `gpn-linux-0.3.84.tar.gz` 333 M ≈ 3.6 G) are **under 12 h old** with the Windows
+runner `busy: true` — re-downloadable but left per the 12 h rule; next audit should reclaim them.
+
+**Top five tenants now:** `.ci-cache` 93 G · `.cache` 54 G (hf 53 G) · `~/.openclaw/workspace` 15 G
+(shared 15 G) · `~/gpn-loop` 8.8 G · `~/ollama` 8.1 G. `~/.openclaw/agents/main/sessions` 373 M;
+**185 session files >30 d = 169 MiB** (reported, not deleted — they are the only transcript record).
+`cron/runs` 34 M, `plugin-runtime-deps` 1.5 G, `~/.openclaw/workspace/state` 28 M — all unchanged.
+
+**Units:** `systemctl --user list-units 'gpn*' --all` — 10 enabled services all `active/running`
+(fleet, accesspoint, provider, provider-heartbeat, oracle, explorer, faucet, diffusion, finetune,
+fleet-directive). No enabled-but-dead unit. `gpn-node.service` is `disabled/active-dead` by design
+(the supervisor runs the node). All 9 `gpn*` timers `waiting`, last runs succeeded (deploy-drift 18:00,
+canary-auto 18:00, cadence-gate 18:01, incident-alarm 18:06 `peers=4 height=376208 jobs_seen=256
+ok: no incident conditions`).
+
+**Ports:** 9944, 8092, 8093, 8099, 11434 all OPEN. `GET :8092/v1/models` serves 5 ollama models
+(deepseek-r1:14b/7b, llama3.2:1b, qwen2.5:0.5b/7b); dashboard `:8099` 200; heartbeat `:8093/health` 200.
+`free -h` available **23 Gi**; load 3.06; GPU RTX 4060 **1 617 / 8 188 MiB, 100 % util** (serving).
+
+**Chain:** `system_chain` "GPN Public Testnet", `system_version` **0.3.84**,
+`system_health` `{"peers":4,"isSyncing":false,"shouldHavePeers":true}`; height **375 687 → 376 207**
+across the audit (advancing). Fleet journal 300 lines: **0** panics / `Reason:` bans / restarts /
+`Incompatible pruning modes` / update failures. Box 1 over SSH: `(Get-Process gpn-node).Path` ⇒
+`C:\gpn\data\update\current\gpn-node.exe`, RPC `system_version` ⇒ **0.3.84**.
+
+**Updater:** `~/.gpn/update/update-attempts.json` last entry 0.3.84 `outcome: confirmed`, 1 attempt,
+`release_id 660f7585…`; `journalctl --user -u gpn-update` 15:49:38 `confirmed 0.3.84 is running`.
+Release loop cron `feff1358…`: last run `status: ok` 75 s (17:58 §0b filing).
+
+**Release record:** 33 archive files ↔ 33 `INDEX.md` rows, `comm -23`/`-13` both empty; rows 289-293
+`COMPLETE 0.3.84`; `releases.json version 0.3.84` (published_at 2026-11-27T23:42:43Z) == running node
+0.3.84 == box 1 0.3.84. No mismatch.
+
+No faults, nothing restarted, no [TRIAGE].
+
 ## 17:58 PT 0.3.84 filed — release checklist archived, INDEX row + GPN-LIST pointers written
 
 - **A0:** `origin/main` = `94826713` ⇒ `GET /actions/runs?head_sha=948267137ba5bd58c336c4078bd3ec80d1e2bd9c`
