@@ -1,3 +1,28 @@
+## 03:5x UTC / 19:5x PT — §3b 297 TICKED: the Windows stale-install guard now actually reads a version
+
+- **A0 CI:** HEAD `3c0f9cf9` is a docs-only LOOP-LOG commit ⇒ `?head_sha=<full 40>` **total_count 0**
+  (expected, no build). Newest code run `46101844034` (`adbdc9ea`) `pending`, `46097394596` (`9c7eafff`)
+  `in_progress`; `46084728291` (`f6feb493`) `success`. Nothing red, nothing waited on.
+- **§3b 297 TICKED** (row: the released `gpn-node.exe` carries no version resource, so
+  `Get-InstalledNodeVersion` returned `$null` and every Windows install printed `version check skipped`).
+  Took the *second* route in the row's "done when", so the fix also protects binaries already on
+  strangers' machines: `install.ps1`'s `BEGIN/END version-guard` block gained `ConvertFrom-NodeVersionOutput`
+  (strict parse) and `ReadVersionByRunning` (`--version`, 5 s bound, process killed on timeout, read as
+  unknown) and `Get-InstalledNodeVersion` falls through to it when `VersionInfo` is empty. Only
+  `gpn-node.exe` is asked — `gpn_node.exe` is the supervisor and its argv is never poked from an installer.
+- **Test first:** new case `version read by running the binary when metadata is empty` printed an empty
+  result before the fix (`FAIL … -- -> `), `-> 0.3.77` after. Two defects the *real machines* found that
+  Linux did not: the released exe prints **`gpn-node.exe 0.3.84`** (the `.exe` broke the first regex), and
+  `$IsWindows` is `$null` in PS 5.1, so the Linux-only test branch keyed on it ran on Windows — both fixed.
+- **Evidence:** Linux pwsh 7.4.6 `test-install-version-guard.ps1` **35 checks, 0 failed**. Box 1, PowerShell
+  **5.1.22621.4249**, read-only SSH: installed `C:\gpn\bin\gpn-node.exe` reports
+  `ProductVersion=[] FileVersion=[]` (premise confirmed on the box) and now reads **`0.3.84`**; a stale
+  0.3.75 is **refused** ("…would leave an OLD version running…"), the current 0.3.84 is allowed; full test
+  file there **24 checks, 0 failed** (shell-script fixtures skip on Windows by design). Temp dir removed.
+- **Next:** §3 bump/lockstep boxes are already satisfied in the tree (0.3.85, lockstep 15 manifests) and
+  need ticking with evidence; §3b still open: 273 (soak day 4/7, closes 2026-12-02), 294, 295 (unimplemented
+  features — the real remaining work), 299 (fixed in `4fdbd334`, needs its box ticked with evidence).
+
 ## 19:4x PT — §3b 298 TICKED: dependency audit green in both workspaces (exit 4 → exit 0)
 
 - **A0 CI:** HEAD `928e0bcb` (docs-only LOOP-LOG commit) ⇒ `?head_sha=<full>` **total_count 0** — expected,

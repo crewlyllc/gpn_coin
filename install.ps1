@@ -3554,6 +3554,55 @@ function ConvertTo-GpnVersion {
   try { return [version]$t } catch { return $null }
 }
 
+function ConvertFrom-NodeVersionOutput {
+  # 'gpn-node 0.3.85 (spec 55, c9e10f4)' -> 0.3.85. Anything else -> $null.
+  # Deliberately strict: only a line that starts with the binary's own name (with or without
+  # the .exe suffix -- the released 0.3.84 Windows binary prints `gpn-node.exe 0.3.84`, measured
+  # on box 1 2026-11-28), or a line that is nothing but a version, counts. An error message must
+  # never be read as a version.
+  param([string]$Text)
+  if (-not $Text) { return $null }
+  $m = [regex]::Match($Text, '(?m)^\s*(?:gpn-node|gpn_node)(?:\.exe)?\s+v?([0-9]+\.[0-9]+\.[0-9]+)')
+  if (-not $m.Success) {
+    $m = [regex]::Match($Text, '(?m)^\s*v?([0-9]+\.[0-9]+\.[0-9]+)\s*$')
+    if (-not $m.Success) { return $null }
+  }
+  return (ConvertTo-GpnVersion $m.Groups[1].Value)
+}
+
+function ReadVersionByRunning {
+  # Ask the binary itself. Row 297: the released gpn-node.exe carries NO version
+  # resource, so the file metadata answers $null on every real install and the guard
+  # printed "version check skipped" on the machines it exists to protect.
+  # Bounded on purpose: a binary that hangs, crashes or prints nothing must read as
+  # unknown, never stall the installer, and never be mistaken for a version.
+  param([string]$ExePath, [int]$TimeoutMs = 5000)
+  $psi = New-Object System.Diagnostics.ProcessStartInfo
+  $psi.FileName = $ExePath
+  $psi.Arguments = '--version'
+  $psi.UseShellExecute = $false
+  $psi.RedirectStandardOutput = $true
+  $psi.RedirectStandardError = $true
+  $psi.CreateNoWindow = $true
+  $proc = $null
+  try {
+    $proc = [System.Diagnostics.Process]::Start($psi)
+    if (-not $proc.WaitForExit($TimeoutMs)) {
+      Write-Host (" !  the installed gpn-node did not answer --version within {0}s -- treating its version as unknown" -f [int]($TimeoutMs / 1000)) -ForegroundColor Yellow
+      try { $proc.Kill() } catch { }
+      return $null
+    }
+    $out = $proc.StandardOutput.ReadToEnd()
+    $v = ConvertFrom-NodeVersionOutput $out
+    if ($v) { return $v }
+    return $null
+  } catch {
+    return $null
+  } finally {
+    if ($proc) { try { $proc.Dispose() } catch { } }
+  }
+}
+
 function Get-InstalledNodeVersion {
   # The version the binaries in $BinDir actually carry. $null = unknown, not "old".
   param([string]$BinDir)
@@ -3564,6 +3613,11 @@ function Get-InstalledNodeVersion {
     $v = ConvertTo-GpnVersion $raw
     if ($v) { return $v }
   }
+  # No version resource (the shipped case, row 297): ask the binary. Only gpn-node.exe --
+  # the chain node -- is asked. gpn_node.exe is the supervisor, and its argv handling must
+  # never be poked from an installer.
+  $v = ReadVersionByRunning $nodeExe
+  if ($v) { return $v }
   return $null
 }
 

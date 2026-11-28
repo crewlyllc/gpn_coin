@@ -104,6 +104,48 @@ Check $phraseBlock.Success 'VersionGuardRefusal phrase is declared' ($phraseBloc
 # message the function actually throws (case 1), not the source text
 Check ($err -like ('*' + $phraseBlock.Groups[1].Value + '*')) 'the thrown message contains the refusal phrase' ''
 
+# ---- 10. row 297: the released exe carries NO version resource ----------
+# Measured on the clean GPN-210 guest 2026-11-27: (Get-Item C:\gpn\bin\gpn-node.exe).VersionInfo
+# had neither ProductVersion nor FileVersion, so Get-InstalledNodeVersion returned $null and a
+# stale install printed "version check skipped". The guard has to ask the binary itself.
+# $IsWindows does not exist in Windows PowerShell 5.1 (it is $null, so `-not $IsWindows` is
+# TRUE on a real Windows box) -- key on the environment variable instead, which is set on both.
+$onWindows = ($env:OS -eq 'Windows_NT')
+if (-not $onWindows) {
+  $runDir = Join-Path ([IO.Path]::GetTempPath()) ("gpn-guard-run-" + [guid]::NewGuid().ToString('N'))
+  New-Item -ItemType Directory -Path $runDir | Out-Null
+  $runExe = Join-Path $runDir 'gpn-node.exe'
+  Set-Content -LiteralPath $runExe -Value "#!/bin/sh`necho 'gpn-node 0.3.77 (spec 55, abc1234)'" -NoNewline
+  & chmod +x $runExe
+  $vi = (Get-Item -LiteralPath $runExe).VersionInfo
+  Check (-not $vi.ProductVersion -and -not $vi.FileVersion) 'the fixture carries no version resource' 'same shape as the released exe'
+  $got = Get-InstalledNodeVersion $runDir
+  Check ("$got" -eq '0.3.77') 'version read by running the binary when metadata is empty' "-> $got"
+
+  $slowDir = Join-Path ([IO.Path]::GetTempPath()) ("gpn-guard-slow-" + [guid]::NewGuid().ToString('N'))
+  New-Item -ItemType Directory -Path $slowDir | Out-Null
+  $slowExe = Join-Path $slowDir 'gpn-node.exe'
+  Set-Content -LiteralPath $slowExe -Value "#!/bin/sh`nsleep 30" -NoNewline
+  & chmod +x $slowExe
+  $sw = [Diagnostics.Stopwatch]::StartNew()
+  $got = Get-InstalledNodeVersion $slowDir
+  $sw.Stop()
+  Check ($null -eq $got) 'a binary that never answers reads as unknown, not a hang' ('{0:N1}s' -f $sw.Elapsed.TotalSeconds)
+  Check ($sw.Elapsed.TotalSeconds -lt 20) 'the fallback is time-bounded' ('{0:N1}s' -f $sw.Elapsed.TotalSeconds)
+
+  # 'gpn-node.exe 0.3.84' is the exact string box 1's released Windows binary prints
+  # (measured 2026-11-28) -- the .exe suffix is why the first cut of this regex missed it.
+  foreach ($c in @(@('gpn-node 0.3.77', '0.3.77'), @('gpn-node 0.3.77 (spec 55, abc1234)', '0.3.77'), @("`r`n0.3.77`r`n", '0.3.77'), @('gpn-node.exe 0.3.84', '0.3.84'))) {
+    $p = ConvertFrom-NodeVersionOutput $c[0]
+    Check ("$p" -eq $c[1]) "ConvertFrom-NodeVersionOutput('$($c[0].Trim())')" "-> $p"
+  }
+  foreach ($junk in @('', 'gpn-node', 'error: unknown flag')) {    $p = ConvertFrom-NodeVersionOutput $junk
+    Check ($null -eq $p) "ConvertFrom-NodeVersionOutput('$junk') is null" ''
+  }
+} else {
+  Write-Host 'SKIP  row 297 fallback cases (fixtures are shell scripts, this is Windows)'
+}
+
 # ---- 9. the old fail-open shape is gone --------------------------------
 Check (-not ($text -match '\[version\]\(\$here -replace')) 'no unguarded [version] cast on the installed version' 'the old expression threw on +build'
 Check (-not ($text -match "\*older build\*")) 'no stale *older build* message match' 'it never matched the throw text'
