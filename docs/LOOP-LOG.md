@@ -24,6 +24,8 @@
 - **Next run:** lolMiner on the 4060 box → §8 criteria 1 (enable, restart, startup log), 2 (job stops both
   miners inside the lease bound, timestamps), 3 (kill the second miner: GPN keeps mining and the panel says
   `pool-disconnected`), 4 (earnings separation), 5 (unfit card not offered).
+- **Handle:** push `b6472a5e` ⇒ CI run **46107672010** (`pending` at 05:3xZ). Next run queries the full sha and
+  acts only on `conclusion`; a red lint/build is this row's box next, not a new one.
 - No blockers, no [TRIAGE].
 
 ## 04:0x UTC / 20:0x PT — §3b 299 TICKED: both mirror provenance bundles verify OK for a stranger
