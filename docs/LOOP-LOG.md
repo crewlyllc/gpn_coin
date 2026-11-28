@@ -1,4 +1,8 @@
-## 04:5x UTC / 20:5x PT — §3b 294: real card + real pool; the curated pool list was dead, fixed; box still open
+## 04:5x UTC / 20:5x PT [TRIAGE] — §3b 294: real card + real pool; the curated pool list was dead, fixed; box still open
+
+- **Handle (do not poll):** pushed `0a468ab0`, CI run **46109494428** (this is a code change, so CI runs).
+- **TRIAGE — ROW-294-hardware** in `docs/NEEDS-TRIAGE.md`: where to run §8's five criteria (box 1's idle GPU,
+  lowered memory clocks here with root, or a dedicated card). Recommendation: box 1.
 
 - **A0 CI:** origin/main HEAD `a117234c` (design doc) ⇒ `?head_sha=<full 40>` **total_count 0** — docs-only,
   expected under `ci.yml` paths-ignore. Nothing red, nothing waited on.
